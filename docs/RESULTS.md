@@ -40,6 +40,10 @@ The short version:
 | OpinionQA setting A test (486 questions), WD | uniform / position prior | 0.1779 [0.1716, 0.1844] / 0.1645 [0.1570, 0.1724] **(re-run)** | dongu `turlar/oqa_grup_A/test/OZET.md` |
 | same | TF-IDF kNN (k = 20) | test 0.1732 [0.1643, 0.1821], dev 0.1762 **(new)** | bench module run |
 | SimBench (20 datasets), S score | dev marginal / uniform | 9.51 [5.13, 13.86] / −0.59 **(new)**; published best (Claude-3.7-Sonnet) 40.80 | persona/kosul `kod/simbench/PROTOKOL.md`; bench module run |
+| SimBench full data (13,510 rows), S score, direct distribution, temperature 0 | Haiku 5.5 / **Sonnet 5.5** | 35.66 [33.02, 38.46] / **46.29 [43.60, 48.75]**, above the published best 40.80 (quoted, not a paired run) | persona/kosul `kod/simbench/SONUC.md` (66481eb), kanit `LIG.md` |
+| same, 15% stratified subset (2,027 rows) | Opus 5.5 | 52.14 [49.18, 54.85]; Opus − Sonnet on the subset +5.99 [4.29, 7.62] | same |
+| same | dev-fitted calibration | adds nothing: Sonnet +0.31 [−0.14, 0.77], Opus +0.11 [−0.57, 0.78] | same |
+| same, where the gain comes from | non-public-survey datasets | tie with Claude-3.7: 14 sets 27.95 vs 27.98 (3.7 values read off the paper's Fig. 3); the gain is in public surveys. No SimBench row memorization (0/327 probes); source-survey knowledge not tested | persona/kosul `kod/simbench/SONUC.md` (26e85b2), `arastirma/karsit/SIMBENCH-KARSIT-2.md` (11cbbed) |
 | CES 2020 → 2022 / 2024 opinion drift, W1 | mean shift / persistence / ABM μ=0 / bounded-confidence ABM | 0.111/0.131, 0.117/0.127, 0.126/0.129, 0.133/0.145; ABM − mean shift (2022) +0.023 [+0.012, +0.036] | makro `abm/RAPOR.md` (C2) |
 | same | LLM panel | 0.152 / 0.157 (loses to persistence) | makro `RAPOR.md` (C2) |
 
@@ -59,6 +63,7 @@ The short version:
 | same | Haiku persona panel / Opus 10-persona panel | 0.497-0.550 / 0.685 [0.633, 0.737] | deney `RAPOR.md` |
 | temporal split (newest 20% of tests) | TF-IDF Bradley-Terry | 0.758 [0.739, 0.777], 3,274 pairs **(re-run)** | deney `etki/kod/d1_sizinti.py`, `RAPOR.md` |
 | official holdout, FDR | TF-IDF Bradley-Terry | 0.800 [0.782, 0.819] **(re-run)** | same |
+| temporal league (test period later than the archive) | hybrid: Opus added to TF-IDF + bge | +0.041 [0.023, 0.059] accuracy; Opus alone does not beat TF-IDF + bge. **Memorization caveat:** Opus recognises Upworthy headlines (membership AUC 0.917) and loses 0.076 on paraphrases, so the hybrid gain is confounded with memorization | intent/gbdt `lig/upworthy_lig.json`, kanit `LIG.md` (probes) |
 | Turkish example test | panel mean favours A (0.84), no-persona arm B (0.65), swapped-persona arm B (0.94) | flagged low confidence | sahne `RAPOR.md` |
 
 ### LLM prior + early test (`methods.EarlyTestBayes`)
