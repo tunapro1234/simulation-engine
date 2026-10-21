@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simengine"
+version = "0.1.0"
+description = "Population simulation with LLM personas, agent-based models and an honest evidence pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pandas", "scikit-learn", "scipy"]
+
+[project.optional-dependencies]
+llm = ["anthropic>=2.0"]
+gbdt = ["lightgbm"]
+stats = ["statsmodels"]
+all = ["anthropic>=2.0", "lightgbm", "statsmodels"]
+
+[project.scripts]
+simengine = "simengine.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["simengine*"]
