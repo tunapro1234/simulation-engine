@@ -74,6 +74,21 @@ class TestStackCalibration(unittest.TestCase):
         sm = DevStack("multiclass").fit([P], ym)
         self.assertEqual(sm.dev_pred_.shape, (n, 3))
 
+    def test_dev_stack_multiclass_rare_class_missing_from_fold(self):
+        # class 2 appears once: at least four of five training folds miss it (fit used to raise a shape mismatch)
+        rs = np.random.default_rng(5)
+        n = 60
+        y = rs.integers(0, 2, n)
+        y[7] = 2
+        P = np.column_stack([(y == k) * 0.7 + 0.1 for k in range(3)])
+        P = P / P.sum(1, keepdims=True)
+        st = DevStack("multiclass").fit([P], y)
+        self.assertEqual(list(st.classes_), [0, 1, 2])
+        self.assertEqual(st.dev_pred_.shape, (n, 3))
+        self.assertAlmostEqual(float(st.dev_pred_[7, 2]), 0.0)
+        np.testing.assert_allclose(st.dev_pred_.sum(1), 1.0, atol=1e-9)
+        self.assertEqual(st.predict([P[:5]]).shape, (5, 3))
+
     def test_calibrator(self):
         rs = np.random.default_rng(3)
         p = rs.uniform(0.01, 0.99, 3000)

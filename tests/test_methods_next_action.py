@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from simengine.methods import (Markov2Baseline, NextActionRanker, add_history, build_features, hit_at_k,
-                               lightgbm_available, top1)
+                               lightgbm_available, negative_sample, top1)
 
 KEYS = ["search", "view", "cart", "pay", "back", "end"]
 NEXT = {("START", "START"): "search", "search": "view", "view": "cart", "cart": "pay", "pay": "end",
@@ -61,6 +61,18 @@ class TestNextAction(unittest.TestCase):
         te, s = r.score(self.te_s, self.te_c)
         te_m, s_m = Markov2Baseline().fit(self.tr_s, self.tr_c).score(self.te_s, self.te_c)
         self.assertGreater(hit_at_k(te, s)["hit@1"], hit_at_k(te_m, s_m)["hit@1"] - 0.05)
+        r3 = NextActionRanker(n_estimators=20, top=3, random=2, n_seeds=2).fit(self.tr_s, self.tr_c, numeric=["is_end"])
+        self.assertEqual(len(r3.models_), 2)
+        self.assertEqual(len(r3.score(self.te_s, self.te_c)[1]), len(te))
+
+    def test_negative_sample_keeps_non_click(self):
+        tr = pd.DataFrame({"ex": [0] * 6, "y": [1, 0, 0, 0, 0, 0], "f_page": [.9, .8, .1, .1, .1, .1],
+                           "f_markov": 0.0, "f_user": 0.0,
+                           "kind": ["click", "click", "click", "click", "terminate", "input"]})
+        out = negative_sample(tr, top=1, random=0)
+        self.assertEqual(sorted(out.index.tolist()), [0, 4, 5])
+        self.assertEqual(sorted(negative_sample(tr, top=1, random=0, keep_non_click=False).index.tolist()), [0])
+        self.assertEqual(len(negative_sample(tr.drop(columns="kind"), top=1, random=0)), 1)
 
 
 if __name__ == "__main__":

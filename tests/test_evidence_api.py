@@ -74,7 +74,7 @@ class TestEvaluate(unittest.TestCase):
         self.assertEqual(s["task"], "binary")
         self.assertIn(s["primary_metric"], ("accuracy", "macro_f1"))
         self.assertEqual(s["ours"]["column"], "tahmin_hybrid")
-        self.assertIn(s["badge"], ("high confidence", "inconclusive", "awaiting truth"))
+        self.assertIn(s["badge"], ("high confidence", "inconclusive", "below baseline", "awaiting truth"))
         statuses = {a["check"]: a["status"] for a in s["audits"]}
         self.assertEqual(statuses["grup çakışması (eğitim ∩ test)"], "ok")
         self.assertIsNone(s["ceiling"])                      # no retest column -> no ceiling

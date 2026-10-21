@@ -10,7 +10,7 @@ import pandas as pd
 from simengine.llm import FakeLLM
 from simengine.methods import (ABStack, EarlyTestBayes, LengthAB, LLMDirectAB, LogitAverageAB, TfidfAB,
                                TfidfWordAB, calibrate_prior, early_lor, equivalent_multiplier, posterior_lor,
-                               simulate_saving)
+                               simulate_saving, simulate_saving_calibrated)
 
 WORDS = ["river", "garden", "window", "letter", "bridge", "market", "winter", "silver", "forest", "engine"]
 HOOK = ["shocking", "secret", "unbelievable"]
@@ -122,6 +122,42 @@ class TestBayesPrior(unittest.TestCase):
         p = b.predict(prior[100:], np.full(200, 1), 100, np.full(200, 1), 100)
         self.assertGreater(np.mean((p > 0.5) == (lor[100:] > 0)), 0.7)
         self.assertEqual(b.decide(0.9, 1, 100, 1, 100), True)
+
+    @staticmethod
+    def _synthetic(n=120, seed=3):
+        rs = np.random.default_rng(seed)
+        base = rs.uniform(0.01, 0.03, n)
+        lor = rs.normal(0, 0.25, n)
+        ctr_b = 1 / (1 + np.exp(-(np.log(base / (1 - base)) - lor)))
+        prior = 1 / (1 + np.exp(-(lor + rs.normal(0, 0.15, n))))
+        return base, ctr_b, prior
+
+    def test_saving_rng_order_matches_research_script(self):
+        # reference: the human curve of ornek_tasarrufu_llm.py (all replays first, then the tie-break draws)
+        ctr_a, ctr_b, prior = self._synthetic()
+        ns, R = (50, 100, 200), 30
+        y = ctr_a > ctr_b
+        rs = np.random.default_rng(11)
+        sims = [(rs.binomial(n, ctr_a, size=(R, len(y))), rs.binomial(n, ctr_b, size=(R, len(y)))) for n in ns]
+        ref = []
+        for ca, cb in sims:
+            d = ca - cb
+            ref.append(float(np.mean(np.where(d == 0, rs.random(d.shape) < 0.5, d > 0) == y)))
+        r = simulate_saving(ctr_a, ctr_b, prior, ns=ns, reps=R)
+        self.assertEqual([r["human"][str(n)] for n in ns], ref)
+
+    def test_saving_calibrated_block_protocol(self):
+        ctr_a, ctr_b, prior = self._synthetic(n=200)
+        r = simulate_saving_calibrated(ctr_a, ctr_b, prior, n_calib=20, ns=(25, 50, 100, 200, 400), reps=20,
+                                       draws=2, n_boot=50)
+        self.assertEqual(r["n_calib"], 20)
+        self.assertGreater(r["hybrid"]["100"], r["human"]["100"])
+        self.assertGreaterEqual(r["human_decides_prior_breaks_ties"], r["human"]["100"] - 0.02)
+        self.assertTrue(r["multiplier"] is None or r["multiplier"] > 1)
+        if r["multiplier"] is not None and r["ci"][0] is not None:
+            self.assertLessEqual(r["ci"][0], r["ci"][1])
+        with self.assertRaises(ValueError):
+            simulate_saving_calibrated(ctr_a, ctr_b, prior, ns=(50, 200))
 
 
 if __name__ == "__main__":

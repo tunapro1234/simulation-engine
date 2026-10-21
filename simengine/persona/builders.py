@@ -38,7 +38,7 @@ class Mapping:
     fields: dict = field(default_factory=dict)           # talp_field -> column | (column, dict | fn | None) | fn(row)
     facets: dict = field(default_factory=dict)           # facet_name -> column | fn(row)
     text: dict = field(default_factory=dict)             # authored field -> fn(row) (template narrative, no LLM)
-    segment: str | Callable | None = None                # talp field name or fn(row)
+    segment: str | Callable | None = None                # talp field name, raw column name or fn(row)
     forbidden: list = field(default_factory=list)        # target/future columns: error if used as a facet
     locale: str = "en-US"
     source_name: str = "data"                            # evidence.measured_receipt contract_id
@@ -123,7 +123,16 @@ def from_row(row, mapping: Mapping) -> Persona:
     pid = str(get(mapping.id_col))
     authored = {k: f(row) for k, f in mapping.text.items()}
     seg = mapping.segment
-    segment = seg(row) if callable(seg) else cell.get(seg) if seg else None
+    if callable(seg):
+        segment = seg(row)
+    elif seg:
+        # a mapped TALP field (enum-checked) wins; otherwise the raw column, so `segment="region"` works and an
+        # out-of-enum value (dropped from the traits) still segments the panel
+        segment = cell.get(seg)
+        if _is_empty(segment):
+            segment = get(seg)
+    else:
+        segment = None
     return Persona.from_dict({
         "identity": {"persona_id": pid, "name": pid, "age_band": cell.get("age_band"), "gender": cell.get("gender"),
                      "locale": mapping.locale, "persona_mode": "b2c"},

@@ -66,7 +66,7 @@ class Loop:
                  max_turns: int | None = 12, budget_usd: float | None = None, alpha: float = 0.05,
                  baselines: dict[str, dict] | None = None, task: str = "", workdir: str | Path | None = None,
                  split_key: str = "split", dev_split: str = "dev", select_split: str | None = None,
-                 test_split: str = "test", fidelity_key: str = "fidelity", simpler_ties: bool = False,
+                 test_split: str = "test", fidelity_key: str = "fidelity", simpler_ties: bool = True,
                  ablation: bool = True, prereg: str | Path | None = None, seed: int = 42, n_boot: int = 1000,
                  check_runner: bool = True, verbose: bool = False, proposer_kw: dict | None = None):
         self.runner, self.space = runner, space
@@ -508,7 +508,14 @@ class Loop:
             "invalid_or_wasted_rate": rate, "proposer_failed": rate > 0.5,
             "dev_gain": (self.paired(winner["eval_key"], st["turns"][0]["eval_key"])
                          if winner["n"] != 0 else None),
+            "higher_is_better": bool(self.hib),
         }
+        g = fin["verdict"]["dev_gain"]
+        # dev_gain is winner - start in metric units; dev_improvement is the same in "positive = better" units
+        fin["verdict"]["dev_improvement"] = None if not g or g.get("diff") is None else (
+            {"diff": g["diff"], "lo": g["lo"], "hi": g["hi"]} if self.hib else
+            {"diff": -g["diff"], "lo": None if g.get("hi") is None else -g["hi"],
+             "hi": None if g.get("lo") is None else -g["lo"]})
         if winner["n"] == 0:
             fin["verdict"]["note"] = "no turn beat the start configuration on dev"
         st["final"] = fin
@@ -551,7 +558,8 @@ class Loop:
         L = [f"# Research loop journal", "",
              f"Primary metric `{P}` ({'higher' if self.hib else 'lower'} is better) on split `{self.dev}`; keep rule: "
              f"paired bootstrap {100 * (1 - self.alpha):.0f}% CI of the difference vs the current best excludes 0"
-             + (" (or a statistically tied, simpler config)" if self.simpler_ties else "") + f". Stop: "
+             + (" (or a statistically tied, simpler config)" if self.simpler_ties and self.space._complexity is not None
+                else "") + f". Stop: "
              f"{self.stop_after} consecutive non-kept turns, {self.max_turns} turns"
              + (f", ${self.budget_usd} proposer budget" if self.budget_usd is not None else "")
              + f". Proposer `{st['proposer']}`. Numbers are computed by the loop from per-unit scores; observer text is "

@@ -1,6 +1,6 @@
 """`simengine` command line: evaluate | card | bench | loop | demo.
 
-    simengine evaluate frame.csv --ours hybrid --raw llm --out runs/card1     # report.json + card.md + dashboard.html
+    simengine evaluate frame.csv --ours hybrid --raw llm --primary auc        # -> runs/frame-evidence/{report.json,card.md,...}
     simengine card runs/card1/report.json -o card.md                           # Markdown (or *.json card dict)
     simengine bench list
     simengine bench run gss opinionqa_groups:split=dev --data-root /path/to/catalogue
@@ -41,13 +41,14 @@ def _read_table(path: str):
     return pd.read_csv(p, sep="\t" if p.suffix == ".tsv" else ",")
 
 
-def _write_outputs(report: dict, out: Path, *, dashboard_title: str | None = None) -> dict[str, str]:
+def _write_outputs(report: dict, out: Path, *, dashboard_title: str | None = None,
+                   lang: str = "mixed") -> dict[str, str]:
     from . import evidence as ev
     out.mkdir(parents=True, exist_ok=True)
     paths = {"report": out / "report.json", "card": out / "card.md", "card_json": out / "card.json",
              "dashboard": out / "dashboard.html"}
     ev.save_json(report, paths["report"])
-    ev.card(report, paths["card"])
+    ev.card(report, paths["card"], lang=lang)
     ev.card(report, paths["card_json"])
     ev.dashboard([report], paths["dashboard"], title=dashboard_title or report.get("baslik") or "Evidence")
     return {k: str(v) for k, v in paths.items()}
@@ -115,17 +116,25 @@ def _space_from_json(cfg: dict):
 
 def cmd_evaluate(a) -> int:
     from . import evidence as ev
+    from .evidence.onkayit import ZINCIR_ADI
+    if a.prereg and not (Path(a.prereg) / ZINCIR_ADI).exists():
+        print(f"error: --prereg {a.prereg!r} has no {ZINCIR_ADI}; se.evidence.seal() writes to '.onkayit' unless "
+              "you pass registry=...", file=sys.stderr)
+        return 2
     df = _read_table(a.table)
     report = ev.evaluate(df, title=a.title or Path(a.table).stem, ours=a.ours, raw=a.raw, task=a.task,
                          primary=a.primary, B=a.B, B_aggregate=a.B_aggregate, seed=a.seed, dataset=a.dataset or "",
                          cutoff=a.cutoff, methods=_csv_list(a.methods), circular=_csv_list(a.circular),
                          unlabeled_baselines=_csv_list(a.unlabeled_baselines), calibrate=_csv_list(a.calibrate),
                          prereg=a.prereg, multiplier=not a.no_multiplier)
-    out = Path(a.out or Path(a.table).with_suffix("").name + "-evidence")
-    paths = _write_outputs(report, out)
+    out = Path(a.out or Path("runs") / (Path(a.table).with_suffix("").name + "-evidence"))
+    paths = _write_outputs(report, out, lang=a.lang)
     s = ev.summary(report)
-    print(s.get("headline", ""))
-    print(f"badge: {s.get('badge')}")
+    print(s.get("headline_en") if a.lang == "en" else s.get("headline", ""))
+    print(f"badge: {s.get('badge')} (primary metric: {s.get('primary_metric')})")
+    if not a.primary:
+        print(f"warning: --primary not given; graded on the task default '{s.get('primary_metric')}'. Pass the "
+              "metric you pre-registered, e.g. --primary auc.", file=sys.stderr)
     for k, v in paths.items():
         print(f"{k}: {v}")
     return 0
@@ -134,7 +143,7 @@ def cmd_evaluate(a) -> int:
 def cmd_card(a) -> int:
     from . import evidence as ev
     report = json.loads(Path(a.report).read_text(encoding="utf-8"))
-    res = ev.card(report, a.output)
+    res = ev.card(report, a.output, lang=a.lang)
     if a.dashboard:
         ev.dashboard([report], a.dashboard)
         print(f"dashboard: {a.dashboard}")
@@ -152,8 +161,9 @@ def cmd_bench(a) -> int:
             t = bench.get(name)
             if a.verbose:
                 d = t.describe()
-                print(f"## {name} ({d['kind']})\nmetrics: {', '.join(d['metrics'])}\noptions: {d['options']}\n"
-                      f"layout:\n{d['layout']}\n")
+                acc = "\n".join(f"  {k}: {v}" for k, v in (d.get("accepted_options") or {}).items()) or "  (none)"
+                print(f"## {name} ({d['kind']})\nmetrics: {', '.join(d['metrics'])}\n"
+                      f"options (pass as {name}:key=value,...):\n{acc}\nlayout:\n{d['layout']}\n")
             else:
                 print(f"{name:20s} {t.kind:13s} metrics: {', '.join(m.name for m in t.metrics)}")
         return 0
@@ -161,6 +171,12 @@ def cmd_bench(a) -> int:
         print(json.dumps(bench.get(a.task).describe(), ensure_ascii=False, indent=1))
         return 0
     tasks = [_task_spec(s) for s in (a.tasks or bench.list())]
+    for t in tasks:                       # fail early and readably on an unknown task or option
+        try:
+            bench.get(t[0], **t[1]) if isinstance(t, tuple) else bench.get(t)
+        except (KeyError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     table = bench.run(tasks, data_root=a.data_root, B=a.B, seed=a.seed,
                       metrics="primary" if a.primary_only else "all")
     print(bench.to_markdown(table, primary_only=a.primary_only))
@@ -191,11 +207,25 @@ def cmd_loop(a) -> int:
     proposer = kw.pop("proposer", "random")
     loop = Loop(runner, space, proposer, **kw)
     out = loop.run(finalize=not a.no_finalize)
-    print(json.dumps(out, ensure_ascii=False, indent=1, default=str))
+    if a.json:
+        print(json.dumps(out, ensure_ascii=False, indent=1, default=str))
+        return 0
+    fin = out.get("final") or {}
+    short = {k: out.get(k) for k in ("stopped", "turns", "hit_rate") if k in out}
+    short.update({k: fin.get(k) for k in ("winner_cfg", "test_diff", "verdict") if k in fin})
+    print(json.dumps(short, ensure_ascii=False, indent=1, default=str))
+    imp = (fin.get("verdict") or {}).get("dev_improvement")
+    if imp:
+        hib = (fin.get("verdict") or {}).get("higher_is_better")
+        print(f"dev improvement vs start (positive = better; metric is {'higher' if hib else 'lower'}-is-better, "
+              f"so dev_gain has the {'same' if hib else 'opposite'} sign): {imp['diff']:+.4f} "
+              f"[{imp['lo']:+.4f}, {imp['hi']:+.4f}]")
+    if kw.get("workdir"):
+        print(f"workdir: {kw['workdir']} (state.json, JOURNAL.md, results.tsv)")
     return 0
 
 
-def run_demo(out: str | Path = "simengine-demo", *, n: int = 120, seed: int = 0, B: int = 300,
+def run_demo(out: str | Path = "runs/demo", *, n: int = 120, seed: int = 0, B: int = 300,
              verbose: bool = True) -> dict:
     """Offline end-to-end run: synthetic survey table -> personas -> simulated Likert survey (FakeLLM, with
     no-persona and persona-swap controls) -> EvalFrame with a label-free persistence baseline -> evidence
@@ -265,7 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--ours", help="our method (column pred_<ours>); name it before looking at results")
     e.add_argument("--raw", help="raw / unhybridised method, e.g. the plain LLM arm")
     e.add_argument("--task", choices=["binary", "multiclass", "distribution", "continuous", "ab"])
-    e.add_argument("--primary", help="primary metric (default per task)")
+    e.add_argument("--primary", help="primary metric, e.g. auc, accuracy, pearson, wasserstein (default per task: "
+                   "binary accuracy, or macro_f1 when the majority class > 60%%; see docs/modules/evidence.md)")
     e.add_argument("--title")
     e.add_argument("--dataset")
     e.add_argument("--methods", help="comma list of methods to include (default: every pred_* column)")
@@ -278,13 +309,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200)
     e.add_argument("--seed", type=int, default=0)
     e.add_argument("--no-multiplier", action="store_true", help="skip the PPI++ multiplier block (faster)")
-    e.add_argument("--out", help="output directory (default <table>-evidence)")
+    e.add_argument("--out", help="output directory (default runs/<table>-evidence)")
+    e.add_argument("--lang", choices=["mixed", "en"], default="mixed",
+                   help="card language: mixed (English + research Turkish labels) or en")
     e.set_defaults(func=cmd_evaluate)
 
     c = sub.add_parser("card", help="report.json -> Markdown card (or card dict for *.json), optional dashboard")
     c.add_argument("report")
     c.add_argument("-o", "--output")
     c.add_argument("--dashboard", help="also write an HTML dashboard here")
+    c.add_argument("--lang", choices=["mixed", "en"], default="mixed")
     c.set_defaults(func=cmd_card)
 
     b = sub.add_parser("bench", help="benchmark tasks with LLM-free baselines")
@@ -309,10 +343,11 @@ def build_parser() -> argparse.ArgumentParser:
     lp.add_argument("--proposer", help="random | grid | greedy | halving | claude-p | claude")
     lp.add_argument("--max-turns", type=int)
     lp.add_argument("--no-finalize", action="store_true", help="do not run the test split")
+    lp.add_argument("--json", action="store_true", help="print the full result dict")
     lp.set_defaults(func=cmd_loop)
 
     d = sub.add_parser("demo", help="offline end-to-end demo on synthetic data (FakeLLM)")
-    d.add_argument("--out", default="simengine-demo")
+    d.add_argument("--out", default="runs/demo")
     d.add_argument("--n", type=int, default=120)
     d.add_argument("--seed", type=int, default=0)
     d.add_argument("--B", type=int, default=300)

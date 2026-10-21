@@ -1,6 +1,7 @@
 """Agent-based models: adoption ABM + ABC + analogy prior (with Bass controls and curve baselines), opinion drift
 (bounded confidence vs persistence / mean shift), elasticity prior with shrinkage, repeat-purchase market ABM,
-self-exciting cascade predictors (Hawkes / SEISMIC, not yet measured) and a turn-based LLM agent society.
+self-exciting cascade predictors (Hawkes / SEISMIC; measured: they do not beat the shape baseline) and a turn-based
+LLM agent society (measured: no better than a single LLM score).
 
 See docs/modules/abm.md for when each one works, with measured numbers and provenance.
 """

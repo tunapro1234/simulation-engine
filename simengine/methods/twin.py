@@ -176,7 +176,8 @@ class TwinStack:
             bounds: Mapping[str, tuple] | None = None, nominal: Iterable[str] = ()):
         if features.shape[1] == 0:
             raise ValueError("features needs at least one column")
-        self.features = features.apply(pd.to_numeric, errors="coerce")
+        # sorted feature columns, as the source pivot: the randomized SVD / KFold results depend on column order
+        self.features = features.apply(pd.to_numeric, errors="coerce").sort_index(axis=1)
         self.Y = targets.astype(float)
         self.targets = list(targets.columns)
         self.nominal = set(nominal)
@@ -261,6 +262,10 @@ class TwinStack:
             return P, O
         Yl = self.Y[lab].drop(index=te, errors="ignore")
         tr = Yl.index[Yl.notna().any(axis=1)]
+        try:                         # sorted train ids, as the source's Index.difference(te): order-independent folds
+            tr = tr.sort_values()
+        except TypeError:            # mixed, unorderable id types: keep the caller's order
+            pass
         mu, sd = Yl.loc[tr].mean(), Yl.loc[tr].std().replace(0, 1)
         Yz = (Yl - mu) / sd
         Xz = self._X(tr.append(te))

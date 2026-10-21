@@ -1,0 +1,196 @@
+# simengine
+
+**English summary.** simengine is a Python library for population simulation with LLMs and for the evidence needed to
+trust it. It builds personas from tables or histories, runs simulated surveys, A/B panels, segment distributions and
+per-person predictions with Claude (or an offline `FakeLLM`), and ships the baselines that usually win: persistence,
+marginals, TF-IDF, logistic and GBDT. It also has agent-based models for adoption, opinion, markets and cascades, an
+evidence pipeline (baseline ladder, paired bootstrap CIs, audits, "worth N humans" via PPI++, sealed predictions,
+cards and dashboards), a pre-registered research loop, and benchmark tasks. The measured lesson: pure persona panels
+rarely beat simple baselines. The LLM helps when there is no data, when it is stacked with a learner, and when it
+serves as a prior in small tests. Every number below has a source in [docs/RESULTS.md](docs/RESULTS.md). This is
+prior work: declare it if you use it at a hackathon (it is proprietary, not open source; cite a dated commit).
+
+---
+
+## Nedir
+
+simengine, "bir kitle bu soruya / bu metne / bu fiyata nasıl tepki verir?" sorusunu LLM ile simüle edip sonucun ne
+kadar güvenilir olduğunu aynı çağrıda ölçen bir kütüphane. TALP hazırlık araştırmasında (Ekim 2026) yazılan
+deney kodlarının (`uretim/<dal>/`) temizlenip tek pakette toplanmış hali.
+
+İki şeyi birlikte yapar:
+
+1. **Simülasyon:** tablodan ya da satın alma geçmişinden persona üretir; anket, A/B paneli, segment dağılımı, kişi
+   başı tahmin, tartışma turu ve ajan tabanlı modeller çalıştırır.
+2. **Kanıt:** her LLM sonucunu basit tabanların (persistence, marjinal, TF-IDF, lojistik, GBDT) yanına koyar; eşli
+   bootstrap güven aralığı, karıştırma kontrolü, sızıntı ve ezber denetimi, "kaç insana bedel" (PPI++) ve bir rozet
+   verir. Tahminler doğru cevap açılmadan önce mühürlenebilir.
+
+## Kurulum
+
+```bash
+pip install -e .[all]       # anthropic + lightgbm + statsmodels
+pip install -e .            # yalnız çekirdek (numpy, pandas, scikit-learn); FakeLLM ile çevrimdışı çalışır
+```
+
+Kurmadan (bağımlılıklar ortamda hazırsa), depo kökünden: `PYTHONPATH=. python -m simengine demo`. Aşağıdaki her
+`simengine ...` komutu `python -m simengine ...` olarak da çalışır.
+
+API anahtarı ortam değişkeninden okunur, depoya yazılmaz. Arka uçlar: `se.llm.Claude` (anthropic SDK),
+`se.llm.ClaudeCode` (`claude -p`), `se.llm.FakeLLM` (çevrimdışı, deterministik).
+
+## Hızlı başlangıç
+
+```python
+import simengine as se, pandas as pd
+df = pd.read_csv("data/musteriler.csv")                              # kişi başı bir satır; data/ git dışı
+panel = se.persona.from_table(df, id_col="uid", segment="income_tier", forbidden=["hedef"])
+llm = se.FakeLLM(se.sim.schema_responder())   # gerçek: se.llm.Claude(model="claude-haiku-5-5", budget_usd=2)
+res = se.sim.survey(panel, "Online alışverişten keyif alırım.", llm=llm)
+frame = se.sim.survey_frame(res, {"q1": dict(zip(df.uid, df.hedef))}).dropna(axis=1, how="all")
+frame["pred_persistence"] = frame.group.map(dict(zip(df.uid, df.gecen_yil)))
+rep = se.evaluate(frame, title="keyif", ours="score", task="continuous", unlabeled_baselines=["persistence"])
+print(se.evidence.summary(rep)["headline_en"]); se.card(rep, "runs/kart.md"); se.dashboard([rep], "runs/pano.html")
+```
+
+Çalışan sürümü: `python examples/quickstart.py` (çevrimdışı, ~4 sn). Uçtan uca demo: `simengine demo`.
+
+## Komut satırı
+
+```bash
+simengine demo                                                   # sentetik veri, FakeLLM -> runs/demo/
+simengine evaluate data/frame.csv --ours stack --raw llm --task binary --primary auc \
+    --unlabeled-baselines persistence --prereg .onkayit            # -> runs/frame-evidence/
+simengine card runs/demo/report.json --dashboard runs/pano.html --lang en
+simengine bench list -v                                          # görevler, kabul edilen seçenekler, dosya düzeni
+simengine bench run gss upworthy:split=holdout --data-root <veri-kökü>
+simengine loop examples/loop.json --max-turns 10
+```
+
+- `--primary` verilmezse görev varsayılanı kullanılır: binary/multiclass `accuracy` (en sık sınıf > %60 ise
+  `macro_f1`), distribution `one_minus_tvd`, continuous `pearson` (gerçek değer 0-1 aralığındaysa `one_minus_mae`),
+  ab `pair_sign`. Ön kayıtta yazdığın metriği her zaman `--primary` ile ver; `evaluate` verilmediğinde uyarır.
+- Çıktılar varsayılan olarak `runs/` altına yazılır (git dışı). `--prereg` dizininde `zincir.jsonl` yoksa
+  `evaluate` hata verir; `se.evidence.seal(...)` varsayılan olarak `.onkayit/` dizinine yazar.
+- Rozetler: `high confidence`, `inconclusive`, `below baseline` (bizim − en güçlü taban GA'sı tümüyle sıfırın
+  altında; araştırma kuralında bu da "kararsız" sayılır), `awaiting truth`.
+
+## Modül haritası
+
+| modül | ne yapar | belge |
+|---|---|---|
+| `simengine.llm` | Claude / `claude -p` / FakeLLM arka uçları, disk önbelleği, maliyet defteri, bütçe, 401'de durma | [llm](docs/modules/llm.md) |
+| `simengine.persona` | persona şeması, tablodan / geçmişten persona, LLM ile üretim, enum doğrulama, sızıntı koruması | [persona](docs/modules/persona.md) |
+| `simengine.sim` | anket, SSR, A/B paneli + güven kontrolü, tartışma turu, segment dağılımı, kişi başı tahmin (L0/L1/L2) | [sim](docs/modules/sim.md) |
+| `simengine.methods` | tabanlar, sepet yöntemleri, A/B (TF-IDF, LLM, stack, erken test Bayes), stack, büzülme, MNL, sonraki eylem | [methods](docs/modules/methods.md) |
+| `simengine.abm` | benimseme ABM + ABC, fikir kayması, pazar ABM, elastisite, retweet eğrileri (Hawkes, SEISMIC), ajan toplumu | [abm](docs/modules/abm.md) |
+| `simengine.evidence` | `evaluate`, taban merdiveni, eşli CI, denetimler, PPI++ çarpanı, mühür, kart, pano | [evidence](docs/modules/evidence.md) |
+| `simengine.research` | ön kayıt + kilit, arama uzayı, öneriler (rastgele, ızgara, açgözlü, halving, LLM), dev/seçim/test döngüsü | [research](docs/modules/research.md) |
+| `simengine.bench` | 7 kıyas görevi (bank marketing, GSS, Open e-commerce, OpinionQA, SimBench, Twin-2K-500, Upworthy) | [bench](docs/modules/bench.md) |
+| `simengine.cli` | `evaluate`, `card`, `bench`, `loop`, `demo` | bu dosya |
+
+Kısayollar: `se.Claude`, `se.FakeLLM`, `se.from_table`, `se.survey`, `se.ab_test`, `se.segment_distribution`,
+`se.predict_people`, `se.evaluate`, `se.card`, `se.dashboard`, `se.worth_humans`, `se.Loop`, `se.Space`, `se.Prereg`,
+`se.seal`. Alt paketler ilk erişimde yüklenir.
+
+Örnekler (`examples/`): `quickstart.py`, `ab_test.py`, `segment_distribution.py`, `research_loop.py` + `loop.json`,
+`abm_adoption.py` ve bir günlük yarışma planı [`hackathon_day.md`](examples/hackathon_day.md). Yöntem notları:
+[docs/METHODS.md](docs/METHODS.md).
+
+## Ölçülen sonuçlar
+
+Hepsi araştırma kodunda ölçüldü; kaynak dal ve dosya sağda. Tam liste ve güven aralıkları
+[docs/RESULTS.md](docs/RESULTS.md)'de. "(yeniden)" işaretli satırlar bu kütüphanede gerçek veriyle tekrar üretildi.
+
+| görev | sonuç | kaynak |
+|---|---|---|
+| Upworthy A/B, 300 test, yön doğruluğu (şans 0.50) | TF-IDF + Opus stack **0.817** [0.770, 0.860]; TF-IDF 0.773; Opus tek başına 0.765; uzun başlık 0.533 | deney `RAPOR.md` 1.1 |
+| aynı, Haiku 8 personalı panel | 0.522 [0.468, 0.575]; personasız okur 0.528 | sahne `RAPOR.md` |
+| erken test, kol başı 100 gösterim, 20 testle kalibrasyon (`simulate_saving_calibrated`) | LLM önseli **2.27x** (1.67-3.11) trafik tasarrufu; 400'de 1.34x; 800+ kazanç yok; 2 katlı `simulate_saving` aynı veride 2.47x | deney `RAPOR.md` 2.2-2.3, `ornek_tasarrufu_llm*.json` |
+| CES 2020 segment dağılımı, Haiku | doğrudan dağılım W1 0.077, açığın **0.818**'i kapandı; persona paneli 0.55 | makro `RAPOR.md` C1, K2-5 |
+| 5 tartışma turu | ΔW1 −0.005 [−0.012, +0.002], ölçülebilir etki yok | makro `RAPOR.md` |
+| talp73 kişi başı satın alma, 1a | her zaman "hayır" 0.764; L1 Haiku persona **0.694**; geçmiş LightGBM 0.807 | talp73 `kart/KART.md` |
+| talp73 1b(c) | geçmiş LightGBM 0.672; anket modeli 0.588; L1 Haiku 0.564; SSR 0.547-0.573 | talp73 `kart/KART.md`, `kod/llm/SONUC-v1.7d.md` |
+| OE aylık sipariş günü (Pearson) | persona + geçen yıl çapası 0.860; persistence 0.848; çapasız persona 0.618 | sahne `RAPOR.md` |
+| Twin-2K-500 kişi düzeyi korelasyon | adil LLM'siz stack **0.342**; + LLM +0.006 [+0.004, +0.007]; tekrar-test tavanı 0.565 | persona `RAPOR.md` |
+| "kaç insana bedel" (PPI++, n = 100) | persistence **4.36x**; LLM persona davranış tahmini 1.06x; LLM ikiz 1.08x | kanit `RAPOR.md` §1a |
+| OWID internet benimseme, test MAE | ABM + ABC + analoji **8.48**; Bass kontrolü 9.73; kazancın %81-85'i ABC + analojiden | makro `RAPOR.md` M1, `abm/m1/NOTLAR.md` |
+| retweet eğrisi, 24 sa RMSE | şekil tabanı 0.391 = Hawkes 0.391; LLM ajan toplumu 0.771 = tek Haiku 0.772 | makro `abm/yayilim24/SONUC.md` |
+| OPeRA sonraki web eylemi | LightGBM lambdarank **31.60%** (3 tohum ortalaması); Markov-2 26.94; sıfır atış Haiku persona ajanı 13.67 (n=300 alt örneklem) | web `RAPOR.md` |
+| bank marketing AUC | lojistik **0.748**; LightGBM 0.665; Haiku persona 0.684 (yeniden: tabanlar) | intent `gbdt/lig/bank_lig.json` |
+| GSS dalga tahmini, ortalama z | PCA ridge **0.560**; ridge 0.512; persistence 0.491 (yeniden) | dongu `turlar/gss_dalga/test/OZET.md` |
+| araştırma döngüsü, Twin kiti | LLM gözlemci − rastgele arama +0.0018 [−0.0011, +0.0046]: rastgele yetti | dongu `turlar/twin_kit/test/OZET.md` |
+
+## Dürüst sınırlar
+
+- **Saf persona panelleri genelde tabanları geçemedi.** A/B'de Haiku paneli şans düzeyinde; kişi başı satın almada L1
+  persona "her zaman hayır"ın altında; çapasız persona persistence'ın çok altında; tartışma turları ve ajan toplumu
+  ölçülebilir bir şey eklemedi. LLM persona tahmini PPI++'ta ~1.0-1.1 insan değerinde.
+- **LLM'nin değer kattığı yerler ölçüldü ve dar:** hiç veri yokken segment dağılımı, bir öğreniciyle stack (A/B
+  TF-IDF + LLM), küçük erken testlerde önsel. Bunların dışında önce basit tabanı dene.
+- **Dev'deki kazanç test'te küçülebilir.** OpinionQA A'da döngünün dev kazancı test'te tutmadı. Twin'de LLM'ye
+  atfedilen +0.071 adil LLM'siz stack kurulunca +0.006'ya indi. Dominick's elastisitesindeki kazancı LLM-karıştırma
+  plasebosu da verdi.
+- **Ezber riski.** CES, Upworthy, OpinionQA gibi kamu verilerinde modelin cevabı görmüş olması dışlanmadı. Bellek
+  denetimi ve mühür bunu azaltır, kanıtlamaz.
+- **Bu paket sayıları yeniden ölçmedi.** Tabloda "(yeniden)" yazmayan her sayı araştırma kodundan aktarıldı. Paketin
+  kendi testleri `FakeLLM` ile çalışır; gerçek API çağrısı içermez. Bazı varyantlar taşınmadı: hiyerarşik Bayes (HB)
+  konjoint, NPE benimseme varyantı, retweet GBM'i. Veri setleri pakette yok; `bench` veri kökü verilmezse
+  `missing_data` döner.
+- Kanıt raporunun metinleri (manşet cümlesi, kart ve panodaki bazı etiketler, denetim ayrıntıları) Türkçedir;
+  rapor sözlüğü `manset`, `merdiven`, `kanit_kart` anahtarlarını korur. `summary()` İngilizce düz bir görünüm ve
+  `headline_en` verir. İngilizce bir etkinlik için `se.card(rep, path, lang="en")` (ya da `--lang en`) Türkçe
+  rozet gerekçesini ve manşeti çıkarır, ondalıkları noktaya çevirir; merdiven ve denetim etiketleri yine Türkçe kalır.
+- `research.Loop` kaynak döngü gibi varsayılan olarak "eşit ve daha sade" kuralını uygular (`simpler_ties=True`,
+  yalnız `Space(complexity=...)` verilince etkili).
+
+## Veri setleri ve lisanslar
+
+Depoda hiçbir veri yok. Her seti kendin, kendi koşullarıyla indir; `bench` adaptörleri yalnız yerel kopyayı okur
+(`--data-root` ya da `SIMENGINE_DATA`, düzenler `simengine bench list -v`'de). Ödüllü bir teslimde kullanmadan önce
+koşulları oku: ticari olmayan (NC) ve yalnız akademik setler bir yarışma teslimine uymayabilir.
+
+| veri seti | nerede kullanılıyor | lisans / koşul | dikkat |
+|---|---|---|---|
+| UCI Bank Marketing | `bench` bank_marketing | CC BY 4.0 | atıf |
+| Upworthy Research Archive | `bench` upworthy, A/B sonuçları | CC BY 4.0 | atıf |
+| Open e-commerce 1.0 | `bench` open_ecommerce | CC BY 4.0 | atıf |
+| Twin-2K-500 | `bench` twin2k500 | CC BY 4.0 (veri kartına göre) | atıf |
+| OPeRA | sonraki eylem sonuçları | CC BY 4.0 | atıf |
+| SimBench | `bench` simbench | **CC BY-NC-SA 4.0** | **ticari olmayan**; türev işler aynı lisansla |
+| Pew ATP / OpinionQA / SubPOP | `bench` opinionqa_groups | **araştırma amaçlı** (Pew koşulları) | ödüllü/ticari kullanımda koşulları kontrol et |
+| GSS panelleri (NORC) | `bench` gss | ücretsiz, atıf zorunlu, **yeniden dağıtım yok** | veriyi teslimle birlikte paylaşma |
+| Dominick's | ABM elastisite sonuçları | **yalnız akademik araştırma** | yarışmada kullanmadan önce organizatörle netleştir |
+| SEISMIC (SNAP) | retweet eğrisi sonuçları | **lisans belirtilmemiş**, araştırma; atıf Zhao vd. 2015 | ödüllü kullanımda kaynak sahibine danış |
+
+Koşullar araştırma notlarından (`makro/arastirma/veri-ham.md`, `makro/abm/arastirma/literatur.md`, `web/PROTOKOL.md`)
+ve adaptörlerin `meta["source"]` alanından alındı; bağlayıcı olan her setin kendi sayfasıdır.
+
+## Lisans
+
+Tescilli yazılım, tüm hakları saklı (`LICENSE`). Açık kaynak değil; depo özeldir.
+
+## Önceden yapılmış iş beyanı
+
+simengine bir yarışmadan **önce** yazıldı. Bir hackathonda kullanılırsa teslim metninde açıkça belirtilmeli ve
+etkinliğin önceden yazılmış kod kurallarına uyulmalı. Beyan, etkinlik öncesi durumun kontrol edilebilmesi için
+tarihli bir commit ya da etikete atıf yapmalı; örnek:
+
+> "Etkinlikten önce yazdığımız simengine kütüphanesi (v0.1.0, commit `<hash>`, `<tarih>`) üzerine kurulu."
+
+`<hash>` ve `<tarih>` etkinlik başlamadan önceki son commit'ten alınır (`git log -1 --format='%h %ad' --date=short`;
+tercihen o commit'e bir etiket konur). Kütüphane özeldir ve açık lisanslı değildir: etkinlik önceden yazılmış kodun
+herkese açık olmasını şart koşuyorsa, kullanmadan önce depoyu bir lisansla açmak ya da organizatöre sormak gerekir;
+"açık kütüphane" demek yanlış olur. Etkinlik sırasında yapılan iş; veri hazırlığı, yapılandırma, mühürlenen
+tahminler ve kanıt kartıdır. Önceden yazılmış kodu "yarışma sırasında yapıldı" diye sunmak yok.
+
+## Test
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+Çevrimdışı. Gerçek veriyle yayımlanan sayıları yeniden üreten testler (`tests/test_bench_data.py`) veri kökünü
+`SIMENGINE_TEST_DATA`, yoksa `SIMENGINE_DATA` ortam değişkeninden okur ve veri yoksa atlanır. Araştırma paketiyle
+eşdeğerlik testi (`tests/test_evidence_equivalence.py`) yalnız `SIMENGINE_KANIT_SRC` orijinal `kanit/kod` dizinini
+gösterdiğinde çalışır. Ayrıntılı çıktı için `-v`.

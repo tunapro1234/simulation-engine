@@ -10,7 +10,8 @@ structure, click-type priors, text overlap) are not ported: pass your own as ``n
 
 Measured (uretim/web/RAPOR.md, OPeRA official test, 902 steps, exact next action %): always-terminate 4.43,
 repeat previous 13.97, Markov-2 + backoff 26.94 [21.42, 31.72], LightGBM lambdarank 31.60 [26.81, 35.90]
-(+4.66 [+2.04, +7.55] over Markov-2; user-clustered [+1.68, +7.66]); zero-shot Haiku persona agent 13.67.
+(3-seed score ensemble, `n_seeds=3`; +4.66 [+2.04, +7.55] over Markov-2; user-clustered [+1.68, +7.66]);
+zero-shot Haiku persona agent 13.67 on an n=300 subsample.
 On a user-disjoint split LightGBM 29.57 vs Markov-2 28.11 (+1.46 [-0.14, +3.11], not separable): part of the gain
 is per-user history. Literature SFT+RL (Customer-R1) 39.58 on the same split.
 
@@ -134,13 +135,19 @@ class Markov2Baseline:
         return te, markov2_score(te)
 
 
-def negative_sample(tr: pd.DataFrame, top: int = 60, random: int = 40, seed: int = 0) -> pd.DataFrame:
-    """Per step keep positives + the ``top`` candidates by prior (f_page + f_markov + f_user) + ``random`` others."""
+def negative_sample(tr: pd.DataFrame, top: int = 60, random: int = 40, seed: int = 0,
+                    keep_non_click: bool = True) -> pd.DataFrame:
+    """Per step keep positives + the ``top`` candidates by prior (f_page + f_markov + f_user) + ``random`` others.
+    When the candidates have a ``kind`` column, non-click candidates (terminate, input, ...) are always kept, as in
+    the source (`siralayici.py` `negatif_ornekle`: ``| (r.kind != "click")``)."""
     prior = tr["f_page"] + tr["f_markov"] + tr["f_user"]
     r = tr.assign(_o=prior.to_numpy(), _r=np.random.default_rng(seed).random(len(tr)))
     ro = r.groupby("ex")["_o"].rank(ascending=False, method="first")
     rr = r.groupby("ex")["_r"].rank(method="first")
-    return tr[((r["y"] == 1) | (ro <= top) | (rr <= random)).to_numpy()]
+    m = (r["y"] == 1) | (ro <= top) | (rr <= random)
+    if keep_non_click and "kind" in tr.columns:
+        m = m | (tr["kind"] != "click")
+    return tr[m.to_numpy()]
 
 
 class NextActionRanker:
@@ -148,22 +155,26 @@ class NextActionRanker:
 
     fit(train_steps, train_cands, numeric=(), categorical=()) -> builds OOF priors, samples negatives, trains;
     score(test_steps, test_cands) -> (candidates with priors, scores). Feature set = priors + ``numeric`` +
-    ``categorical`` caller columns (categories fixed from train)."""
+    ``categorical`` caller columns (categories fixed from train).
+
+    ``n_seeds``: train that many models (seeds ``seed .. seed + n_seeds - 1``, each with its own negative sample)
+    and average their scores. The published 31.60 is a 3-seed average (``n_seeds=3``); the default 1 is faster."""
 
     def __init__(self, n_estimators: int = 300, learning_rate: float = 0.05, num_leaves: int = 31,
                  min_child_samples: int = 20, top: int = 60, random: int = 40, n_folds: int = 5, seed: int = 0,
-                 use_user_prior: bool = True):
+                 use_user_prior: bool = True, n_seeds: int = 1):
         self.params = dict(objective="lambdarank", n_estimators=n_estimators, learning_rate=learning_rate,
                            num_leaves=num_leaves, min_child_samples=min_child_samples, subsample=0.8,
                            subsample_freq=1, colsample_bytree=0.8, lambdarank_truncation_level=20,
                            random_state=seed, verbose=-1)
         self.top, self.random, self.n_folds, self.seed = top, random, n_folds, seed
         self.use_user_prior = use_user_prior
+        self.n_seeds = max(int(n_seeds), 1)
 
     def _cat(self, c):
         c = c.copy()
         for k in self.categorical:
-            c[k] = pd.Categorical(c[k].astype(str).fillna("NA"), categories=self.cats_[k])
+            c[k] = pd.Categorical(c[k].fillna("NA").astype(str), categories=self.cats_[k])
         return c
 
     def fit(self, train_steps, train_cands, numeric: Sequence[str] = (), categorical: Sequence[str] = ()):
@@ -173,17 +184,21 @@ class NextActionRanker:
         pri = [p for p in PRIORS if self.use_user_prior or p != "f_user"]
         self.features_ = list(self.categorical) + pri + self.numeric
         tr, _ = build_features(train_steps, train_cands, n_folds=self.n_folds)
-        self.cats_ = {k: sorted(tr[k].astype(str).fillna("NA").unique().tolist()) for k in self.categorical}
-        tr = self._cat(negative_sample(tr, self.top, self.random, self.seed).sort_values("ex"))
-        grp = tr.groupby("ex", sort=True).size().to_numpy()
-        self.model_ = lgb.LGBMRanker(num_threads=n_threads(len(tr)), **self.params)
-        self.model_.fit(tr[self.features_], tr["y"], group=grp)
+        self.cats_ = {k: sorted(tr[k].fillna("NA").astype(str).unique().tolist()) for k in self.categorical}
+        self.models_ = []
+        for i in range(self.n_seeds):
+            sd = self.seed + i
+            t = self._cat(negative_sample(tr, self.top, self.random, sd).sort_values("ex"))
+            grp = t.groupby("ex", sort=True).size().to_numpy()
+            m = lgb.LGBMRanker(num_threads=n_threads(len(t)), **{**self.params, "random_state": sd})
+            self.models_.append(m.fit(t[self.features_], t["y"], group=grp))
+        self.model_ = self.models_[0]
         return self
 
     def score(self, test_steps, test_cands):
         _, te = build_features(self.train_steps_, self.train_cands_, test_steps, test_cands, n_folds=self.n_folds)
         te = self._cat(te)
-        return te, self.model_.predict(te[self.features_])
+        return te, np.mean([m.predict(te[self.features_]) for m in self.models_], axis=0)
 
 
 def top1(cands: pd.DataFrame, scores) -> pd.DataFrame:

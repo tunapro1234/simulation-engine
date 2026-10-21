@@ -117,6 +117,10 @@ class Upworthy(BenchTask):
     """Options: split='temporal' (default) | 'holdout'; test_signif='fdr' (default) | 'none' (all test pairs)."""
 
     name = "upworthy"
+    accepted_options = {
+        'split': '"temporal" | "holdout" (default "temporal")',
+        'test_signif': '"fdr" | "none" (default "fdr")',
+    }
     kind = "ab"
     data_subdir = "upworthy"
     layout = """

@@ -44,11 +44,16 @@ In the tables, "dev" is the split the observer climbs on, "selection" is a held-
 - The loop stopped at turn 3. The LLM arm, the random arm and the baseline gave the same test WD, 0.0649.
 - 1 of 4 observer proposals was invalid (unparseable JSON) and was repaired.
 
-**Twin-2K-500 kit** (`turlar/twin_kit/*/sonuclar.tsv`, `DURUM.json`; mean Fisher z, higher is better):
-- Only dev numbers exist; the test step had not run when this was written.
-- The LLM arm kept one change: svd_r 30 to 60, +0.0029 [+0.0002, +0.0058]. That is a small, barely significant gain.
-  The random arm kept nothing in 4 turns.
-- 3 of 7 observer calls returned unparseable JSON. All 3 were fixed by the repair call.
+**Twin-2K-500 kit** (`turlar/twin_kit/test/OZET.md`, loop v1.1; mean Fisher z, higher is better; the test summary
+was added by the integrator after this module was written):
+- LLM arm: 5 turns, 2 kept, winner `{"svd_r": 60, "knn_k": 100}`. Random arm: 1 kept, winner `{"svd_r": 63}`.
+- Test z: LLM winner 0.3738 [0.3389, 0.4112], random winner 0.3720, fair baseline T-adil 0.3679, T-kit 0.2181
+  (n = 122 columns).
+- LLM winner − T-adil: +0.0058 [+0.0021, +0.0094] (Bonferroni k=4: [+0.0014, +0.0105]), a small real gain.
+- **LLM − random winner: +0.0018 [−0.0011, +0.0046]. Random search was enough** (also on selection: +0.0017
+  [−0.0010, +0.0048]).
+- 3 of 7 observer proposals were invalid (unparseable JSON), all repaired; invalid+repeat rate 0.43 (falsification
+  threshold 0.5).
 
 **What this means:**
 - The loop is honest machinery, not a source of gains. It finds real but small improvements when the space contains
@@ -88,8 +93,9 @@ In the tables, "dev" is the split the observer climbs on, "selection" is a held-
   source fingerprint is checked). Changing the space or the start config also needs a new workdir.
 - The paired CI needs the same unit ids across configs. Units missing from one run are dropped from that comparison.
   With fewer than about 50 units, CIs get wide and nearly every turn is discarded.
-- The simplicity rule is off by default (`simpler_ties=True` turns it on). It keeps a statistically tied, simpler
-  config, as the original v1.1 loop did, and needs `Space(complexity=...)`.
+- The simplicity rule is on by default (`simpler_ties=True`), as in the original loop (`dongu/kod/dongu.py`): a
+  candidate whose paired CI against the incumbent contains 0 and that has fewer components is kept. It only acts
+  when the space defines `Space(complexity=...)`; pass `simpler_ties=False` to keep strictly-better changes only.
 - The test-reference filter is a regex. It is a guard against the observer talking about test results, not proof that
   no leak happened. The loop never shows test numbers to any proposer.
 - `ClaudeCodeProposer` and the `"claude"` proposer call a real model. The tests use only `FakeLLM` and a stubbed

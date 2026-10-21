@@ -10,8 +10,8 @@ This module holds the agent-based models and the baselines they have to beat:
 | `OpinionPanel`, `opinion_baselines`, `BoundedConfidenceABM` | opinion drift between two survey waves: persistence, mean shift and transition baselines vs a Deffuant-Weisbuch ABM | measured; the ABM loses |
 | `ElasticityShrinkage`, `shuffle_elasticities`, `elicit_elasticities`, `PreEventMean` | price-elasticity prior (category, LLM or mix), ridge-shrunk toward the event's own history; LLM-swap placebo | measured; the gain comes from shrinkage |
 | `MarketABM`, `market_sim` | repeat-purchase market ABM (WTP, reference price, loss aversion, stockpiling, promotion, social effect) with pooled calibration | measured; not the most accurate |
-| `hawkes_mean_field`, `power_kernel`, `seismic_kernel`, `SeismicPredictor`, `shape_forecast` | self-exciting cascade predictors for share curves, plus the shape baseline | **not yet measured** |
-| `AgentSociety`, `ShareCascadeWorld`, `ChoiceWorld`, `World` | turn-based LLM agent society: a deterministic world, agents acting through the LLM protocol, a log for every turn | infrastructure; no accuracy measured |
+| `hawkes_mean_field`, `power_kernel`, `seismic_kernel`, `SeismicPredictor`, `shape_forecast` | self-exciting cascade predictors for share curves, plus the shape baseline | measured; Hawkes ties and SEISMIC loses to the shape baseline |
+| `AgentSociety`, `ShareCascadeWorld`, `ChoiceWorld`, `World` | turn-based LLM agent society: a deterministic world, agents acting through the LLM protocol, a log for every turn | measured; no better than a single LLM score or a calibrated constant curve |
 
 **Provenance.** Everything is ported from the TALP prep research branch `makro`. The algorithms and defaults
 are unchanged. Shorthand used below:
@@ -19,6 +19,7 @@ are unchanged. Shorthand used below:
 - **[abm RAPOR]** = `uretim/makro/abm/RAPOR.md`
 - **[M1 NOTLAR]** = `uretim/makro/abm/m1/NOTLAR.md`
 - **[RECETE]** = `uretim/makro/RECETE.md`
+- **[yayilim24 SONUC]** = `uretim/makro/abm/yayilim24/SONUC.md` (pre-registration `makro/onkayit/yayilim-24s.md`, commit 06224f7; run 21-22 Oct, added by the integrator after this module was written)
 
 Every number below comes from those files. This port did not re-measure anything.
 
@@ -81,7 +82,7 @@ later than year 28 and stores each curve on a 0.25-year grid aligned at its 1% c
   - `AdoptionABCAnalogy` 8.48 +/- 0.16
   - Bass-simulator control (`BassABCAnalogy`) 9.73 +/- 0.12
   - linear trend 10.72, Gompertz 11.61, Bass NLS 14.86, naive 18.39
-  - Paired ABM - Bass control: -1.25 +/- 0.21; seed-averaged 95% CI [-1.83, -0.82]; the ABM is better on 58 of
+  - Paired ABM - Bass control: -1.25 +/- 0.21 per seed; seed-averaged series bootstrap -1.32 [-1.83, -0.82]; the ABM is better on 58 of
     81 series.
 - **Where the gain comes from.** Compared with Bass NLS, about 81-85% of the gain comes from ABC plus the analogy
   prior and about 15-19% from the ABM structure; dev and test agree. Caveat: the two simulators' prior ranges
@@ -190,7 +191,7 @@ No separate contribution of the ABM structure was shown. Use it for mechanism an
 as stockpiling and the dip after a promotion, not for accuracy. Note that the research "price increase" label
 was 58% promotion ends; type those separately **[abm RAPOR]**.
 
-## Diffusion: Hawkes / SEISMIC cascade predictors (NOT YET MEASURED)
+## Diffusion: Hawkes / SEISMIC cascade predictors (measured: no gain over the shape baseline)
 
 **What it does.**
 - **Recursion.** `hawkes_mean_field` runs the mean-field self-exciting recursion in 1-minute bins after an
@@ -199,12 +200,32 @@ was 58% promotion ends; type those separately **[abm RAPOR]**.
   `seismic_kernel(s0=5, theta=0.242)` uses the SEISMIC defaults.
 - **SEISMIC-style predictor.** `SeismicPredictor` weights events by follower counts and adds the research's
   linear correction of the log final size.
-- **Shape baseline.** `shape_forecast` is the median training growth after t.
+- **Shape baseline.** `shape_forecast` is the median training growth after t (Szabo-Huberman, "SH" below).
 
-**Status.** The code is ported from the pre-registered `yayilim-24s` study (Twitter15/16 and SEISMIC, 24-hour
-curves). The run in the sources stopped after the training-set kernel grid search. **No dev or test result
-exists**, so this module quotes no accuracy number. Before using any of these on hackathon day, score them
-against `shape_forecast` and a fixed median curve with `simengine.evidence`.
+**Measured** **[yayilim24 SONUC]** (research code `makro/abm/kod/yayilim24.py`, the file this module was ported
+from; this port was not re-measured). Metric: log1p RMSE of the 24-hour cumulative curve on 145 points, lower is
+better, tree/cascade bootstrap CIs.
+
+| test set | method | information | curve RMSE |
+|---|---|---|---|
+| Twitter15/16 (418 trees, temporal + event-disjoint) | B0 fixed median curve (train) | none | 0.920 [0.862, 0.980] |
+| | SH60 shape baseline (`shape_forecast`) | first hour | 0.391 [0.342, 0.447] |
+| | HK60 Hawkes, power kernel c=1, θ=0.5 | first hour | 0.391 [0.341, 0.449] |
+| | G60 GBM on early features (**not ported**) | first hour | **0.289** [0.257, 0.323] |
+| | SH360 / HK360 / G360 | first 6 hours | 0.130 / 0.114 / 0.113 |
+| SEISMIC (39,263 cascades, day ≥ 12) | B0 | none | 0.620 |
+| | SH60 | first hour | 0.267 |
+| | SM60 SEISMIC-style (`SeismicPredictor`) | first hour | 0.308 |
+| | G60 | first hour | **0.187** |
+
+- HK60 − SH60 on Twitter: 0.000 [−0.006, +0.007]. The Hawkes recursion adds nothing over the shape baseline.
+- SM60 − SH60 on SEISMIC: +0.041 [+0.038, +0.043]. The SEISMIC-style model is worse. On about 45% of cascades the
+  p̂·n* ≥ 0.99 cap fired (n* = 1,298, a heavy-tailed follower mean); this adaptation is not a faithful SEISMIC
+  reproduction.
+- Early observation beats everything: the first hour takes the curve error from 0.77 (best text-only arm) to 0.29;
+  six hours to 0.11. If a diffusion task comes up, the ready arm is a GBM on early features plus `shape_forecast`.
+- A date-only shortcut (B3) beat text models (B3 − B1 −0.073 [−0.117, −0.028]), so every diffusion dataset needs a
+  temporal split and a date baseline.
 
 ## Turn-based LLM agent society
 
@@ -230,8 +251,19 @@ replays the same log exactly. `max_calls` and the backend's own budget guard bot
 For your own world, implement the `World` protocol: `active`, `describe`, `observe`, `parse`, `default_action`,
 `step`, `state`, `n_turns`.
 
-**Status.** This is infrastructure. The research society for retweet curves was pre-registered, but its
-evaluation never ran, so there is **no measured accuracy**. Related measured facts:
+**Measured** **[yayilim24 SONUC]**: the research retweet society (20 Haiku personas × 3 checkpoint turns,
+`ShareCascadeWorld` design, batch mode) predicting the 24-hour curve from the text alone, Twitter15/16 test, curve RMSE:
+- society L 0.771 [0.717, 0.827]; a single Haiku score D 0.772; L − D −0.001 [−0.010, +0.009]. The pre-registered
+  falsification condition "society adds nothing over one LLM score" **fired**.
+- L beats the TF-IDF model B1 (−0.130 [−0.191, −0.068]), but a post-hoc check shows that almost all of it is level
+  calibration: a constant median curve calibrated on the same dev period scores 0.772, and L − that curve is
+  −0.001 [−0.010, +0.009]. Against a recalibrated B1 the society keeps −0.010 [−0.018, −0.001]; Haiku's rank signal is
+  real but small (Spearman 0.16 [0.07, 0.26]).
+- Sonnet 5.5 on a 150-tree subsample: 0.801 vs Haiku 0.785 on the same trees. The bigger model did not help.
+- Test-retest of a second independent Haiku run (97 trees): final-size Spearman 0.78.
+- Cost: 3,348 calls, $0.94 (Haiku $0.29 + Sonnet $0.63).
+
+Related measured facts:
 - In the C1 survey panels, five rounds of discussion barely moved the answer distribution. ΔW1 was -0.005
   [-0.012, +0.002], and 5-8% of answers changed **[makro RAPOR C1]**.
 - A persona asked alone collapses to the most likely answer (spread 0.42, closes 0.41 of the gap vs 0.55 at

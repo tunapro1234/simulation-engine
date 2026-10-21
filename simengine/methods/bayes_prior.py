@@ -2,12 +2,20 @@
 
 "First 100 people + simulation = a 200+ person test": the prior N(k * logit p, tau^2) on the true log-odds ratio
 (A vs B) is calibrated on a few finished tests (k: scale, tau^2: how much to trust the prior), then combined with
-the noisy log-odds ratio of a small early test. Ported from `uretim/deney/kod/analiz/ornek_tasarrufu_llm.py`
-(2-fold cross-fit calibration, Haldane +0.5 correction, 300 binomial replays per pair).
+the noisy log-odds ratio of a small early test.
 
-Measured on Upworthy llm300 (uretim/deney/RAPOR.md 2.2-2.3): no archive, Opus 5.5 direct prior calibrated on 20
-tests, 100 impressions/arm (about 1.5 clicks): accuracy 0.718 -> 0.808, about 2.3x impression saving
-(2.27x, CI 1.67-3.11); 1.3x at 400 impressions; no gain at 800+. Replicated on ek600 at 2.05x (1.70-2.50).
+Two replay protocols are ported, and they give different numbers on the same data:
+
+* ``simulate_saving``: `uretim/deney/kod/analiz/ornek_tasarrufu_llm.py` (2-fold cross-fit calibration on half the
+  pairs, Haldane +0.5 correction, 300 binomial replays per pair, seed 11). Its saved output
+  (`ornek_tasarrufu_llm.json`, Upworthy llm300, 300 pairs) at 100 impressions/arm: human 0.713; Opus 5.5 direct
+  prior -> hybrid 0.815, 2.47x saving (1.34x at 400, none at 800); TF-IDF prior 2.79x; TF-IDF + Opus stack 3.68x.
+* ``simulate_saving_calibrated``: `uretim/deney/kod/analiz/ornek_tasarrufu_llm_ga.py` (each of 10 blocks is
+  calibrated on ``n_calib`` random pairs from the other blocks, 5 draws, 200 replays, seed 5, pair-bootstrap 95% CI
+  of the multiplier at n=100). This is the headline of uretim/deney/RAPOR.md 2.2-2.3: no archive, Opus 5.5 direct
+  prior calibrated on 20 tests: accuracy 0.718 -> 0.808, 2.27x (CI 1.67-3.11); TF-IDF 2.44x; stack 3.30x
+  (`ornek_tasarrufu_llm_ga.json`). Replicated on ek600 at 2.05x (1.70-2.50).
+
 Most of the gain comes from breaking ties in tests with very few clicks ("human decides, prior breaks ties"
 alone gives 0.786).
 """
@@ -103,7 +111,9 @@ def simulate_saving(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b=None, ns=N
     hybrid uses the 2-fold cross-fitted prior (a pair's calibration never sees its own result).
     Returns accuracies per n, prior-only accuracy and the equivalent-impression multiplier per n.
     Note: the replay is circular (truth and replay come from the same data); the adversarial check found this
-    biases AGAINST the hybrid (independent split-half: 3.1-3.3x) (uretim/deney/RAPOR.md 2.1)."""
+    biases AGAINST the hybrid (independent split-half: 3.1-3.3x) (uretim/deney/RAPOR.md 2.1).
+    Seed-for-seed equal to `ornek_tasarrufu_llm.py` (same RNG consumption order). For the RAPOR headline
+    (calibration on 20 tests, CI) use ``simulate_saving_calibrated``."""
     ctr_a, ctr_b = np.asarray(ctr_a, float), np.asarray(ctr_b, float)
     y = ctr_a > ctr_b
     lor_t, se_t = true_lor(ctr_a, ctr_b, clicks_a, clicks_b)
@@ -116,14 +126,15 @@ def simulate_saving(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b=None, ns=N
             m = np.ones(n_pairs, bool)
         k, t2 = calibrate_prior(np.asarray(prior_prob)[m], lor_t[m], se_t[m], fix_scale)
         mu[fold == f], tau2[fold == f] = k * _logit(np.asarray(prior_prob)[fold == f]), t2
+    # RNG order as in the research script: every binomial replay for every n first, then the tie-break draws.
     rs = np.random.default_rng(seed)
+    sims = [(rs.binomial(n, ctr_a, size=(reps, n_pairs)), rs.binomial(n, ctr_b, size=(reps, n_pairs))) for n in ns]
     human, hybrid = [], []
-    for n in ns:
-        ca = rs.binomial(n, ctr_a, size=(reps, n_pairs))
-        cb = rs.binomial(n, ctr_b, size=(reps, n_pairs))
+    for ca, cb in sims:
         d = ca - cb
         dec = np.where(d == 0, rs.random(d.shape) < 0.5, d > 0)
         human.append(float(np.mean(dec == y)))
+    for n, (ca, cb) in zip(ns, sims):
         lor, se2 = early_lor(ca, n, cb, n)
         post, _ = posterior_lor(mu, tau2, lor, se2)
         hybrid.append(float(np.mean((post > 0) == y)))
@@ -133,3 +144,76 @@ def simulate_saving(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b=None, ns=N
     return {"n_pairs": int(n_pairs), "ns": list(ns), "human": dict(zip(map(str, ns), human)),
             "hybrid": dict(zip(map(str, ns), hybrid)), "prior_only": prior_acc,
             "multiplier": dict(zip(map(str, ns), mult))}
+
+
+NS_CALIBRATED = (25, 50, 100, 200, 400, 800, 1600)
+
+
+def simulate_saving_calibrated(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b=None, n_calib: int = 20,
+                               ns=NS_CALIBRATED, reps: int = 200, draws: int = 5, blocks: int = 10,
+                               n_boot: int = 500, n0: int = 100, seed: int = 5, fix_scale: bool = False) -> dict:
+    """Impression saving when only ``n_calib`` finished tests are available to calibrate the prior, with a
+    pair-bootstrap 95% CI of the multiplier at ``n0`` impressions/arm (port of `ornek_tasarrufu_llm_ga.py`).
+
+    Pairs are split into ``blocks`` blocks; each block's k and tau^2 come from ``n_calib`` pairs drawn at random from
+    the other blocks (one draw per block, ``draws`` independent draws averaged, draw seeds 0..draws-1). Small tests
+    are replayed ``reps`` times. The human curve is made monotone (running max) before the inverse interpolation.
+    Ties at ``n0``: ``human_decides_prior_breaks_ties`` is the accuracy of "human decides, prior breaks ties".
+    Measured (Upworthy llm300, Opus 5.5 direct, n_calib=20): human 0.718 -> hybrid 0.808, 2.27x [1.67, 3.11];
+    n_calib=150: 2.58x [1.88, 3.42] (uretim/deney/RAPOR.md 2.2-2.3, `ornek_tasarrufu_llm_ga.json`)."""
+    ctr_a, ctr_b = np.asarray(ctr_a, float), np.asarray(ctr_b, float)
+    p = np.asarray(prior_prob, float)
+    y = ctr_a > ctr_b
+    n_pairs = len(y)
+    if n0 not in ns:
+        raise ValueError(f"n0={n0} must be one of ns={tuple(ns)}")
+    lor_t, se_t = true_lor(ctr_a, ctr_b, clicks_a, clicks_b)
+    z = _logit(p)
+    rs = np.random.default_rng(seed)
+    sims = {n: (rs.binomial(n, ctr_a, size=(reps, n_pairs)), rs.binomial(n, ctr_b, size=(reps, n_pairs))) for n in ns}
+    tie = rs.random((reps, n_pairs)) < 0.5
+    human_dec = {n: np.where(sims[n][0] == sims[n][1], tie, sims[n][0] > sims[n][1]) for n in ns}
+    human_acc = {n: np.mean(human_dec[n] == y, axis=0) for n in ns}
+    blk = np.arange(n_pairs) % blocks
+
+    def hybrid_acc(draw_seed):
+        r = np.random.default_rng(draw_seed)
+        mu, tau2 = np.zeros(n_pairs), np.zeros(n_pairs)
+        for b in range(blocks):
+            cand = np.flatnonzero(blk != b)
+            if len(cand) == 0:
+                continue
+            m = r.choice(cand, min(n_calib, len(cand)), replace=False)
+            k, t2 = calibrate_prior(p[m], lor_t[m], se_t[m], fix_scale)
+            mu[blk == b], tau2[blk == b] = k * z[blk == b], t2
+        out = {}
+        for n in ns:
+            ca, cb = sims[n]
+            lor, se2 = early_lor(ca, n, cb, n)
+            post, _ = posterior_lor(mu, tau2, lor, se2)
+            out[n] = np.mean((post > 0) == y, axis=0)
+        return out
+
+    hs = [hybrid_acc(s) for s in range(draws)]
+    h = {n: np.mean([x[n] for x in hs], axis=0) for n in ns}
+    logn = np.log(np.asarray(ns, float))
+
+    def gain(idx):
+        hy = np.maximum.accumulate(np.array([human_acc[n][idx].mean() for n in ns]))
+        target = h[n0][idx].mean()
+        if target > hy.max():
+            return np.nan
+        return float(np.exp(np.interp(target, hy, logn)) / n0)
+
+    point = gain(np.arange(n_pairs))
+    bs = np.array([gain(rs.integers(0, n_pairs, n_pairs)) for _ in range(n_boot)])
+    bs = bs[np.isfinite(bs)]
+    ci = [float(np.percentile(bs, 2.5)), float(np.percentile(bs, 97.5))] if len(bs) else [None, None]
+    ties = sims[n0][0] == sims[n0][1]
+    rule = float(np.mean(np.where(ties, np.where(p == .5, tie, p > .5), human_dec[n0]) == y))
+    return {"n_pairs": int(n_pairs), "n_calib": int(n_calib), "ns": list(ns), "n0": int(n0),
+            "human": {str(n): float(human_acc[n].mean()) for n in ns},
+            "hybrid": {str(n): float(h[n].mean()) for n in ns},
+            "prior_only": float(np.mean(np.where(p == .5, .5, (p > .5) == y))),
+            "multiplier": None if not np.isfinite(point) else point, "ci": ci,
+            "tie_rate": float(ties.mean()), "human_decides_prior_breaks_ties": rule}

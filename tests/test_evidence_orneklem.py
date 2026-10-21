@@ -1,4 +1,7 @@
 """Ported from kanit testler/test_orneklem.py: effective sample multiplier. Synthetic data."""
+import builtins
+import os
+import sys
 import unittest
 
 import numpy as np
@@ -6,6 +9,14 @@ import pandas as pd
 
 from simengine.evidence import orneklem as ok
 from simengine.evidence import sema
+
+
+_VERBOSE = os.environ.get("SIMENGINE_TEST_VERBOSE") == "1" or "-v" in sys.argv or "--verbose" in sys.argv
+
+
+def print(*a, **k):  # noqa: A001 - diagnostic lines only with -v or SIMENGINE_TEST_VERBOSE=1
+    if _VERBOSE:
+        builtins.print(*a, **k)
 
 
 def _surekli(M=10, N=1000, tohum=0, mu_sd=1.0):

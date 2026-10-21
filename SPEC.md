@@ -5,8 +5,8 @@ evidence pipeline measured during the TALP prep nights. It should be easy to pic
 day: `pip install -e .`, then a few lines go from a raw table to an evidence card with confidence
 intervals and an honest baseline ladder.
 
-Source research code (read-only, never modify):
-`/srv/lighthouse/hackathon-coz/projeler/talp-simulation-hackathon-2026/uretim/<branch>/`.
+Source research code (read-only, never modify): the sibling research tree
+`talp-simulation-hackathon-2026/uretim/<branch>/` (next to this repo, not part of it).
 Each branch has `RAPOR.md` (measured results), `RECETE.md` (rebuild recipe) and `kod/`.
 
 ## Rules
@@ -23,7 +23,7 @@ Each branch has `RAPOR.md` (measured results), `RECETE.md` (rebuild recipe) and 
    protocol and `FakeLLM`) and `simengine.evidence.evaluate`. If you need something from another
    module, depend on the protocol in `types.py`. Do not copy another module's internals.
 3. **No secrets, no data, no machine paths.**
-   - No API key values, and no key file paths under `/srv/...`. The key comes from
+   - No API key values, and no key file paths on the build machine. The key comes from
      `ANTHROPIC_API_KEY` or a file named in `SIMENGINE_KEY_FILE`.
    - No datasets in the repo. Loaders take `data_root`, or read the `SIMENGINE_DATA` env var,
      with documented expected layouts.
@@ -33,8 +33,8 @@ Each branch has `RAPOR.md` (measured results), `RECETE.md` (rebuild recipe) and 
    - Core: numpy, pandas, scikit-learn, scipy.
    - Optional extras, imported lazily: `anthropic` (llm), `lightgbm`, `statsmodels`,
      `transformers`/`torch` (vision).
-   - Nothing new may be installed. Run tests with
-     `/data/talp/venv/bin/python -m unittest discover -s tests -t .` (pytest is not installed).
+   - Nothing new may be installed. Run tests with the project's virtualenv Python:
+     `python -m unittest discover -s tests -t .` (pytest is not installed).
 5. **Tests.** Each module gets unittest tests on small synthetic data. They must run offline in
    under 60 s, use `FakeLLM` and make no network calls. One optional live smoke test may run
    behind `SIMENGINE_LIVE=1`. Do not run it.

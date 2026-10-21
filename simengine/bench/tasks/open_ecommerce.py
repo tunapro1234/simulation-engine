@@ -206,6 +206,12 @@ class OpenEcommerce(BenchTask):
     (protocol values; smaller only for toy data); lgbm=True (LightGBM baselines, skipped if lightgbm is absent)."""
 
     name = "open_ecommerce"
+    accepted_options = {
+        'seed': 'int (default 0)',
+        'n_categories': 'int (default 20)',
+        'n_persons': 'int (default 400)',
+        'lgbm': 'true | false (default true)',
+    }
     kind = "binary"
     data_subdir = "open-ecommerce"
     layout = """

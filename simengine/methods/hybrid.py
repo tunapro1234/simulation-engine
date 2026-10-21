@@ -134,7 +134,16 @@ def _new(kind, method):
     return Ridge(alpha=1.0) if kind == "continuous" else LogisticRegression(max_iter=2000, C=1.0)
 
 
-def _fit_apply(kind, method, Za, ya, Zb):
+def _align(P, model_classes, classes):
+    """Put predict_proba columns in ``classes`` order; a class unseen in training gets 0 (intent kit `_hizala`)."""
+    out = np.zeros((P.shape[0], len(classes)))
+    idx = {c: i for i, c in enumerate(classes)}
+    for j, c in enumerate(model_classes):
+        out[:, idx[c]] = P[:, j]
+    return out
+
+
+def _fit_apply(kind, method, Za, ya, Zb, classes=None):
     m = _new(kind, method)
     if method == "isotonic":
         return m.fit(Za[:, 0], ya).predict(Zb[:, 0])
@@ -142,13 +151,17 @@ def _fit_apply(kind, method, Za, ya, Zb):
     if kind == "continuous":
         return m.predict(Zb)
     P = m.predict_proba(Zb)
-    return P[:, list(m.classes_).index(1)] if kind == "binary" else P
+    if kind == "binary":
+        return P[:, list(m.classes_).index(1)]
+    return P if classes is None else _align(P, list(m.classes_), list(classes))
 
 
 class DevStack:
     """Stack several methods' predictions with a model learned on dev: logistic on logits (binary), on log
     probabilities (multiclass), ridge (continuous). ``fit`` also stores honest dev predictions (``dev_pred_``) from a
-    5-fold cross-fit, so the dev score of the stack is not optimistic (intent kit `valid_ogren`)."""
+    5-fold cross-fit, so the dev score of the stack is not optimistic (intent kit `valid_ogren`). Multiclass
+    probabilities are aligned to ``classes_`` (sorted labels of ``y_dev``); a class missing from a training fold gets
+    probability 0 in that fold, as in the kit's `_hizala`."""
 
     def __init__(self, kind: str = "binary", folds: int = 5, seed: int = 0):
         self.kind, self.folds, self.seed = kind, folds, seed
@@ -157,17 +170,15 @@ class DevStack:
         from sklearn.model_selection import KFold
         Z, y = _z(self.kind, dev_preds), np.asarray(y_dev)
         self.Z_, self.y_ = Z, y
-        out = np.zeros(len(y)) if self.kind != "multiclass" else None
+        self.classes_ = np.unique(y) if self.kind == "multiclass" else None
+        out = np.zeros((len(y), len(self.classes_))) if self.kind == "multiclass" else np.zeros(len(y))
         for a, b in KFold(self.folds, shuffle=True, random_state=self.seed).split(Z):
-            pb = _fit_apply(self.kind, "stack", Z[a], y[a], Z[b])
-            if out is None:
-                out = np.zeros((len(y),) + np.shape(pb)[1:])
-            out[b] = pb
+            out[b] = _fit_apply(self.kind, "stack", Z[a], y[a], Z[b], self.classes_)
         self.dev_pred_ = out
         return self
 
     def predict(self, test_preds: Sequence):
-        return _fit_apply(self.kind, "stack", self.Z_, self.y_, _z(self.kind, test_preds))
+        return _fit_apply(self.kind, "stack", self.Z_, self.y_, _z(self.kind, test_preds), self.classes_)
 
 
 class BinaryCalibrator:

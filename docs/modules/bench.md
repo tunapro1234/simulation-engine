@@ -41,6 +41,32 @@ print(bench.to_markdown(table))
 `bench.get(name).layout` prints the files a task expects. Every loader accepts either the catalogue root (the one
 holding `gss/`, `upworthy/`, ...) or the task's own directory.
 
+Each task declares its options (`accepted_options`; shown by `simengine bench list -v` and `describe()`), and an
+unknown option key raises `ValueError`, so a typo such as `upworthy:spilt=holdout` fails instead of silently running
+the default split.
+
+## Datasets and licences
+
+The repository ships no data. Download each set yourself under its own terms and point `data_root` (or
+`SIMENGINE_DATA`) at your copy. Check the terms before you build a prize-bearing or commercial submission on a set:
+the non-commercial and academic-only ones may not allow it.
+
+| dataset | task / where results come from | licence / terms | watch out |
+|---|---|---|---|
+| UCI Bank Marketing | `bank_marketing` | CC BY 4.0 | attribution |
+| Upworthy Research Archive | `upworthy` | CC BY 4.0 | attribution |
+| Open e-commerce 1.0 (Harvard Dataverse) | `open_ecommerce` | CC BY 4.0 | attribution |
+| Twin-2K-500 | `twin2k500` | CC BY 4.0 per dataset card | attribution |
+| OPeRA | next-action results (methods) | CC BY 4.0 | attribution |
+| SimBench | `simbench` | **CC BY-NC-SA 4.0** | **non-commercial**; share-alike |
+| Pew ATP via OpinionQA / SubPOP | `opinionqa_groups` | **research use** (Pew terms) | check before prize or commercial use |
+| GSS panels (NORC) | `gss` | free, attribution required, **no redistribution** | do not ship the data with a submission |
+| Dominick's | ABM elasticity results (abm) | **academic research use only** | clear it with the organiser before using it at an event |
+| SEISMIC (SNAP) | retweet-curve results (abm) | **no licence stated**, research use; cite Zhao et al. 2015 | ask the source before prize use |
+
+Sources: each adapter's `meta["source"]` and the research data notes (`makro/arastirma/veri-ham.md`,
+`makro/abm/arastirma/literatur.md`, `web/PROTOKOL.md`). The dataset's own page is what binds.
+
 ## Tasks
 
 Unless a note says otherwise, numbers are the research code's own results, with the branch and file under

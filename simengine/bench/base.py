@@ -78,8 +78,15 @@ class BenchTask:
     layout: str = ""
     source: str = ""
     metrics: tuple[Metric, ...] = ()
+    # option name -> "allowed values (default)"; None = the task does not declare its options (no check)
+    accepted_options: dict[str, str] | None = None
 
     def __init__(self, **options: Any):
+        if self.accepted_options is not None:
+            unknown = sorted(set(options) - set(self.accepted_options))
+            if unknown:
+                known = ", ".join(f"{k}: {v}" for k, v in self.accepted_options.items()) or "none"
+                raise ValueError(f"{self.name}: unknown option(s) {unknown}; accepted options: {known}")
         self.options = options
 
     # ------------------------------------------------------------------ protocol
@@ -188,7 +195,8 @@ class BenchTask:
 
     def describe(self) -> dict:
         return {"name": self.name, "kind": self.kind, "data_subdir": self.data_subdir, "layout": self.layout.strip(),
-                "source": self.source.strip(), "metrics": [m.name for m in self.metrics], "options": dict(self.options)}
+                "source": self.source.strip(), "metrics": [m.name for m in self.metrics], "options": dict(self.options),
+                "accepted_options": dict(self.accepted_options or {})}
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(name={self.name!r}, kind={self.kind!r}, options={self.options})"

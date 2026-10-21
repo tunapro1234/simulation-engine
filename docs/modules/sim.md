@@ -175,8 +175,12 @@ primary measure).
 - `batch_calibrate` (KARSIT-1 T1): after calibration the L1 − survey-model gap on 1b(c) includes zero
   (−0.013 / −0.008 / −0.002). The 1a headline moves from 69.4% to 76.5%, but the calibrated prediction is
   then close to always-no.
-- The SSR arm (`level="SSR"`) was run in talp73 (v1.7d). Its accuracy is not written up in the branch
-  reports, so no number is given here.
+- SSR arm (`level="SSR"`, Haiku, all-MiniLM-L6-v2 embeddings, talp73 v1.7d, pre-registered; source
+  `talp73/kod/llm/SONUC-v1.7d.md`, added by the integrator): calibrated SSR 1b(c) 0.573 / 0.551 / 0.547 and person AUC
+  0.584 / 0.583 / 0.571. SSR-cal − L1-cal on 1b(c): −0.015 [−0.039; +0.007], −0.017 [−0.038; +0.006],
+  −0.039 [−0.066; −0.015]; person AUC −0.034..−0.046, significant in all seeds. SSR-cal is below the survey model in
+  every seed (1b(c) −0.028 / −0.025 / −0.041) and far below the history model (−0.102..−0.125). Free-text sentences
+  carry some person-specific signal, but less than the numeric prompt. Cost: 1,043 calls, $0.678.
 
 ## Design notes and deviations from the research code
 - **English field names.** The panel field names (`score`, `choice`, `reason`, `intent`, `remark`,

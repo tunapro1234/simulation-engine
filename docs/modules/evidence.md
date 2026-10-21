@@ -211,10 +211,24 @@ Measured at n = 100 [kanit RAPOR §1a]:
 The card has six rows: strongest simple baseline → raw → ours → human ceiling → gap closed → worth N humans
 (ours at n = 100; if ours is circular, the raw arm's value with a note). The badge rule:
 - `bekliyor` (awaiting truth) when there is no truth yet
-- `kararsiz` (inconclusive) when the upper bound of ours − baseline is below 0
+- `kararsiz` (inconclusive) when the upper bound of ours − baseline is below 0. The internal code stays
+  `kararsiz` (research rule), but `summary()["badge"]` and the Markdown card report this case as
+  **`below baseline`** (`summary()["below_baseline"]` is True), so a quoted badge does not understate a clear loss
 - `yuksek` (high confidence) only when the CI lower bound is above 0 and the difference is ≥ 0.02; if ours has
   its own worth-N value, its lower bound must also be ≥ 1.10× and above the baseline's lower bound
 - another column's multiplier never supports the badge
+
+The Markdown card (`card(report, path, lang="mixed" | "en")`) also prints an English one-line summary with dot
+decimals (`summary()["headline_en"]`), a "Sealed predictions" table (SHA-256 and UTC time of every seal record
+attached via `prereg=`), and, when the primary metric ranks or correlates (AUC, Pearson, Spearman, ...), a Limits
+note if a cross-fitted average baseline (`taban_marjinal`, `taban_demografi`) lands below chance: a leave-one-out
+mean moves against the held-out truth, which is expected and not a bug. `lang="en"` drops the Turkish badge reason
+and original headline; ladder and audit labels stay Turkish. `evaluate(prereg=<dir>)` warns when the directory has
+no `zincir.jsonl` (the CLI stops with an error).
+
+Default primary metric per task when `primary` is not given: binary / multiclass `accuracy` (`macro_f1` when the
+majority class is above 60 %), distribution `one_minus_tvd`, continuous `pearson` (`one_minus_mae` when the truth
+lies in 0-1), ab `pair_sign`. The CLI warns when `--primary` is missing.
 
 `panel_cost` converts extra answers to a public panel price ($0.95–2.86 per answer, a calculation).
 - *Measured:* under this rule none of the four example cards (Twin, OE value, OE class, OE LLM-500) is

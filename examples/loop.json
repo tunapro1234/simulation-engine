@@ -1,0 +1,18 @@
+{
+  "runner": "research_loop.py:runner",
+  "space": {
+    "params": {"shrink": {"range": [0.0, 1.0]}, "k": {"range": [1, 24]}, "method": ["prior", "knn"]},
+    "defaults": {"shrink": 0.2, "k": 4, "method": "prior"}
+  },
+  "loop": {
+    "proposer": "random",
+    "primary": "err",
+    "higher_is_better": false,
+    "stop_after": 3,
+    "max_turns": 12,
+    "baselines": {"prior": {"method": "prior"}},
+    "select_split": "select",
+    "workdir": "runs/loop-demo",
+    "task": "Minimise per-unit error"
+  }
+}

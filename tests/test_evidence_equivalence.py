@@ -1,7 +1,7 @@
 """Equivalence with the original research package `kanit` (same input -> same report).
 
-Imports the original from the research tree when it is present on this machine, skipped otherwise.
-Set SIMENGINE_KANIT_SRC to point at another copy of `kanit/kod`.
+Imports the original `kanit` package from the directory named in SIMENGINE_KANIT_SRC (the research tree's
+`kanit/kod`); skipped when the variable is unset or the package is not there.
 """
 import importlib
 import json
@@ -16,12 +16,12 @@ import pandas as pd
 import simengine.evidence as ev
 from simengine.evidence import bedel, kart, onkayit, orneklem, pano, sema
 
-_SRC = Path(os.environ.get("SIMENGINE_KANIT_SRC", "/srv/lighthouse/hackathon-coz/projeler/"
-                           "talp-simulation-hackathon-2026/uretim/kanit/kod"))
+_SRC_ENV = os.environ.get("SIMENGINE_KANIT_SRC")
+_SRC = Path(_SRC_ENV) if _SRC_ENV else None
 
 
 def _orig():
-    if not (_SRC / "kanit" / "__init__.py").exists():
+    if _SRC is None or not (_SRC / "kanit" / "__init__.py").exists():
         return None
     old = sys.dont_write_bytecode
     sys.dont_write_bytecode = True       # never write __pycache__ into the read-only research tree

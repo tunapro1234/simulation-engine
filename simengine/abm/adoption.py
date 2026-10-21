@@ -19,8 +19,8 @@ simulation time tau1 + (t - t0) + delta, with delta on a 0.25-year grid in [0, d
 Leakage: a fit only sees `history` (all series, t <= cutoff). m is never fixed; it comes from the prior.
 
 Measured (makro/abm/m1/NOTLAR.md and makro/RAPOR.md M1): OWID internet TEST, 7 seeds, MAE pp:
-AdoptionABCAnalogy 8.48 +/- 0.16, BassABCAnalogy 9.73 +/- 0.12 (paired diff -1.25, 95% CI [-1.83, -0.82]),
-linear trend 10.72, Gompertz 11.61, Bass NLS 14.86, naive 18.39. US household technologies (dev): AdoptionABC
+AdoptionABCAnalogy 8.48 +/- 0.16, BassABCAnalogy 9.73 +/- 0.12 (paired diff -1.25 +/- 0.21 per seed;
+seed-averaged series bootstrap -1.32, 95% CI [-1.83, -0.82]), linear trend 10.72, Gompertz 11.61, Bass NLS 14.86, naive 18.39. US household technologies (dev): AdoptionABC
 8.54 vs linear 8.70 (not significant) and the analogy prior HURTS there (10.07).
 """
 from __future__ import annotations

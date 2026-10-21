@@ -39,6 +39,15 @@ class TestTwin(unittest.TestCase):
         self.assertTrue(set(O["nom"].unique()) <= {2.0, 7.0})
         self.assertEqual(P["nom"].nunique(), 1)               # nominal point = mode
 
+    def test_input_order_does_not_change_predictions(self):
+        P1, _ = TwinStack(seed=0, min_stack=0).fit(self.X, self.T, nominal=["nom"]).predict(self.test)
+        rs = np.random.default_rng(7)
+        X2 = self.X.iloc[rs.permutation(len(self.X)), rs.permutation(self.X.shape[1])]
+        T2 = self.T.iloc[rs.permutation(len(self.T))]
+        P2, _ = TwinStack(seed=0, min_stack=0).fit(X2, T2, nominal=["nom"]).predict(self.test)
+        np.testing.assert_allclose(P1[self.num].to_numpy(float), P2.loc[P1.index, self.num].to_numpy(float),
+                                   atol=1e-9)
+
     def test_residual_binned_and_llm(self):
         rs = np.random.default_rng(1)
         llm = pd.DataFrame(np.clip(3 + self.lat + rs.normal(0, 0.3, self.lat.shape), 1, 5), index=self.T.index,

@@ -1,0 +1,11 @@
+Copyright (c) 2026 the simengine authors. All rights reserved.
+
+simengine is proprietary software. It is not released under an open-source licence.
+No permission is granted to copy, modify, distribute or sublicense this software, in
+whole or in part, without prior written permission from the copyright holders.
+
+The datasets used by the benchmark adapters are not part of this repository. Each one
+is subject to its own licence and terms of use (see "Datasets and licences" in
+README.md and docs/modules/bench.md).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.

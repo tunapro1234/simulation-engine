@@ -217,6 +217,11 @@ class OpinionQAGroups(BenchTask):
     items='all'|'climb'|'select' (dev only, dongu hash partition); setting='A'|'B'."""
 
     name = "opinionqa_groups"
+    accepted_options = {
+        'split': '"test" | "dev" (default "test")',
+        'items': '"all" | "climb" | "select", dev split only (default "all")',
+        'setting': '"A" (no Overall given) | "B" (Overall given) (default "A")',
+    }
     kind = "distribution"
     data_subdir = None
     layout = """

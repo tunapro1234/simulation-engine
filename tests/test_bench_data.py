@@ -1,6 +1,7 @@
 """Data-present checks: reproduce published development numbers on the real catalogue when it is on this machine.
 
-Skipped when the catalogue is absent. Root: $SIMENGINE_TEST_DATA, else /data/talp/veri (the research machine).
+Skipped when the catalogue is absent. Root: $SIMENGINE_TEST_DATA, else $SIMENGINE_DATA,
+else the research machine's catalogue (the ROOT default below).
 Each expected number comes from the research branch file named in the assertion message. Budget < 30 s.
 """
 import os
@@ -9,7 +10,7 @@ import warnings
 
 from simengine import bench
 
-ROOT = os.environ.get("SIMENGINE_TEST_DATA", "/data/talp/veri")
+ROOT = os.environ.get("SIMENGINE_TEST_DATA") or os.environ.get("SIMENGINE_DATA") or "/data/talp/veri"
 
 
 def _has(*parts):

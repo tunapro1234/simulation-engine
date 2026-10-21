@@ -94,6 +94,10 @@ class SimBench(BenchTask):
     """Options: split='test' (default; non-dev rows) | 'dev'; part='both' (default) | 'pop' | 'grp'."""
 
     name = "simbench"
+    accepted_options = {
+        'part': '"both" | "pop" | "grp" (default "both")',
+        'split': '"test" | "dev" (default "test")',
+    }
     kind = "distribution"
     data_subdir = "simbench"
     layout = """

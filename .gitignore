@@ -9,3 +9,27 @@ dist/
 secrets/
 data/
 runs/
+# local data and outputs: never commit customer tables, sealed registries or run outputs
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.zip
+*.gz
+*.jsonl
+*.pkl
+*.pickle
+*.lock.json
+.onkayit/
+*-evidence/
+/simengine-demo/
+/evidence/
+# environments, secrets, notebooks
+.venv/
+venv/
+/env/
+.env.*
+*.pem
+*.p12
+.ipynb_checkpoints/
+*.ipynb

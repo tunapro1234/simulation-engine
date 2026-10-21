@@ -172,6 +172,10 @@ class GSSWave(BenchTask):
     (leave-one-old-panel-out development fold); items='all'|'climb'|'select' (dongu dev partition by item hash)."""
 
     name = "gss"
+    accepted_options = {
+        'items': '"all" | "climb" | "select" (default "all")',
+        'holdout_panel': 'None | "panel2006" | "panel2008" | "panel2010" (default None: test on panel2016_2020)',
+    }
     kind = "continuous"
     data_subdir = "gss"
     layout = """

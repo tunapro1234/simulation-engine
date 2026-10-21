@@ -175,6 +175,9 @@ class Twin2K500(BenchTask):
     'dev' (inside the dev persons only: a second fixed hash holds out 20% of them; test persons never used)."""
 
     name = "twin2k500"
+    accepted_options = {
+        'split': '"test" | "dev" (default "test")',
+    }
     kind = "continuous"
     data_subdir = "twin2k500"
     layout = """

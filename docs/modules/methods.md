@@ -11,7 +11,7 @@ that combine an LLM prediction with a model learned from data.
 | `basket_tensor`, `popularity`, `personal_frequency`, `decayed_frequency`, `tifu_knn` | next-basket / repeat-purchase scorers | decayed frequency beats P-TopFreq; TIFU-KNN adds nothing |
 | `LogisticBaseline`, `LightGBMBaseline`, `KNNBaseline`, `TextKNNRegressor` | supervised tabular / text baselines | GBDT ties persistence when history is available; text kNN on effect sizes is weak |
 | `LengthAB`, `TfidfAB`, `TfidfWordAB`, `LLMDirectAB`, `LogitAverageAB`, `ABStack` | A/B winner of two texts | stack (TF-IDF + LLM) is the best measured arm, at **0.817** on Upworthy |
-| `EarlyTestBayes`, `simulate_saving`, ... | LLM prior + small early test, normal-normal Bayes on the log-odds ratio | **about 2.3x** impression saving at 100 impressions/arm, no gain at 800+ |
+| `EarlyTestBayes`, `simulate_saving_calibrated`, ... | LLM prior + small early test, normal-normal Bayes on the log-odds ratio | **about 2.3x** impression saving at 100 impressions/arm, no gain at 800+ |
 | `ShrunkDeviation`, `ridge_to_prior`, `select_lambda`, `LLMFeatureGBDT`, `DevStack`, `BinaryCalibrator` | ways of letting an LLM prediction into a data model, tuned on dev | the LLM term mostly adds ~0 once a strong data baseline exists; tuning keeps it from hurting |
 | `TwinStack`, `pooled_logistic_oof`, `column_correlation`, ... | person-level digital twin: matrix completion + kNN + optional LLM column, ridge-stacked per column | Twin-2K-500 fair LLM-free baseline **0.342** corr; LLM adds +0.006 |
 | `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout` | conditional multinomial logit for conjoint / discrete choice | 0.509 new-person accuracy on camera conjoint (HB 0.519, HB not ported) |
@@ -135,15 +135,24 @@ swapped (position bias). `coverage_` is the share of pairs with a valid answer.
 
 ## LLM prior + early test (`bayes_prior.py`)
 
-Port of `deney/kod/analiz/ornek_tasarrufu_llm.py`. The prior on the true log-odds ratio is
-N(k * logit p, tau^2): `calibrate_prior` fits k through the origin and sets tau^2 = Var(residual) - mean se^2. An
-early test's Haldane-corrected LOR is then combined with that prior by precision weighting. `simulate_saving`
-replays the experiment with a 2-fold cross-fitted prior and 300 binomial replays per pair, then converts accuracy
-into an "equivalent impressions" multiplier.
+Port of `deney/kod/analiz/ornek_tasarrufu_llm.py` and `ornek_tasarrufu_llm_ga.py`. The prior on the true
+log-odds ratio is N(k * logit p, tau^2): `calibrate_prior` fits k through the origin and sets tau^2 =
+Var(residual) - mean se^2. An early test's Haldane-corrected LOR is then combined with that prior by precision
+weighting. Two replay protocols convert accuracy into an "equivalent impressions" multiplier, and they give
+different numbers on the same data:
 
-Measured on Upworthy llm300 **[deney 2.2-2.3]**: an Opus direct prior calibrated on 20 tests, at 100
-impressions per arm, raises accuracy from 0.718 to 0.808. That is **2.27x (1.67-3.11)** impressions. Other
-priors and settings:
+- `simulate_saving` (port of `ornek_tasarrufu_llm.py`): 2-fold cross-fitted prior (calibrated on half the pairs,
+  about 150), 300 binomial replays per pair, seed 11, no CI. Same RNG order as the script, so the same input and
+  seed give the same numbers. Saved output `ornek_tasarrufu_llm.json` (llm300, 300 pairs), 100 impressions/arm:
+  human 0.713; Opus direct prior 0.815, **2.47x**; TF-IDF prior 2.79x; stack prior 3.68x; Opus at 400: 1.34x.
+- `simulate_saving_calibrated` (port of `ornek_tasarrufu_llm_ga.py`): each of 10 blocks is calibrated on
+  `n_calib` random pairs from the other blocks, 5 draws, 200 replays, seed 5, pair-bootstrap 95% CI of the
+  multiplier at n=100. It also returns the "human decides, prior breaks ties" accuracy. This is the protocol
+  behind the RAPOR headline below.
+
+Measured on Upworthy llm300 with `simulate_saving_calibrated` **[deney 2.2-2.3, `ornek_tasarrufu_llm_ga.json`]**:
+an Opus direct prior calibrated on 20 tests, at 100 impressions per arm, raises accuracy from 0.718 to 0.808. That
+is **2.27x (1.67-3.11)** impressions. Other priors and settings (calibration on 20 tests unless stated):
 
 | prior / setting | multiplier |
 |---|---|
@@ -249,7 +258,11 @@ out-of-fold with GroupKFold by session on train, and from all of train for test:
 
 `Markov2Baseline` scores `f_markov2 + 1e-2 f_markov + 1e-4 f_page`. `NextActionRanker` runs LightGBM lambdarank
 (300 trees, lr 0.05, 31 leaves, truncation 20) on the priors plus your own feature columns. Negatives are sampled
-per step: the positives, the top 60 by prior, and 40 random candidates.
+per step: the positives, the top 60 by prior, and 40 random candidates; when candidates carry a `kind` column,
+non-click candidates (terminate, input) are always kept, as in the source. The published 31.60 is a 3-seed score
+ensemble (single seeds 30.38 / 31.26 / 31.60); use `NextActionRanker(n_seeds=3)` to reproduce that protocol (the
+default `n_seeds=1` trains one model). The source's dataset-specific features are not ported, so expect a different
+number on your own features.
 
 Measured on the OPeRA official test (902 steps, exact next action %) **[web]**:
 
@@ -257,7 +270,7 @@ Measured on the OPeRA official test (902 steps, exact next action %) **[web]**:
 |---|---|
 | always terminate | 4.43 |
 | repeat previous | 13.97 |
-| zero-shot Haiku persona agent | 13.67 |
+| zero-shot Haiku persona agent (n=300 subsample) | 13.67 [9.97, 17.63] |
 | Markov-2 + backoff | 26.94 [21.42, 31.72] |
 | **LightGBM lambdarank** | **31.60** [26.81, 35.90] |
 | literature SFT+RL (Customer-R1) | 39.58 |

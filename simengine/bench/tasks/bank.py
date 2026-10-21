@@ -56,6 +56,10 @@ class BankMarketing(BenchTask):
     """Options: split='test' (default; train+dev -> test) | 'dev' (train -> dev); lgbm=True."""
 
     name = "bank_marketing"
+    accepted_options = {
+        'split': '"test" | "dev" (default "test")',
+        'lgbm': 'true | false (default true)',
+    }
     kind = "binary"
     data_subdir = "bank-marketing"
     layout = """
@@ -125,12 +129,16 @@ class BankMarketing(BenchTask):
                 x[c] = pd.Categorical(x[c], categories=sorted(pd.concat([tr[c], te[c]]).unique()))
             return x
         a, dv = tr[tr.part == "train"], tr[tr.part == "dev"]
+        import inspect
+        # LightGBM 4.7+ deprecates eval_set in favour of eval_X / eval_y (same early stopping)
+        ev = ({"eval_X": (X(dv),), "eval_y": (dv["y"],)} if "eval_X" in inspect.signature(lgb.LGBMClassifier.fit).parameters
+              else {"eval_set": [(X(dv), dv["y"])]})
         best = None
         for nl in (15, 31, 63):
             for lr in (0.03, 0.1):
                 m = lgb.LGBMClassifier(n_estimators=2000, num_leaves=nl, learning_rate=lr, random_state=0, verbose=-1,
                                        n_jobs=4)
-                m.fit(X(a), a["y"], eval_set=[(X(dv), dv["y"])], eval_metric="auc",
+                m.fit(X(a), a["y"], **ev, eval_metric="auc",
                       callbacks=[lgb.early_stopping(100, verbose=False)])
                 s = roc_auc_score(dv["y"], m.predict_proba(X(dv))[:, 1])
                 if best is None or s > best[0]:

@@ -1,10 +1,13 @@
 """Self-exciting cascade predictors for share / retweet curves (Hawkes mean field, SEISMIC-style marked kernel) and the
 shape baseline. Ported from the TALP prep research code `abm/kod/yayilim24.py` (pre-registered as `yayilim-24s`).
 
-STATUS: NOT YET MEASURED. The research run stopped after the training-set kernel grid search; no dev or test
-evaluation of these predictors exists in the sources (makro/onkayit/yayilim-24s.md is the plan, no RAPOR entry).
-Treat every number these functions produce as unvalidated until you score it against the shape baseline
-(:func:`shape_forecast`) with the evidence pipeline.
+STATUS: measured by the research code this file was ported from (yayilim24.py, pre-registration 06224f7; results
+in uretim/makro/abm/yayilim24/SONUC.md, run 21-22 Oct). Twitter15/16 test, log1p curve RMSE after watching the first
+hour: shape baseline (Szabo-Huberman, :func:`shape_forecast`) 0.391, Hawkes power kernel (c=1, theta=0.5) 0.391,
+difference 0.000 [-0.006, +0.007]. SEISMIC test (39,263 cascades): shape baseline 0.267, SEISMIC-style
+(:class:`SeismicPredictor`) 0.308, worse by +0.041 [+0.038, +0.043]; the p*n_star >= 0.99 cap fired on ~45% of
+cascades. A GBM on early-window features (not ported) was best: 0.289 Twitter / 0.187 SEISMIC. This port was not
+re-measured; use :func:`shape_forecast` as the baseline these must beat.
 
 Units: time in minutes, horizon 0-1440 min (24 h). Curves are cumulative counts N(s) on GRID (10-min steps); scoring
 is on log1p.
@@ -117,7 +120,8 @@ def select_power_kernel(train_delays, t=60, cs=(1, 5, 15), thetas=(0.1, 0.25, 0.
 
 class SeismicPredictor:
     """Marked (follower-weighted) mean-field predictor with the SEISMIC kernel plus a linear correction of the log
-    final size fitted on training cascades: log1p(N_final) ~ a + b * log1p(N(t) + sum E). NOT YET MEASURED."""
+    final size fitted on training cascades: log1p(N_final) ~ a + b * log1p(N(t) + sum E). Measured worse than the
+    shape baseline on SEISMIC test (0.308 vs 0.267 curve RMSE at 1 h; makro/abm/yayilim24/SONUC.md)."""
     name = "seismic"
     kind = "baseline"
 

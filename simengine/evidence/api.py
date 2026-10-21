@@ -19,7 +19,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -73,6 +75,10 @@ for _en, _tr in METRIC_TO_INTERNAL.items():
     METRIC_TO_ENGLISH.setdefault(_tr, _en)
 
 BADGE_TO_ENGLISH = {"yuksek": "high confidence", "kararsiz": "inconclusive", "bekliyor": "awaiting truth"}
+BELOW_BASELINE = "below baseline"
+# primary metrics that rank or correlate: a cross-fitted constant baseline can score below chance on these
+RANK_METRICS = {"auc": 0.5, "pearson": 0.0, "spearman": 0.0, "madde_ici_kor": 0.0, "spearman_ici": 0.0,
+                "etki_korelasyonu": 0.0, "kappa": 0.0, "r2": 0.0, "demeaned_r2": 0.0}
 STATUS_TO_ENGLISH = {"tamam": "ok", "uyari": "warning", "hata": "error", "atlandi": "skipped"}
 ROW_TO_ENGLISH = {"taban": "Strongest simple baseline", "ham": "Raw method", "kalibre": "Ours",
                   "tavan": "Human retest ceiling", "bosluk": "Gap closed (ours - base)/(ceiling - base)",
@@ -156,6 +162,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     elif memorization is not None:
         ezber_json = str(memorization)
     if prereg is not None and not isinstance(prereg, list):
+        chain_file = Path(prereg) / _onkayit.ZINCIR_ADI
+        if not chain_file.exists():
+            warnings.warn(f"prereg registry {str(prereg)!r} has no {_onkayit.ZINCIR_ADI}: no seal is attached "
+                          f"(seal() writes to '.onkayit' unless you pass registry=...)", UserWarning, stacklevel=2)
         prereg = _onkayit._zincir_oku(prereg)
     try:
         return degerlendir(
@@ -183,12 +193,57 @@ def _box(d):
                                "lo": d.get("alt"), "hi": d.get("ust")}
 
 
+def _below_baseline(k: dict) -> bool:
+    f = k.get("fark") or {}
+    return f.get("ust") is not None and f["ust"] < 0
+
+
+def _badge_english(k: dict) -> str | None:
+    """English badge. The research rule (kart.rozet) gives "kararsiz" when ours − baseline lies entirely below 0;
+    in English that case is reported as "below baseline" so a quoted badge does not understate a clear loss.
+    The internal code (`kanit_kart["rozet"]`) is unchanged."""
+    if k.get("rozet") == "kararsiz" and _below_baseline(k):
+        return BELOW_BASELINE
+    return BADGE_TO_ENGLISH.get(k.get("rozet"), k.get("rozet"))
+
+
+def _seals(report: dict) -> list[dict]:
+    return [{"index": r.get("sira"), "sha256": r.get("sha256"), "time_utc": r.get("zaman_utc") or r.get("zaman"),
+             "rows": r.get("satir"), "description": r.get("aciklama")}
+            for r in report.get("onkayit") or [] if isinstance(r, dict)]
+
+
+def _f3(x) -> str:
+    if x is None or (isinstance(x, float) and not math.isfinite(x)):
+        return "—"
+    return f"{x:.3f}"
+
+
+def _headline_en(s: dict) -> str | None:
+    """English one-line headline built from the summary fields (dot decimals)."""
+    o, b = s.get("ours"), s.get("best_baseline")
+    if not o or o.get("value") is None:
+        return None
+    ci = lambda d: f" [{_f3(d.get('lo'))}, {_f3(d.get('hi'))}]" if d.get("lo") is not None and d.get("hi") is not None else ""
+    out = f"{s.get('primary_metric')}: ours ({o.get('column')}) {_f3(o['value'])}{ci(o)}"
+    if b and b.get("value") is not None:
+        out += f" vs strongest simple baseline ({b.get('column')}) {_f3(b['value'])}{ci(b)}"
+    d = s.get("ours_minus_baseline") or {}
+    if d.get("fark") is not None:
+        out += f"; ours − baseline {d['fark']:+.3f}"
+        if d.get("alt") is not None and d.get("ust") is not None:
+            out += f" [{d['alt']:+.3f}, {d['ust']:+.3f}] (paired, positive = better)"
+    c = s.get("ceiling")
+    out += f"; human retest ceiling {_f3(c['value'])}" if c and c.get("value") is not None else "; no human retest ceiling"
+    return out
+
+
 def summary(report: dict) -> dict:
     """English flat view of the headline numbers of a report (no new computation)."""
     m = report.get("manset") or {}
     k = report.get("kanit_kart") or {}
     worth = next((r for r in k.get("satirlar") or [] if r.get("tur") == "bedel"), None)
-    return {
+    out = {
         "title": report.get("baslik"), "task": TASK_TO_ENGLISH.get(report.get("gorev"), report.get("gorev")),
         "primary_metric": METRIC_TO_ENGLISH.get(report.get("birincil"), report.get("birincil")),
         "primary_metric_internal": report.get("birincil"),
@@ -199,7 +254,8 @@ def summary(report: dict) -> dict:
         "worth_humans_at_100": None if not worth or worth.get("deger") is None else
         {"multiplier": worth["deger"], "lo": worth.get("alt"), "hi": worth.get("ust"), "note": worth.get("not")},
         "ours_minus_baseline": k.get("fark"),
-        "badge": BADGE_TO_ENGLISH.get(k.get("rozet"), k.get("rozet")), "badge_reason": k.get("rozet_gerekce"),
+        "badge": _badge_english(k), "badge_code": k.get("rozet"), "below_baseline": _below_baseline(k),
+        "badge_reason": k.get("rozet_gerekce"),
         "flags": k.get("etiketler") or [],
         "audits": [{"check": d.get("kontrol"), "status": STATUS_TO_ENGLISH.get(d.get("durum"), d.get("durum")),
                     "detail": d.get("ayrinti"), "value": d.get("deger")} for d in report.get("denetim") or []],
@@ -207,7 +263,10 @@ def summary(report: dict) -> dict:
                     "lo": r.get("alt"), "hi": r.get("ust"), "diff_prev": r.get("fark_onceki"), "p": r.get("p")}
                    for r in report.get("merdiven") or []],
         "headline": m.get("cumle"),
+        "seals": _seals(report),
     }
+    out["headline_en"] = _headline_en(out)
+    return out
 
 
 # ------------------------------------------------------------------ card (markdown) and dashboard
@@ -231,25 +290,60 @@ def _md(s) -> str:
     return "" if s is None else str(s).replace("|", "\\|").replace("\n", " ")
 
 
-def card_markdown(report: dict) -> str:
-    """Evidence card as Markdown: badge, the six card rows, the ladder and the audits."""
+def _dot(s, lang):
+    """lang="en": Turkish comma decimals -> dot decimals inside free text."""
+    s = _md(s)
+    return re.sub(r"(?<=\d),(?=\d)", ".", s) if lang == "en" else s
+
+
+def _rank_note(report: dict) -> str | None:
+    chance = RANK_METRICS.get(report.get("birincil"))
+    if chance is None:
+        return None
+    low = [r for r in report.get("merdiven") or [] if r.get("sutun") in ("taban_marjinal", "taban_demografi")
+           and r.get("deger") is not None and r["deger"] < chance]
+    if not low:
+        return None
+    names = ", ".join(f"`{r['sutun']}`" for r in low)
+    return (f"Average baselines ({names}) score below chance ({chance:g}) on {report.get('birincil')}. This is "
+            "expected, not a bug: they are cross-fitted (a row never sees its own label), so a leave-one-out "
+            "mean or rate moves against the held-out truth. On ranking and correlation metrics, compare ours "
+            "with the informative rungs (persistence, learners) rather than with these.")
+
+
+def card_markdown(report: dict, lang: str = "mixed") -> str:
+    """Evidence card as Markdown: badge, the six card rows, the ladder, the audits and the seals.
+
+    lang="mixed" (default) keeps the research card's Turkish labels next to the English ones;
+    lang="en" drops the Turkish badge reason and original headline and uses dot decimals in the audit details
+    (ladder and audit labels stay as computed)."""
     k = report.get("kanit_kart") or _kart.kart(report)
     s = summary(report)
+    en = lang == "en"
     out = [f"# Evidence card: {_md(report.get('baslik') or report.get('veri_adi') or '')}", ""]
-    out.append(f"**Badge: {BADGE_TO_ENGLISH.get(k.get('rozet'), k.get('rozet'))}.** {_md(k.get('rozet_gerekce'))}")
+    reason = s.get("headline_en") if en else _md(k.get("rozet_gerekce"))
+    badge = _badge_english(k)
+    if s.get("below_baseline"):
+        badge += " (ours − strongest baseline CI is entirely below 0; research rule: inconclusive)"
+    out.append(f"**Badge: {badge}.** " + ("" if en else reason))
     if k.get("etiketler"):
         out.append("")
-        out.append("Flags: " + ", ".join(_md(e) for e in k["etiketler"]))
-    out += ["", f"Task: {s['task']} · primary metric: {s['primary_metric']} (`{s['primary_metric_internal']}`) · "
-                f"clusters: {k.get('n')} · source: {_md(k.get('kaynak'))}", ""]
+        out.append("Flags: " + ", ".join(_dot(e, lang) for e in k["etiketler"]))
+    meta = f"Task: {s['task']} · primary metric: {s['primary_metric']} (`{s['primary_metric_internal']}`) · " \
+           f"clusters: {k.get('n')}"
+    if k.get("kaynak"):
+        meta += f" · source: {_md(k.get('kaynak'))}"
+    out += ["", meta, ""]
+    if s.get("headline_en"):
+        out += [f"Summary: {s['headline_en']}", ""]
     out += ["| Row | Method | Value [95% CI] | Note |", "|---|---|---|---|"]
     for r in k.get("satirlar") or []:
         u = r.get("birim") or ""
         out.append(f"| {ROW_TO_ENGLISH.get(r['tur'], r['tur'])} | {_md(r.get('etiket'))} | "
-                   f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)} | {_md(r.get('not'))} |")
+                   f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)} | {_dot(r.get('not'), lang)} |")
     f = k.get("fark")
     if f and f.get("fark") is not None:
-        out += ["", f"Ours − strongest baseline (paired, metric direction): {f['fark']:+.3f}"
+        out += ["", f"Ours − strongest baseline (paired, metric direction, positive = better): {f['fark']:+.3f}"
                     + (f" [{f['alt']:+.3f}, {f['ust']:+.3f}]" if f.get("alt") is not None and f.get("ust") is not None else "")]
     if s["ladder"]:
         out += ["", "## Baseline ladder", "", "| Rung | Kind | Value [95% CI] | Δ vs previous [95% CI] | p |",
@@ -262,24 +356,33 @@ def card_markdown(report: dict) -> str:
     if s["audits"]:
         out += ["", "## Audits", "", "| Check | Status | Detail |", "|---|---|---|"]
         for a in s["audits"]:
-            out.append(f"| {_md(a['check'])} | {a['status']} | {_md(a['detail'])} |")
-    if k.get("yanilgi"):
-        out += ["", "## Limits", ""] + [f"- {_md(x)}" for x in k["yanilgi"]]
-    if s["headline"]:
+            out.append(f"| {_md(a['check'])} | {a['status']} | {_dot(a['detail'], lang)} |")
+    if s["seals"]:
+        out += ["", "## Sealed predictions (pre-registration chain)", "", "| # | SHA-256 | Sealed at (UTC) | Rows | Description |",
+                "|---|---|---|---|---|"]
+        for z in s["seals"]:
+            out.append(f"| {z['index']} | `{z['sha256']}` | {_md(z['time_utc'])} | {z['rows']} | {_md(z['description'])} |")
+    else:
+        out += ["", "Sealed predictions: none attached (pass prereg=<registry dir> to evaluate)."]
+    limits = list(k.get("yanilgi") or [])
+    note = _rank_note(report)
+    if limits or note:
+        out += ["", "## Limits", ""] + [f"- {_dot(x, lang)}" for x in limits] + ([f"- {note}"] if note else [])
+    if s["headline"] and not en:
         out += ["", "Headline (original wording): " + _md(s["headline"])]
     return "\n".join(out) + "\n"
 
 
-def card(report: dict, path=None) -> str | dict:
-    """Evidence card. path *.json -> the card dict (stage schema, `kanit_kart`); otherwise Markdown.
-    Returns the content; writes it when `path` is given."""
+def card(report: dict, path=None, lang: str = "mixed") -> str | dict:
+    """Evidence card. path *.json -> the card dict (stage schema, `kanit_kart`); otherwise Markdown
+    (lang "mixed" or "en", see `card_markdown`). Returns the content; writes it when `path` is given."""
     if path is not None and str(path).endswith(".json"):
         k = report.get("kanit_kart") or _kart.kart(report)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(k, ensure_ascii=False, indent=1))
         return k
-    md = card_markdown(report)
+    md = card_markdown(report, lang=lang)
     if path is not None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)

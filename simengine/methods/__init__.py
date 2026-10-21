@@ -10,7 +10,7 @@ from .baselines import (ConstantBaseline, ItemMarginal, KNNBaseline, LightGBMBas
                         decayed_frequency, infer_kind, overall_copy, persistence, personal_frequency, popularity,
                         segment_distributions, tifu_knn, uniform_distribution, weighted_distribution)
 from .bayes_prior import (EarlyTestBayes, calibrate_prior, early_lor, equivalent_multiplier, posterior_lor,
-                          simulate_saving, true_lor)
+                          simulate_saving, simulate_saving_calibrated, true_lor)
 from .conjoint import MNL, evaluate_mnl, null_scores, person_holdout
 from .hybrid import (BinaryCalibrator, DevStack, LLMFeatureGBDT, ShrunkDeviation, ridge_to_prior,
                      select_lambda)
@@ -31,6 +31,7 @@ __all__ = [
     # LLM prior + early test
     "EarlyTestBayes", "calibrate_prior", "early_lor", "posterior_lor", "true_lor", "equivalent_multiplier",
     "simulate_saving",
+    "simulate_saving_calibrated",
     # hybrids
     "ShrunkDeviation", "ridge_to_prior", "select_lambda", "LLMFeatureGBDT", "DevStack", "BinaryCalibrator",
     # person-level twin
