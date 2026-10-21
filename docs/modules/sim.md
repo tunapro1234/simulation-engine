@@ -1,0 +1,206 @@
+# `simengine.sim`: LLM simulation runners
+
+Runners that put an LLM in front of a question: a persona panel, an A/B test, a roundtable, a strategy
+comparison, a direct question about each segment's answer distribution, and per-person prediction prompts.
+Each runner takes any object that follows the `simengine.types.LLM` protocol and returns a JSON-safe dict.
+A matching `*_frame` function turns that dict into an EvalFrame (`unit, truth, pred_<method>, segment, item,
+group`) that `simengine.evidence.evaluate` accepts.
+
+The measured numbers below come from the research branches. They hold on the data where they were measured.
+On other data they are a prior, not a promise. The short version:
+
+- **Asking the model directly for each segment's distribution works best for segment-level opinion data.** It
+  closed 82% of the gap, against 55% for a persona panel.
+- **Persona panels are near chance on A/B headline tests with Haiku** (0.52 direction accuracy).
+- **Per-person purchase prediction from survey answers (L1) is below the "always no" rule.** Adding the
+  person's own history (L2) helps, but a plain history model is still better.
+- **Discussion rounds barely move answers.**
+
+Run the control arms (`no_persona`, `persona_swap`) every time. They show whether the persona carries the
+signal.
+
+## Components
+
+| component | file | what it does |
+|---|---|---|
+| `survey`, `survey_frame` | `survey.py` | Survey panel. Likert questions get a free-text answer plus a direct 1-5 score, and optionally SSR on the text. Multiple-choice questions get an option letter. Half of the batches see the questions in reverse order. Control arms run by default. The result has bootstrap CIs per arm, a segment breakdown and quotes. |
+| `SSR`, `SCALES` | `ssr.py` | Semantic similarity rating (Maier et al. 2025). It embeds the answer text, compares it with 5 anchor sentences, and returns a distribution and an expected score (or `to_probability`). `sentence-transformers` is imported lazily. The model loads offline from a local cache. `encoder=` takes any texts-to-vectors function. |
+| `ab_test`, `ab_frame` | `ab.py` | PAARS-style A/B test on a persona panel. Each persona gives a 1-10 score per variant, a choice and a reason. Half of the panel sees the variants reversed, which gives the position effect. Output: winner, preference share, bootstrap win probability, sign test, control arms, `confidence` (`confidence_check`), and a direction check when `truth` is given. |
+| `paars_decision` | `ab.py` | Forced-choice decision from per-persona A/B scores, with a confidence threshold (0.65). |
+| `ab_many` | `ab.py` | Many pairwise tests per call, with all readers in one prompt. The prompt is verbatim from the Upworthy rehearsal. Returns `p_a` with Laplace smoothing. |
+| `roundtable`, `roundtable_frame` | `roundtable.py` | Multi-round discussion. Round 0 is independent. In later rounds each persona sees its own previous answer and a summary of its segment (or of the whole table). `CONFIRMATION_BIAS` and `KEEP_VIEW` are the measured stance instructions. |
+| `strategy`, `strategy_frame` | `strategy.py` | Two or more scenarios × segments. Each persona gives a 0-100 intent and a reason per scenario. Output: ranking, win probability, sign test on the top two, and the segment whose profile diverges most. |
+| `segment_distribution`, `distribution_prompt`, `FRAMINGS_NAMED`, `FRAMINGS_HIDDEN` | `distribution.py` | No personas. Makes one call per segment × question × framing ("estimate the percentage of these respondents who would choose each option"), then averages the 3 framings. An invalid reply becomes a uniform vector (or is skipped with `fallback="skip"`). |
+| `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means. |
+| `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`), and the normalised ordinal W1 used for the makro numbers. |
+| `predict_people`, `prediction_frame` | `prediction.py` | Per-person prediction. L0 is a no-persona population prior over `l0_samples` samples. L1 uses the person's own survey answers. L2 is L1 plus the person's past behaviour in the same items. SSR asks for one first-person sentence per item. It takes independent `samples` (passed as `sample=j`) and re-asks with "JSON only" when parsing fails. |
+| `PredictionSpec`, `AMAZON`, `prompt_l0/l1/l2/ssr`, `profile_text`, `history_text` | `prediction.py` | All prompt wording. `PredictionSpec()` is neutral. `AMAZON` reproduces the measured talp73 prompts exactly (checked string-for-string against `talp73/kod/llm/istem.py` and `ssr.py`). |
+| `batch_calibrate` | `prediction.py` | Label-free batch calibration: `logit(p) − mean_item logit(p) + logit(prior_rate)`, clipped at 1e-3. It matches `talp73/kod/llm/kalibre.py` to 0.0 max abs difference on a random check. |
+| `retest_stats` | `prediction.py` | Test-retest of repeated samples: within-cell sd, share of identical cells, pairwise r, per-item signal vs noise, Spearman-Brown. |
+| `ask_panel`, `build_prompts`, `Usage` | `panel.py` | Batched persona questioning: one JSON object per persona id. It accepts an array, a single object, an `{id: {...}}` mapping or a wrapper. It remaps ids by position only when no id matched and the counts are equal. Missing answers are counted, not invented. |
+| `schema_responder` | `panel.py` | Deterministic `FakeLLM` responder for every prompt in this module (dry runs and tests). It is never a measurement. |
+| `as_personas`, `PersonaView`, `control_personas`, `control_plan` | `personas.py` | Duck-typed persona adapter for TALP-schema dicts, objects with `to_dict()`, flat dicts and strings. Control arms: `no_persona` gets a neutral "typical adult consumer" text. `persona_swap` applies a cyclic shift: each persona keeps its own id, name and tagline and takes the next persona's content. `control_plan` keeps the control arms within the main arm's call count. |
+| `parse_json`, `normalize_probs`, `parse_distribution`, `parse_item_probs`, `parse_text_fields` | `parse.py` | Robust parsers. They handle fences, prose around the JSON, trailing commas, `[see below]`-style brackets in prose, and truncated arrays (complete objects are kept). Probability keys can be `"1"`, `"option 1"`, a letter or a label, and values can carry `%`. A missing option, a negative value, a zero sum or a wrong length gives `None`. |
+
+Ported from (read-only research code, `uretim/<branch>/`):
+- `sahne/kod/sahne/kaynak.py` (batched prompts, `json_coz`, the fake source), `sema.py` (persona rendering),
+  `ssr.py`, `kosucu/{ortak,panel,ab,roundtable,strateji}.py`, `prova/upworthy.py` (`ab_many` prompt)
+- `makro/llmabm/kod/c1/k2.py` (distribution prompt, ACIK/GIZLI framings, OLAS_ISTEM),
+  `makro/kod/kit/yontemler/llm_dagilim.py` (framing average, invalid → uniform),
+  `makro/llmabm/kod/c1/masa.py` (stance instructions)
+- `talp73/kod/llm/{istem.py, kos.py, ssr.py, kalibre.py, tekrar.py}` (L0/L1/L2/SSR prompts, validator,
+  samples, calibration, retest)
+- `deney/kod/kit/persona_talp.py` (`paars_decision`)
+
+## Minimal usage
+
+```python
+from simengine.llm import Claude, FakeLLM
+import simengine.sim as sim
+
+llm = Claude(model="claude-haiku-5-5", effort="low", cache_dir=".cache", budget_usd=2)
+# llm = FakeLLM(sim.schema_responder())             # offline dry run, same code path
+
+# 1. Segment distribution: the strongest method measured for segment-level opinion data
+segs = {"D-young": "Democrats aged 18 to 44", "R-old": "Republicans aged 45 or older"}
+qs = [{"id": "econ", "text": "Over the past year the nation's economy has ...",
+       "options": ["Gotten much better", "Gotten better", "Stayed the same", "Gotten worse", "Gotten much worse"]}]
+d = sim.segment_distribution(llm, segs, qs, population="US adults")
+frame = sim.distribution_frame(d, truth=real_segment_shares)          # {segment: {qid: [p...]}}
+
+# 2. Survey panel with controls
+panel = [{"id": "p1", "text": "34, nurse, rents in Izmir, price-sensitive", "segment": "young"}, ...]
+res = sim.survey(panel, "Would you try a grocery subscription at 299 TL/month?", llm=llm)
+res["questions"][0]["arms"]          # persona vs no_persona vs persona_swap
+
+# 3. A/B with a confidence verdict
+ab = sim.ab_test(panel, [{"id": "A", "text": "Free delivery over 300 TL"}, {"id": "B", "text": "15% off tonight"}],
+                 llm=llm, context="Friday 18:00 push notification")
+ab["winner"], ab["confidence"]["low"], ab["confidence"]["reasons"]
+
+# 4. Per-person prediction (survey answers -> purchase probability), then label-free calibration
+res = sim.predict_people(llm, {"u1": {"Age group": "25 - 34 years", ...}}, ["ABIS_BOOK", "PET_FOOD"],
+                         level="L1", spec=sim.AMAZON)
+f = sim.prediction_frame(res, truth=observed)                       # {uid: {item: 0/1}}
+f = sim.batch_calibrate(f, prior_rates=out_of_sample_rates, col="pred_L1")
+
+from simengine.evidence import evaluate
+report = evaluate(f, title="L1 purchase", ours="L1")
+```
+
+## When it works and when it does not (measured)
+
+All numbers are copied from the branch reports. Nothing here was re-measured by this module.
+`[a; b]` is a 95% bootstrap CI.
+
+### Segment distributions (makro C1: CES 2020, 4 party × age segments, 8 items, claude-haiku-5-5)
+Source: `makro/RAPOR.md` (C1 table, K2-5, K2-6, paired measurement). Metric: normalised W1, lower is better.
+"Gap closed" is measured from the general-population marginal (W1 0.206) to a 37-person real survey of the
+segment (0.050).
+
+| method | W1 | gap closed |
+|---|---|---|
+| general marginal (ignore segment) | 0.206 | 0 |
+| **`segment_distribution`, named survey, 3 framings averaged** | **0.077** | **0.818** |
+| framings v1 / v2 / v3 ("think about minority views") | 0.077 / 0.075 / 0.096 | 0.82 / 0.83 / 0.70 |
+| hidden framing (no survey name, no year) | 0.084 | 0.774 |
+| `persona_distribution` (per-persona vectors) | 0.088 | 0.751 |
+| persona panel round 0 (148 personas, batched tables) | 0.120 | 0.55 [0.44; 0.60] |
+| persona panel, one call per persona | 0.142 | 0.41 |
+| same party, other age group, real answers | 0.040 | 1.06 |
+
+- Direct distribution minus panel: ΔW1 −0.043, item-cluster CI [−0.072; −0.017].
+- It is worse than the general marginal on 2 of 8 items: Congress approval and household income. On these
+  items the segments really do think alike.
+- The direct distribution is worth about a 12-15-person real survey of the same segment. The panel is worth
+  about 5-6 people.
+- Memorisation is not ruled out. The hidden framing is almost as good as the named one, and party-level poll
+  numbers for 2020 are widely published. The method was not tested on a wave after the model's training
+  cutoff. Seal predictions before looking at the truth.
+- Option order reversed in the panel: W1 0.119, no order effect, but 8% of the answers were invalid JSON.
+
+### Persona controls and discussion (same data; `makro/RAPOR.md`, persona control and paired measurement)
+- Persona panel closes 0.55 of the gap. With no persona (age and party label only) it closes 0.45. Shuffling
+  personas across segments drops it to 0.25. About 0.45 of the gap comes from the segment label alone, and
+  the persona detail adds +0.10, which is not significant.
+- Individual level: the segment majority rule gets 0.656 exact match, the LLM round 0 gets 0.613. Do not
+  claim individual-level accuracy from a panel.
+- `roundtable`: 5 plain discussion rounds change 5-8% of answers. Round 5 ΔW1 −0.005 [−0.012; +0.002].
+  Discussion does not improve the distribution.
+- With the confirmation-bias instruction (`CONFIRMATION_BIAS`, round 3) ΔW1 is −0.007 [−0.012; −0.003]
+  (0.120 → 0.113). The gain is small, and there was no multiple-test correction.
+
+### A/B tests (sahne + deney: Upworthy headline tests)
+- `sahne/RAPOR.md`: Haiku 8-persona panel direction accuracy 0.522 [0.468; 0.575] on 300 tests. The
+  no-persona Haiku readers got 0.528, and chance is 0.50. The deney stack (TF-IDF + Opus) got 0.807
+  [0.760; 0.853]. For A/B text tests use the methods module, not a persona panel.
+- `deney/RAPOR.md`: Haiku persona panel 0.497-0.550 (chance). An Opus 10-persona panel got 0.685
+  [0.633; 0.737], below asking Opus directly (0.765). A calibrated persona-panel prior still saved samples:
+  1.41× [1.12; 1.81] (llm300), 1.34× [1.12; 1.57] (ek600).
+- `sahne/RAPOR.md` Turkish A/B example: the panel mean favoured A (win probability 0.84), but the preference
+  share was 6-6, the no-persona arm picked B (0.65) and the swapped-persona arm picked B (0.94). This is the
+  case `confidence_check` flags as "decision depends on persona assignment".
+
+### Survey answers vs behaviour (sahne: Open e-commerce, n = 198, Pearson on monthly order days)
+Source: `sahne/RAPOR.md`, rehearsal (i).
+- Demographic baseline 0.280. Haiku persona panel 0.618 [0.513; 0.696], below the person's own stated
+  answer (0.649).
+- Persona plus the 2021 behaviour anchor 0.860 [0.807; 0.899], but label-free persistence gets 0.848. On a
+  second sample (seed 1), persistence 0.897 beat persona plus anchor 0.879 (difference −0.018
+  [−0.051; +0.019]).
+- Persona swap −0.032 / 0.090: the signal comes from the person's own facts.
+- SSR embedding model: bge-base Spearman 0.97 vs all-MiniLM-L6-v2 0.62 on 10 hand-labelled sentences. That
+  is a tiny check, so it is the reason for the default, not a validation.
+
+### Per-person purchase prediction (talp73: Open e-commerce 1.0, 400 people × 20 categories × 3 seeds)
+Sources: `talp73/kart/KART.md`, `talp73/kod/llm/SONUC-v1.5.md`, `SONUC-v1.7c.md`, `LLM-TABLO.md`,
+`talp73/KARSIT-1.md`. 1a = person × category accuracy (threshold 0.5). 1b(c) = balanced-subset accuracy (the
+primary measure).
+
+| arm | 1a accuracy | note |
+|---|---|---|
+| always "no" | 0.764 | |
+| survey-feature model (no LLM) | 0.771 | |
+| purchase-history model | 0.807 | |
+| L0 Haiku (no persona) | 0.614-0.647 | |
+| **L1 Haiku** | 0.698 / 0.689 / 0.695 (seeds) | below always-no |
+| L1 Sonnet | 0.749 / 0.744 / 0.752 | |
+| L1 Haiku, 3 samples averaged | 0.704 | |
+| **L2 Haiku** | 0.792 / 0.792 / 0.802 | +0.026..+0.039 over always-no; 1b(c) below history model by −0.022 / −0.020 / −0.026 |
+
+- On 1b(c), L1 Haiku scores 0.583 / 0.543 / 0.564 against 0.588 for the survey model.
+- L1 − L0 with Sonnet: person AUC +0.017 / +0.009 / +0.013. The 1b(c) difference, +0.008
+  [−0.011; +0.026], is not significant. The persona's own answers add a little ranking signal and almost no
+  accuracy.
+- `batch_calibrate` (KARSIT-1 T1): after calibration the L1 − survey-model gap on 1b(c) includes zero
+  (−0.013 / −0.008 / −0.002). The 1a headline moves from 69.4% to 76.5%, but the calibrated prediction is
+  then close to always-no.
+- The SSR arm (`level="SSR"`) was run in talp73 (v1.7d). Its accuracy is not written up in the branch
+  reports, so no number is given here.
+
+## Design notes and deviations from the research code
+- **English field names.** The panel field names (`score`, `choice`, `reason`, `intent`, `remark`,
+  `<f>_answer`) and runner prompt wording are English translations of the Turkish sahne prompts. The
+  batching frame (`SYSTEM_ASK`, `ASK_TEMPLATE`) is the measured one. The distribution, persona-vector,
+  Upworthy and talp73 prompts are verbatim. The survey, A/B, roundtable and strategy task texts were never
+  measured in this English form.
+- **SSR is off unless you pass it in.** Pass `ssr=SSR()` (or `True`) to turn it on, so a run never downloads
+  a model by surprise.
+- **Retries.** `predict_people` re-asks with a "(Attempt n: reply with the JSON object only.)" suffix, so a
+  cached backend does not return the same bad answer. talp73 retried inside its backend.
+- **Generalised prompts.** `persona_distribution` takes `setting=` in place of the fixed "public opinion survey
+  of US adults in October 2020" line. The distribution framings take `population/source/when`. With
+  `population="US adults"`, `source="the Cooperative Election Study (CES)"` and `when="October 2020"` they are
+  identical to `k2.py`.
+- **Not ported here.** Persona builders (`sahne/sentez.py`) belong to `simengine.persona`. Evidence and cards
+  (`sahne/pva.py`) belong to `simengine.evidence`. The A/B TF-IDF stack belongs to `simengine.methods`. The
+  sealed-predictions helper belongs to `simengine.research`.
+- **Outputs are JSON-safe.** Integer keys become strings: `roundtable(...)["answers"]["0"]`.
+
+## Tests
+`tests/test_sim_parse.py`, `test_sim_panel.py`, `test_sim_runners.py`, `test_sim_distribution.py`,
+`test_sim_prediction.py`, `test_sim_evaluate.py` (55 tests, offline, FakeLLM, under 1 s):
+
+```
+nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
+```
