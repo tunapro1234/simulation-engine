@@ -12,6 +12,7 @@ This module holds the agent-based models and the baselines they have to beat:
 | `MarketABM`, `market_sim` | repeat-purchase market ABM (WTP, reference price, loss aversion, stockpiling, promotion, social effect) with pooled calibration | measured; not the most accurate |
 | `hawkes_mean_field`, `power_kernel`, `seismic_kernel`, `SeismicPredictor`, `shape_forecast` | self-exciting cascade predictors for share curves, plus the shape baseline | measured; Hawkes ties and SEISMIC loses to the shape baseline |
 | `AgentSociety`, `ShareCascadeWorld`, `ChoiceWorld`, `World` | turn-based LLM agent society: a deterministic world, agents acting through the LLM protocol, a log for every turn | measured; no better than a single LLM score or a calibrated constant curve |
+| `run_who_to_punish`, `run_repeated_pd`, `run_trust_interaction` | economic-game LLM societies (Ertan-Page-Putterman who-to-punish with voting, repeated prisoner's dilemma, trust game) returning structured per-answer rows | infrastructure; no measured result in this port |
 
 **Provenance.** Everything is ported from the TALP prep research branch `makro`. The algorithms and defaults
 are unchanged. Shorthand used below:
@@ -60,6 +61,10 @@ yhat = mix.predict(mix.fit(train_full, target_pre), query).y_pred
 agents = [abm.SocietyAgent("P01", "19, college student, shares memes"), ...]
 run = abm.AgentSociety(agents, abm.ShareCascadeWorld("post text"), llm, mode="batch", max_calls=50).run()
 run.log, run.states, run.calls, run.invalid
+
+# --- who-to-punish society (4 players per group, 2 votes x 3 periods); feed run["groups"][g] to games.wtp_scorecard
+run = abm.run_who_to_punish(llm, personas=None, groups=1, seed=0)     # None = no-persona control
+run["groups"][0]["votes"], run["periods"], run["punishments"], run["invalid"]
 ```
 
 ## Adoption ABM + ABC + analogy prior
@@ -276,3 +281,75 @@ So:
 - Prefer batch prompts, which cut the call count.
 - Use `claude -p` (`ClaudeCode`) only for small societies, because every call carries a large context
   (docs/modules/llm.md).
+
+## Economic-game societies: who-to-punish, repeated PD, trust
+
+**Provenance.** Ported from the `edsl-test` repository (same owner as `replicant`):
+`experiments/07_who_to_punish/who_to_punish.py`, `experiments/05_prisoners_dilemma/prisoners_dilemma.py`,
+`experiments/03_trust/trust_interaction.py`, and only the None-retry rule of `experiments/common.py`. The EDSL calls
+are rewritten onto the simengine `LLM` protocol: the persona goes in as `system` (re-sent on every call), the game
+text as `user`, and every answer is a small JSON object. No code from the source repository is imported.
+
+**Who-to-punish** (`run_who_to_punish(llm, personas, *, groups=1, seed=0, periods=3, votes=2)`). This is a
+simplified version of the design in Ertan, Page & Putterman (2009, *European Economic Review* 53(5)). The constants
+(`WTP_DESIGN`) are the paper's:
+- 4 players and a $10 endowment.
+- Each $1 in the fund pays $0.40 to every player.
+- Paying $0.25 removes $1 from a target, at most $10 per target.
+- Earnings are `max(0, 10 - c + 0.4 * total - 0.25 * given - received)`.
+
+Before each block of `periods` periods, every player votes Yes / No / No preference on three ballot items: may a
+player who contributed less than, exactly, or more than the group average be punished? An item passes only when
+Yes > No. No preference does not count, and ties fail (footnote 9 of the working paper). Each period, players
+contribute, the contributions are revealed (without names), and then each allowed (punisher, target) pair picks a
+punishment.
+
+The edsl-test simplification is kept: one fixed group of 4 per `groups` unit, fixed labels, and 2 votes × 3 periods.
+The paper ran 40 groups, 3 or 5 votes, 30 periods, and reshuffled labels.
+
+The output is a JSON-serialisable dict:
+- **Per-answer rows** in `ballots`, `contributions` and `punishments`. Every row carries `agent_id`,
+  `persona_method`, `seed`, `traits`, `max_tokens`, `wording_id`, `valid`, `attempts` and `raw`.
+- **`rules`**: one row per (group, vote), with a tally per item.
+- **`periods`**: one row per completed period, with contributions, given and received punishment and earnings per
+  label.
+- **`groups`**: a score-ready dict per group for `games.wtp_scorecard`. It holds `votes` (the punish-low outcome of
+  each vote, the shape of edsl-test `score_wtp.py`), `rules`, `periods`, `punishments` (with `target_contribution`
+  and `avg` for the targeting criterion), `dismantled`, `ever_punish_high`, `complete`, `stopped`,
+  `n_periods_planned` and `n_periods_completed`.
+
+**Missing answers are never $0.** edsl-test's early runs wrote a missing answer into the game history as $0. Its
+commit 15b9531 fixed this by raising instead (see the caveat on [RESULTS.md](../RESULTS.md) §8 row 9; `ET/personas/value_anchor/NOTES.md`). Here, an unparseable,
+fractional or out-of-range answer is re-asked `retries` times (default 2) with the parse error appended. Values are
+never clamped. If the answer is still invalid, it stays `None` with `valid=False` and is counted in `invalid`. What
+happens next depends on `on_invalid`:
+- `"stop"` (default): that group ends at that stage. Its completed periods are kept, and `complete=False`.
+- `"abstain"`: an invalid ballot is not counted. An invalid contribution makes the player sit out the period: they
+  are left out of the fund, the average and the punishable set, and their earnings are `None`. An invalid
+  punishment answer removes nothing.
+- `"raise"`: raise `InvalidAnswer`.
+
+Report `n_periods_completed / n_periods_planned` and the invalid counts next to any score. Dropout is not random
+([RESULTS.md](../RESULTS.md) §8 row 3, replicant data).
+
+**Cache and seeds.** With `sample_key=True` (default), `seed * 1_000_003 + group` is passed to the backend as
+`sample`. That way a disk-cached `Claude` / `ClaudeCode` does not serve one group's or seed's answers to another.
+edsl-test's baseline runs had an effective n of 1 for this reason ([RESULTS.md](../RESULTS.md) §8 row 7 caveat). `FakeLLM` ignores the
+key.
+
+**Settings that change behaviour.** `max_tokens` defaults to 1024 and is recorded on every row. Treat it as a
+treatment: in an edsl-test single run, the bare model punished free riders at 8192 tokens but not at the default
+cap ([RESULTS.md](../RESULTS.md) §8 row 10; that default-cap run was partly None-corrupted). `max_calls` and the backend's budget guard stop the run cleanly, and `stopped` says why.
+
+**Repeated PD and trust** (optional extras):
+- **`run_repeated_pd`**: fixed pairs play `rounds` rounds with the full history shown. The payoffs are C/C 3/3,
+  D/D 1/1 and D/C 5/0 (the setup of Mei, Xie, Yuan & Jackson 2024 used in edsl-test). An invalid move ends that
+  pair, and the round is not scored.
+- **`run_trust_interaction`**: the Berg, Dickhaut & McCabe (1995) investment game with a $100 pot tripled. The
+  investor and trustee are separate personas. A return above the received amount is invalid, not clamped.
+
+**Measured.** Nothing in this port. The edsl-test who-to-punish index and the bare-model corner behaviour ([RESULTS.md](../RESULTS.md) §8
+rows 7-9) came from EDSL runs with gpt-oss-120b, scored by regex over `summary.txt`. They have not been re-run
+through this code. Tests (`tests/test_abm_society_games.py`) check only the mechanics, against hand calculations
+with scripted `FakeLLM` replies: payoffs, majority with ties failing, dismantling, retries, and that invalid
+answers are never counted as 0.

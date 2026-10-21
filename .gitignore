@@ -20,6 +20,12 @@ runs/
 *.pkl
 *.pickle
 *.lock.json
+*.pdf
+# local copies of loader data (persona methods, BeeBench b01): never commit
+persona_methods/
+beebench_b01/
+*_backstories.json
+*personas_sample.json
 .onkayit/
 *-evidence/
 /simengine-demo/

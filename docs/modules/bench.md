@@ -1,8 +1,10 @@
 # simengine.bench
 
-`simengine.bench` holds seven benchmark tasks built from public human-behaviour datasets. Each task loads local
-files, applies a fixed train/test split by time, survey wave or person, computes LLM-free baselines and scores any
-method with the metric and bootstrap used in the research code it was ported from. The output is the shared
+`simengine.bench` holds seven benchmark tasks built from public human-behaviour datasets, plus three economic-game
+tasks built on `simengine.games` (`econ_games_b01`, `ertan_wtp` and the optional `beebench_b01_prior`; see
+[Economic-game tasks](#economic-game-tasks)). Each dataset task loads local files, applies a fixed train/test split
+by time, survey wave or person, computes LLM-free baselines and scores any method with the metric and bootstrap used
+in the research code it was ported from. The output is the shared
 `EvalFrame` (`simengine/types.py`), so `simengine.evidence.evaluate` can take over from there.
 
 ## Components
@@ -28,7 +30,8 @@ Bench code never imports `simengine.methods` internals.
 ```python
 from simengine import bench
 
-bench.list()        # ['bank_marketing', 'gss', 'open_ecommerce', 'opinionqa_groups', 'simbench', 'twin2k500', 'upworthy']
+bench.list()        # ['bank_marketing', 'beebench_b01_prior', 'econ_games_b01', 'ertan_wtp', 'gss', 'open_ecommerce',
+                    #  'opinionqa_groups', 'simbench', 'twin2k500', 'upworthy']
 task = bench.get("upworthy", split="temporal")
 data = task.load("/path/to/catalogue")            # or export SIMENGINE_DATA=/path/to/catalogue
 frame = task.run(methods={"mine": lambda d: my_model(d.train, d.test)}, data=data)   # baselines + mine
@@ -63,6 +66,7 @@ the non-commercial and academic-only ones may not allow it.
 | GSS panels (NORC) | `gss` | free, attribution required, **no redistribution** | do not ship the data with a submission |
 | Dominick's | ABM elasticity results (abm) | **academic research use only** | clear it with the organiser before using it at an event |
 | SEISMIC (SNAP) | retweet-curve results (abm) | **no licence stated**, research use; cite Zhao et al. 2015 | ask the source before prize use |
+| BeeBench b01 results (edsl-test) | `beebench_b01_prior` | same owner, no LICENSE file (all rights reserved by default) | internal reuse only; do not ship the CSV |
 
 Sources: each adapter's `meta["source"]` and the research data notes (`makro/arastirma/veri-ham.md`,
 `makro/abm/arastirma/literatur.md`, `web/PROTOKOL.md`). The dataset's own page is what binds.
@@ -279,9 +283,148 @@ The LLM persona arms in the source are not part of bench, because they need an L
 grid collapses: dev AUC is 0.5 and it keeps a single tree (source `bilgi.lgbm_ayar`). The plain logistic model is the
 baseline to beat. Brier punishes every model trained on the old base rate.
 
+## Economic-game tasks
+
+Three tasks score `simengine.games` output against published human numbers. `econ_games_b01` and `ertan_wtp` need
+no data: their human values are small published constants inlined in `simengine.games`, each with its citation, and
+`load()` ignores `data_root`. Sources (read-only, same owner): edsl-test `benchmark/beebench/b01` (games, holdout,
+references), `benchmark/score_wtp.py` and `benchmark/human_targets.json`; replicant `papers/ertan2009/config.py`
+(MIT) for `ertan_vignette`. Files: `tasks/econ_games_b01.py`, `tasks/ertan_wtp.py`, `tasks/beebench_b01_prior.py`.
+
+```python
+import simengine.games as gm
+from simengine import bench
+from simengine.bench.tasks import econ_games_b01 as E, ertan_wtp as W
+
+task = bench.get("econ_games_b01")                       # no data needed
+res = gm.play(llm, bank, "holdout", runs=3)              # or any games.play results table / CSV
+frame = task.run({"mine": res})                          # the results table itself is a valid prediction
+task.score(frame, "mine")                                # {'metric': 'mae', 'value': ..., 'lo': ..., 'hi': ..., 'n': 4}
+ev_frame = task.results_frame(res)                       # train + test rows -> simengine.evidence.evaluate
+
+wtp = bench.get("ertan_wtp")
+frame = wtp.run({"soc": W.society_method(llm, personas, seeds=(0, 1, 2))})   # abm.society.run_who_to_punish
+```
+
+### `econ_games_b01` (continuous): simulated vs human moments of the one-shot game battery
+
+- **Rows:** one per human-referenced moment from `games.human_refs()`, `unit = game:moment` (for example
+  `dictator:mean_give_share`, truth 0.2835, Engel 2011). `data.test` also carries `scale`, `citation` and
+  `holdout`. `group` is the game.
+- **Split** (`split=`): `holdout` (default) puts the calibration-game moments in train and the holdout-game moments
+  in test. That gives 16 train and 8 test moments over 4 holdout games (beauty contest, pg_punishment,
+  third_party_punishment, who_to_punish), following the b01 rule that holdout games are never used for tuning.
+  `all` tests all 24 share moments over 12 games. `time_choices` and `ertan_vignette` have moments but no numeric
+  human reference, so they have no rows.
+- **Scale** (`scale=`): `share` (default) keeps 0-1 moments only. `all` adds 7 raw-unit moments, such as the
+  beauty-contest mean guess (36.73), punishment points and lambda. Their errors are in game units and do not pool
+  with the shares, so use `all` only for per-moment inspection.
+- **Metrics:**
+  - `mae` (primary, lower is better) and `rmse` over the test moments that have a finite prediction. The CI is a
+    cluster bootstrap over games: all moments of a game move together, and `n` is the number of games.
+  - `coverage`: the share of test moments the method produced a value for. A moment that a method cannot compute
+    (no valid answers, no complete schedule) stays NaN and is never filled in. It lowers `coverage` and is left out
+    of `mae`, so read the two together.
+- **Predictions:** a vector aligned with `data.test`, or a `games.play` results table, which `frame()` turns into
+  moments through `games.moment_frame`. A table with several persona methods gives one column per method
+  (`<name>_<persona_method>`). Helpers:
+  - `results_method(results, persona_method=None)` and `play_method(llm, personas, **play_kw)`. The second plays
+    only the test games, and the `games.play` cost gate applies.
+  - `task.results_frame(results)`: a train + test frame with every persona method and the baselines, which
+    `simengine.evidence.evaluate(frame, ours=..., task="continuous")` takes directly.
+- **Baselines:**
+  - `rational_corner`: a self-interested, risk-neutral payoff maximiser (`CORNER_DECISIONS`): dictator 0, trust 0,
+    beauty contest 0, Holt-Laury safe in rows 1-4, accept a gamble only at positive expected value, contribute and
+    punish 0, the smallest positive ultimatum offer ($1), accept every offer, vote No on every ballot item.
+    `eleven_twenty` has no pure-strategy equilibrium, so the corner requests 20 (the level-0 anchor). Moments are
+    computed by `games.moments` on those decisions. `perverse_event_share` is therefore NaN, because nobody
+    punishes.
+  - `midpoint`: numerical answers at the midpoint of the condition's range, which is the equal split where the
+    range is a pot (dictator 50, trust return half, beauty contest 50). Multiple-choice answers are uniform random,
+    computed exactly by enumerating every answer combination across a game's conditions (1,024 Holt-Laury
+    schedules, for example).
+  - `bare_model`: the no-persona model, the b01 `baseline` method. It comes from `results=` (rows whose
+    persona_method is `bare_method`) and/or `llm=`, which plays the referenced games with `bare_agents` empty
+    personas × `runs` runs, resuming from `results=`. The `games.play` cost gate applies; pass
+    `play_kw={"confirm": True}` to go over it. The baseline is absent when neither option is given, because bench
+    baselines never call an LLM on their own.
+
+### `ertan_wtp` (continuous): who-to-punish human-likeness, criterion by criterion
+
+- **Rows:** the 9 criteria of `games.wtp_scorecard` (port of edsl-test `score_wtp.py`), each scored 0-1 against the
+  Ertan, Page & Putterman (2005 WP, EER 2009) targets from `human_targets.json`.
+  - `truth = 1.0` for every criterion: the full human-likeness credit. Each criterion's scoring rule already
+    encodes its human target, and `data.test["target"]` quotes the target and its printed page.
+  - `weight` is 3/2/1 (institutional, mechanics, distribution). `group` is that family.
+  - There are no train rows.
+- **Predictions:** the mean criterion score over runs. A criterion that is N/A in a run is excluded from that run's
+  mean, never zero-filled. One that is N/A in every run stays NaN. The run output itself can be passed as the
+  prediction: a structured run dict, the `abm.society.run_who_to_punish` result (every group is scored), or a list
+  of either. Helpers:
+  - `runs_method(runs)` and `society_method(llm, personas, seeds=(0, 1, 2))`.
+  - `group_to_run(group)`: takes `punish_high` from the group's voted rules and leaves invalid punishment answers
+    out of the events.
+  - `scorecards(runs)`: one row per run. Use it for the seed-to-seed spread.
+  - In `bench.run`, wrap the run output in `runs_method(...)`. The leaderboard reads a methods dict whose values
+    are all dicts or lists as a per-task mapping.
+- **Metrics:**
+  - `index` (primary, higher is better): the weighted mean over the observed criteria. It equals
+    `wtp_scorecard(run)["index"]` for one run.
+  - `wmae`: the weighted mean |1 − score|.
+  - `coverage`: the share of the 9 criteria observed.
+  - The CI resamples criteria with their weights. It shows how much the index leans on single criteria, not
+    sampling uncertainty across groups or seeds.
+- **Baselines:** synthetic runs scored by the same scorecard (4 players, endowment 10, `votes` × `periods`, default
+  2 × 3).
+  - `rational_corner`: everyone gives 0 and nothing passes. Index 0.455, with 5 of 9 criteria observed.
+  - `full_cooperation`: everyone gives 10 and punish-low always passes. Index 0.769, with 6 of 9 criteria
+    observed **(new)**.
+  - The scorecard is lenient to a constant full-cooperation run. With a single regime, `treatment_effect` is N/A
+    and nobody is below average to punish. Read `coverage` next to `index`.
+- **evaluate:** the frame passes `simengine.evidence.evaluate` (the `weight` column becomes its row weight). Because
+  truth is constant, its "another unit's truth" random baseline is a perfect 1.0, so its baseline ladder means
+  nothing here. Use `task.score` for this task.
+
+### `beebench_b01_prior` (continuous, optional): the prior b01 runs as fixed reference arms
+
+- **Files:** `<root>/beebench_b01/results.csv` (or the directory that holds `results.csv`), the b01 tidy results
+  table. It is not shipped. The original run is 10,920 rows (7 persona methods × 14 games × 10 agents × 3 runs,
+  gpt-oss-120b), with 30 invalid rows.
+- **Task:** same rows, split, scale and metrics as `econ_games_b01`. Each persona method in the file becomes a
+  reference arm named `b01_<persona_method>`. The no-persona method (`bare_method`, default `baseline`) becomes
+  `bare_model`. Options: `methods=` (`big5|twin2k` on the command line) and `model=`. The arms are listed as
+  baselines by `bench.run`. They are prior results, not fitted to this task.
+- **Moments:** all are recomputed from the rows by `simengine.games`, on valid rows only. The numbers below are
+  simengine's own computation, not figures from the b01 repository.
+
+**Measured numbers (new)** on the original b01 file, read in place. Holdout split, share scale, B = 1000,
+`default_rng(42)`:
+
+| arm | holdout MAE [95% CI], 8 moments / 4 games | all-games MAE [95% CI], 24 moments / 12 games (`split=all`) |
+|---|---|---|
+| b01_gps | 0.113 [0.070, 0.187] | 0.171 [0.125, 0.218] |
+| b01_twin2k | 0.185 [0.104, 0.239] | 0.179 [0.128, 0.213] |
+| midpoint | 0.201 [0.100, 0.316] | 0.254 [0.143, 0.351] |
+| b01_anthology | 0.202 [0.116, 0.289] | 0.188 [0.132, 0.251] |
+| b01_demographic | 0.212 [0.124, 0.317] | 0.283 [0.209, 0.357] |
+| b01_big5 | 0.246 [0.167, 0.363] | 0.220 [0.166, 0.270] |
+| b01_value_anchor | 0.250 [0.133, 0.458] | 0.297 [0.187, 0.401] |
+| bare_model (b01 `baseline`) | 0.341 [0.212, 0.506] | 0.404 [0.334, 0.470] |
+| rational_corner | 0.452 [0.326, 0.590] (coverage 0.875) | 0.456 [0.390, 0.531] (coverage 0.958) |
+
+- **Caveats:**
+  - One model.
+  - 10 agents × 3 runs per method.
+  - The holdout CI rests on 4 game clusters, so the ranking inside the persona methods is not significant. The
+    intervals overlap widely.
+  - `split=all` includes the calibration games, which were visible when the b01 personas were built.
+- **What holds:** the bare model is worse than the LLM-free midpoint on both splits, and every persona method beats
+  the bare model on the holdout games. This matches insight 2 of the porting plan: always show the no-persona
+  control, and beat the simple baseline too.
+
 ## Tests
 
-Run `python -m unittest discover -s tests -t . -p 'test_bench*.py'`. There are 23 tests, taking about 9 s on the
+Run `python -m unittest discover -s tests -t . -p 'test_bench*.py'`. There are 46 tests, taking about 11 s on the
 research machine.
 
 - `test_bench_adapters.py` writes tiny synthetic files in each task's layout and checks loading, split invariants,
@@ -291,6 +434,15 @@ research machine.
 - `test_bench_data.py` runs only when the catalogue is present (`$SIMENGINE_TEST_DATA`, default: the research
   machine's catalogue path). It reproduces the GSS T-kendi dev score, the OpinionQA uniform dev WD and the bank
   logistic/persistence AUCs.
+- `test_bench_games.py` covers the three economic-game tasks offline:
+  - loading with no data, the options, and the corner and midpoint values;
+  - results tables as predictions, and NaN moments that lower coverage and are never filled;
+  - `play_method` and the `llm=` bare model on a scripted `FakeLLM`, and the cost gate;
+  - the scorecard frame, N/A exclusion, `society_method` on `abm.society`, and `evidence.evaluate` on both frames;
+  - the prior task skipping when its file is absent, and the prior task on a synthetic file in its layout.
+
+  The real b01 check (10,920 rows, 30 invalid) runs only when `$SIMENGINE_B01_DIR`, or
+  `<$SIMENGINE_TEST_DATA>/beebench_b01/`, holds `results.csv`.
 
 ## Known gaps
 
@@ -301,4 +453,10 @@ research machine.
   1b(c), 1a(a) and person AUC are included.
 - `twin2k500` does not port the persona kit's stack model (`T-kit`) or the price-logistic `T-adil`. The baselines are
   median and ridge only.
-- No task runs LLM methods itself. LLM arms come in as user methods, for example from `simengine.methods`.
+- `econ_games_b01` has only 8 holdout share moments over 4 games, so its CIs are wide. The beauty contest has no
+  full human distribution, so this task carries no Wasserstein or KS row (the games module computes W1/KS for
+  eleven_twenty only, outside the task).
+- `ertan_wtp` scores criteria, not raw Ertan statistics. Its CI is a criterion bootstrap, not a seed bootstrap. The
+  `final_vote_punish_low` human rate is 0.875, so a real human group would average below 1.0 on that row.
+- `beebench_b01_prior` treats the prior arms as baselines in `bench.run` (`is_baseline` is true).
+- No dataset task runs LLM methods itself. `econ_games_b01` calls an LLM only when you pass `llm=`. LLM arms come in as user methods, for example from `simengine.methods`.

@@ -15,6 +15,8 @@ from .api import (BADGE_TO_ENGLISH, METRIC_TO_ENGLISH, METRIC_TO_INTERNAL, TASK_
                   paired_ci, panel_cost, prepare, recalibrate, reliability, sample_multiplier, save_json, seal,
                   shuffle_control, split_audit, summary, to_internal, tvd, verify, verify_chain, wasserstein_ordinal,
                   worth_humans, worth_theory_curve)
+from .extras import (coefficient_recovery, completion_from_frame, completion_row, published_findings,
+                     section_html, section_markdown, stylized_facts_score, variance_ratio)
 
 __all__ = [
     "evaluate", "summary", "card", "card_markdown", "card_dict", "dashboard", "dashboard_html", "save_json",
@@ -26,5 +28,7 @@ __all__ = [
     "split_audit", "memorization_audit", "answer_hit",
     "seal", "verify", "verify_chain", "grade", "chain", "canonical_bytes",
     "badge", "panel_cost",
+    "variance_ratio", "completion_row", "completion_from_frame", "published_findings", "stylized_facts_score",
+    "coefficient_recovery", "section_markdown", "section_html",
     "TASK_TO_INTERNAL", "TASK_TO_ENGLISH", "METRIC_TO_INTERNAL", "METRIC_TO_ENGLISH", "BADGE_TO_ENGLISH", "VERSION",
 ]

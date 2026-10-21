@@ -181,3 +181,173 @@ gen = src.generate(spec, n=10)
 answers = src.ask(panel + gen, "Would you try a 15-minute delivery plan?", {"intent": "int 1-10"})
 src.check_errors()
 ```
+
+## Persona method zoo (`methods/`) and Big Five (`bigfive.py`, `validate.py`)
+
+Ported from two read-only source repos: edsl-test (`personas/`, `benchmark/beebench/b01/agents.py`) and
+replicant (pyreplicant 0.3.0, MIT: `src/replicant/personalities/factory.py`, `validation.py`). Credit for the
+replicant code goes to that package (MIT, declared in its `pyproject.toml`; it has no root LICENSE file).
+edsl-test has no LICENSE file; it is from the same owner.
+
+### Persona methods
+Every method returns n persona texts for a seed. The text goes into the LLM call as `system`, and the game or
+question goes in as `user`. `""` means no persona.
+
+```python
+import simengine.persona as sp
+sp.list_methods()                                   # name, needs_data, description, paper, source, data_file
+texts = sp.sample_texts("homo_silicus", n=4, seed=1)
+people = sp.method_personas("gps", n=20, seed=0)    # [{"id": "gps-0-0", "text", "persona_method", "params"}]
+bank = sp.AgentBank("value_anchor", seed_base=1000, path="bank_value_anchor.json")
+agents = bank.get(10)                               # {agent_id: text}; growing to 20 keeps these 10 unchanged
+```
+
+| method | what the persona is | paper | data |
+|---|---|---|---|
+| `baseline` | no persona (the bare-model control) | — | — |
+| `homo_silicus` | GSA "human being with cognitive biases" prefix + one social-preference one-liner; mixture over 6 types with fixed largest-remainder quotas | Horton 2023 (arXiv:2301.07543); Charness & Rabin 2002; Manning et al. 2025 | — |
+| `big5` | Big5-Scaler Simple Prompt: 0-10 dials with high- and low-pole glosses | Cho & Cheong 2025 (arXiv:2508.06149); norms Soto & John 2017 | — |
+| `value_anchor` | "Answer as a person that is [value]", one of 19 BWVr values, drawn by most-important-value prevalence | Rozen et al. 2024 (arXiv:2407.12878); Lee et al. 2019 | — |
+| `gps` | answers to the 8 qualitative Global Preferences Survey items, 6 preferences sampled jointly | Falk et al. 2018 (QJE); NBER WP 23943 | — |
+| `construction` | fixed template with 3 Charness-Rabin dials (efficiency, self-interest, inequity aversion), balanced over the paper's 3 optimal vectors | Manning & Horton 2025, General Social Agents (arXiv:2508.17407) | — |
+| `bfi2` | BFI-2-Expanded sentence bank, 15 sentences (`bigfive.py`) | Soto & John 2017; Huang et al. 2024 | — |
+| `demographic` | first-person Argyle-style backstory from one survey-weighted GSS 2024 row | Argyle et al. 2023 | `gss_sample.csv` |
+| `anthology` | one released Anthology backstory, age-stratified to GSS 2024 shares | Moon et al. 2024 (arXiv:2407.06576) | `anthology_backstories.json` |
+| `twin2k` | verbatim Twin-2K-500 persona summary of one real respondent (prefix-stable draw) | Toubia et al. 2025 (arXiv:2505.17479) | `twin2k_personas_sample.json` |
+
+**Data-backed methods.** The data files are not shipped. A loader looks in `data_root`, or in
+`$SIMENGINE_DATA` when `data_root` is not given, at `<root>/persona_methods/<file>`. `data_root` may also be
+the `persona_methods` folder itself. A missing file raises `PersonaDataNotFound` (a `FileNotFoundError`) whose
+message gives the layout.
+- `gss_sample.csv`: columns `id, age, sex, race, hispanic, born, degree, marital, childs, wrkstat, income16,
+  class, relig, attend, partyid, polviews, region, weight`, with GSS 2024 lower-case category labels. An empty
+  cell drops that fragment.
+- `anthology_backstories.json`: a list of `{bracket, question, text}` (plus optional `sid`/`age`), where
+  bracket is one of `18-29`, `30-49`, `50-64`, `65+`.
+- `twin2k_personas_sample.json`: `{"personas": [{"pid", "summary"}]}`.
+
+The source repo's `prepare.py` scripts build these from the GSS 2024 public-use file, HF
+`SuhongMoon/anthology_backstory` and HF `LLM-Digital-Twin/Twin-2K-500`.
+
+**Inlined parameters.** These are published-literature or calibration constants, not data. Each carries its
+citation in the code.
+- homo_silicus `CALIBRATED_WEIGHTS`: self_interested .36, efficient .50, selfish_but_fair .14, from
+  `personas/homo_silicus/weights.json` (gpt-oss-120b calibration, train SSE .089, held-out dictator RMSE .315).
+  The reciprocal type gets weight 0, so this mixture can never contain a punisher. Horton's GPT-4o mixture
+  is available as `HORTON_WEIGHTS`.
+- value_anchor `PREVALENCE_WEIGHTS`: 19 values from `personas/value_anchor/weights.json` (Lee et al. 2019,
+  Table 2, Study 2, N = 439).
+- big5 norms and correlations (Soto & John 2017, Tables 5 and 2); GPS correlations (NBER WP 23943, Table 12);
+  the construction dial vectors (GSA p.50); anthology GSS 2024 age shares.
+
+**Generic helpers.** These are exposed for new methods:
+- `TraitDialSampler(norms, corr, template, clip, transform)`: pure-Python Cholesky, from big5 and gps.
+- `quota_mixture(types, weights, n, seed)`: largest-remainder quotas, from homo_silicus.
+- `weighted_rows_no_replacement(rows, weight_col, n, seed)` and `RowFragmentRenderer(templates, frame)`, from
+  demographic.
+- `stratified_pool_sample(pool, strata_weights, n, seed)`, from anthology.
+- `register_method(...)`, for example `homo_silicus.make(weights=...)`, `value_anchor.make("uniform")` or
+  `construction.make(dials=...)`.
+
+**Equivalence with the source (checked while porting).** `AgentBank(m).get(10)` reproduced the edsl-test b01
+bank files `benchmark/beebench/b01/agents_bank/<m>.json` byte for byte for all 9 methods. The three
+data-backed methods were checked against the source data files. `sample_bigfive(20, seed=42)` reproduced the
+assigned scores of the replicant validation run exactly (`papers/ertan2009/results/validation_continuous.json`).
+Both checks read stored outputs. Neither re-runs the source code.
+
+**Per-method replication status.** Source: `personas/*/replication.json`, all marked PASS. Most are
+implementation-fidelity checks on small n, each with its own model.
+
+| method | model | check | result |
+|---|---|---|---|
+| homo_silicus | gpt-4o | Horton Fig. 3 P(Left) pattern on 6 Charness-Rabin menus, MAD ≤ .2 | MAD .00 / .017 / .10 (efficient / inequity_averse / self_interested), 180 calls |
+| big5 | phi-4 | single-trait dial 10/10 vs neutral on BFI-2 items | 5/5 traits higher when dialed (paper allows a neuroticism miss), 1,200 calls |
+| value_anchor | Llama-3.1-8B, T 0.7 | anchored value rated above its circle-opposites (≥3 of 4 anchors) | 4/4 anchors, mean gap 3.22 |
+| gps | Llama-3.1-8B | Table 12 correlation recovery offline (200k draws) + readback probe | worst correlation gap .0026; readback hit share 1.0 |
+| construction | gpt-4o | MAE vs humans on 6 CR menus, paper φ* | **.347 vs paper .20** (baseline .398): better than bare, worse than the paper |
+| demographic | Llama-3.1-70B | 24 strong-partisan backstories, 2020 vote | 24/24 own-party aligned |
+| anthology | Llama-3.1-70B | age-bracket readback of 24 stories | 23/24 (.958) |
+| twin2k | gpt-4.1-mini | holdout accuracy, 5 people × 8 questions | .7075 vs paper .6802 (test-retest .7475) |
+
+**Who-to-punish human-likeness.** Source: edsl-test `benchmark/REPORT.md`, with gpt-oss-120b, 9 criteria
+against Ertan, Page & Putterman (2009) targets, mean of 3 seeds (value_anchor: 4 runs, seed 1 ran twice), one group of 4 per seed. The mean index was:
+construction .813, demographic .797, value_anchor .786, twin2k .783, baseline .694, big5 .688, gps .688,
+homo_silicus .677, anthology .617.
+
+Read these numbers with care:
+- The ranks inside the top four are not significant.
+- Seed ranges reach 0.37 within one method.
+- The criterion weights were not sensitivity-checked.
+- baseline and homo_silicus have an effective n of 1 (cache).
+- The bare model dismantled the punish-low institution in all 3 seeds.
+- "Never allow punishing high contributors" held in every run: 56/56 group votes over the 28 runs in
+  `wtp_scores.csv` (REPORT.md says 54/54, which does not match the csv).
+
+Use these as priors on which family to try. They do not show that any method works for your task: always
+run the `baseline` control next to it.
+
+### Big Five personas
+```python
+from simengine.llm import FakeLLM
+import simengine.persona as sp
+sp.bfi2_text({"agreeableness": 4.5, "neuroticism": 1.5})       # other domains = 3.0
+people = sp.sample_bigfive(50, seed=1, overrides={"agreeableness": 2.0}, sd_scale=1.0)
+people = sp.sample_bigfive(50, seed=1, norms=sp.SOTO_JOHN_2017_NORMS, corr=sp.SOTO_JOHN_2017_CORR)
+panel = sp.bigfive_audience(spec, n=40, seed=0, strength=0.5)   # AudienceSpec quota cells + Big Five
+res = sp.validate_bigfive(llm, n=20, seed=42)                   # builder="bfi2" | "big5_scaler" | callable
+sp.to_card_row(res)                                             # flat row for an evidence table
+```
+**Scoring.** A 1-5 score maps to the sentence-bank weight (score − 3) × 1.5, on −3..+3 with 7 levels of 3
+sentences each. A fractional weight takes `round(frac × 3)` sentences from the upper level. `PROFILES` holds
+replicant's uncalibrated named profiles (cooperative, selfish, leader, anxious, average).
+
+**Norms.** `US_ADULT_NORMS` are replicant's POPULATION_NORMS. replicant credits them to Soto & John (2017), but
+they are not that paper's Table 5 (`SOTO_JOHN_2017_NORMS`), so their primary source is unverified.
+
+**Persona-strength knob.** In `bigfive_audience`, mean = 3 + strength × (target − 3) and the SD is the norm
+SD × strength:
+- strength 0 gives everyone the all-average text.
+- strength 1 keeps the targets or norms.
+- strength above 1 exaggerates.
+
+The targets come from `targets=` (a dict or a profile name), or else from the spec's
+`audience.trait_requirements` on Big Five dimensions (`high` 4.33, `average` 3.0, `low` 1.67, or a number).
+
+**Output form.** `bigfive_audience` returns flat dicts with full text, plus one identity line for the quota
+cell, rather than `Persona` objects. TALP narrative fields are clipped at 600 characters in prompts, and the
+15 sentences (about 900 characters) would lose neuroticism and openness. Use `sp.bigfive_traits(scores)` to
+attach the scores to a `Persona` as traits.
+
+**Fidelity check (`validate_bigfive`).** It assigns with one instrument and measures with another, the
+20-item Mini-IPIP (Donnellan et al. 2006):
+- Each item is one `user` prompt, and the persona sits in `system`.
+- The result reports per-domain and pooled r, r², MAE and bias (measured − assigned), plus `n_pairs`,
+  `n_missing` (item answers that did not parse) and `n_missing_pairs`.
+- Every item answer row stores persona_method, agent_id, seed, params, max_tokens, wording_id, raw, value and
+  valid.
+
+**BFI-2 terms.** The level-0 sentences of the 7-level bank follow BFI-2 item stems ("is outgoing", "is
+reliable", "worries"). The BFI-2 (Soto & John 2017) is (c) its authors and free for non-commercial research use;
+ask the authors before any commercial use (see `NOTICE`).
+
+**Port fixes against replicant.**
+- No NaN-to-3 imputation. An unparseable answer stays missing, and a domain with a missing item is missing
+  (`min_items=4`).
+- No EDSL Agent/Survey wrappers. The source's EDSL agent rendering is replaced by `instruction + "Your
+  personality:" + text`.
+- JSON answers are parsed with `simengine.sim.parse.parse_json`. Other answers go through a strict
+  answer rule (a bare number, optionally with "/5", "out of 5" or its option label). A number is never
+  pulled out of prose: "I would say 4." and "Not 5" are missing, not guessed.
+
+**Measured with the source code.** Source: replicant `papers/ertan2009/results/validation_continuous.json`,
+model stepfun/step-3.5-flash, N = 20, seed 42, with NaN answers imputed as 3 in that run.
+- Pooled: r = .911, R² = .830, MAE = .666.
+- Per-domain bias: A +0.735 (4.02 → 4.75), N −0.692 (2.94 → 2.25), O +0.660, C +0.444, E −0.034.
+- Per-domain r ranges from .80 (A) to .95 (E).
+
+Rank order survives while levels drift toward warm and stable. Report bias, not just r. The numbers have not
+been re-measured through this library. `validate_bigfive(llm, n=20, seed=42)` assigns the same scores, so a
+rerun is directly comparable.
+
+**Turkish.** No Turkish sentence bank or Mini-IPIP wording exists here. Any translation is unvalidated until
+`validate_bigfive` is rerun in Turkish, and all norms are US or English-speaking samples.

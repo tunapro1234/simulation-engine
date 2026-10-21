@@ -1,0 +1,57 @@
+simengine
+Copyright (c) 2026 the simengine authors. All rights reserved (see LICENSE).
+
+This product includes code and material ported from the following sources. The sources were read, not
+executed, and were rewritten onto simengine's LLM protocol; algorithm changes are listed in the module docs.
+
+replicant (PyPI: pyreplicant 0.3.0), MIT License, same author as simengine
+  Big Five sentence bank, blending, profiles and norms (simengine/persona/bigfive.py); Mini-IPIP fidelity
+  check (simengine/persona/validate.py); validate-and-reprompt form loop (simengine/sim/constrained.py);
+  ertan_vignette parameters (simengine/games/library.py). See docs/modules/persona.md, sim.md and games.md.
+  replicant declares the MIT License in its pyproject.toml and README (it ships no LICENSE file). The MIT
+  terms, which apply to the ported replicant portions:
+
+    Copyright (c) the replicant authors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+    associated documentation files (the "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+    following conditions:
+
+    The above copyright notice and this permission notice shall be included in all copies or substantial
+    portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+    LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+    EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+    IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+    THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+  The oTree apps bundled with replicant carry oTree's own MIT license and were not ported.
+
+edsl-test, no LICENSE file (all rights reserved by default), same owner; reused internally
+  Persona method zoo and agent bank (simengine/persona/methods/); BeeBench b01 game library, runner schema,
+  coherence detectors (simengine/games/); who-to-punish scorecard and Ertan targets (simengine/games/wtp.py);
+  who-to-punish society loop (simengine/abm/society.py); homo_silicus mixture calibration
+  (simengine/methods/mixture.py); game benchmark tasks (simengine/bench/tasks/).
+
+awesome-llm-social-simulation (notes vault, same owner; its README declares CC BY 4.0,
+https://creativecommons.org/licenses/by/4.0/)
+  Creator: the awesome-llm-social-simulation authors (same owner as simengine).
+  Knowledge only, no code: docs/landscape.md, docs/validation.md, docs/failure-modes.md. Adapted and
+  re-verified; changes made: numbers were re-checked against the primary papers where possible and are
+  tagged when they were not.
+
+BFI-2 item content (Soto & John 2017, Journal of Personality and Social Psychology 113(1))
+  The level-0 sentences of the Big Five sentence bank (simengine/persona/bigfive.py) follow BFI-2 item stems.
+  The BFI-2 is (c) Soto & John and is free for non-commercial research use; ask the
+  authors before any commercial use.
+
+Published-literature constants (game references, Ertan, Page & Putterman 2009 targets, norm tables,
+calibrated weights) are inlined as parameters, each with its citation. They remain the work of their authors.
+
+Third-party datasets are NOT redistributed. In particular this repository does not contain GSS rows (NORC),
+Twin-2K-500 data, Anthology backstories, the BeeBench b01 results table, the replicant Ertan result files or
+the Ertan, Page & Putterman working paper. Loaders read your own local copy through data_root or
+SIMENGINE_DATA, under each dataset's own terms (see README.md, "Veri setleri ve lisanslar").

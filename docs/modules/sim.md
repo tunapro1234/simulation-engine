@@ -40,6 +40,7 @@ signal.
 | `ask_panel`, `build_prompts`, `Usage` | `panel.py` | Batched persona questioning: one JSON object per persona id. It accepts an array, a single object, an `{id: {...}}` mapping or a wrapper. It remaps ids by position only when no id matched and the counts are equal. Missing answers are counted, not invented. |
 | `schema_responder` | `panel.py` | Deterministic `FakeLLM` responder for every prompt in this module (dry runs and tests). It is never a measurement. |
 | `as_personas`, `PersonaView`, `control_personas`, `control_plan` | `personas.py` | Duck-typed persona adapter for TALP-schema dicts, objects with `to_dict()`, flat dicts and strings. Control arms: `no_persona` gets a neutral "typical adult consumer" text. `persona_swap` applies a cyclic shift: each persona keeps its own id, name and tagline and takes the next persona's content. `control_plan` keeps the control arms within the main arm's call count. |
+| `FieldSpec`, `validate_answers`, `ask_constrained`, `ConstrainedResult`, `completion_summary` | `constrained.py` | Schema-constrained JSON answers (int / float / choice / text, bounds, choices by value or display text). A failed check re-prompts with the error text, up to 8 calls; 4+ fields are asked one at a time with the earlier answers in the prompt. A field that never validates stays missing and is logged. `completion_summary` gives n_planned, n_completed and per-field failure counts per condition. |
 | `parse_json`, `normalize_probs`, `parse_distribution`, `parse_item_probs`, `parse_text_fields` | `parse.py` | Robust parsers. They handle fences, prose around the JSON, trailing commas, `[see below]`-style brackets in prose, and truncated arrays (complete objects are kept). Probability keys can be `"1"`, `"option 1"`, a letter or a label, and values can carry `%`. A missing option, a negative value, a zero sum or a wrong length gives `None`. |
 
 Ported from (read-only research code, `uretim/<branch>/`):
@@ -51,6 +52,7 @@ Ported from (read-only research code, `uretim/<branch>/`):
 - `talp73/kod/llm/{istem.py, kos.py, ssr.py, kalibre.py, tekrar.py}` (L0/L1/L2/SSR prompts, validator,
   samples, calibration, retest)
 - `deney/kod/kit/persona_talp.py` (`paars_decision`)
+- replicant (pyreplicant 0.3.0, MIT) `src/replicant/otree/bot.py` (`FormController.validate`, `_decide_batch`, `_decide_sequential`, `_build_prompt`, `_build_feedback`, `MAX_LLM_RETRIES`); see "Schema-constrained answers" below
 
 ## Minimal usage
 
@@ -182,6 +184,80 @@ primary measure).
   every seed (1b(c) −0.028 / −0.025 / −0.041) and far below the history model (−0.102..−0.125). Free-text sentences
   carry some person-specific signal, but less than the numeric prompt. Cost: 1,043 calls, $0.678.
 
+## Schema-constrained answers (`constrained.py`)
+
+Ported from replicant's oTree bot (`src/replicant/otree/bot.py`, pyreplicant 0.3.0, MIT; credit to the replicant
+project). The bot sat between the LLM and an oTree form: validate the answer, re-prompt with the errors, give up
+after 8 tries. Here the same loop runs on any `LLM` and on any page text, without oTree.
+
+```python
+from simengine.sim import FieldSpec, ask_constrained, completion_summary
+
+fields = [FieldSpec("contribution", "int", min=0, max=20, label="Tokens you put in the group account"),
+          FieldSpec("vote", "choice", choices=[("1", "Yes"), ("0", "No")])]
+res = ask_constrained(llm, persona_text, game_text, fields, max_tokens=1024,
+                      meta={"condition": "random", "agent_id": "a1", "persona_method": "big5", "seed": 0})
+res.completed, res.values, res.failures, res.attempts, res.usage.as_dict()
+rows = [r.row() for r in results]            # meta + values + valid + attempts + max_tokens
+completion_summary(results, by="condition", planned={"random": 50, "cooperative": 50})
+```
+
+- Persona text goes in as `system`, with replicant's "CRITICAL INSTRUCTION: Respond with ONLY a valid JSON
+  object ..." line appended (`system_suffix=""` drops it). The page or game text goes in as `user`, inside
+  replicant's prompt frame ("Page context:", "Your previous answers on this page:", "Field to answer:",
+  "Respond: {...}").
+- `validate_answers`: missing (`None`, `""`, `"nan"`, NaN) is an error. A choice matches its value, then its
+  display text, then either case-insensitively; the clean answer is the value. Numbers must be a number or a
+  numeric string; bounds are inclusive; `int` rejects fractions. Errors use replicant's wording ("contribution:
+  25 is above maximum 20", "Missing required field: vote", "... is not a valid choice. Options: [...]").
+- Under `sequential_threshold` (4) fields, one call asks for all fields; each failed check is retried with the
+  errors, up to `max_retries` (8) calls. From 4 fields on, fields are asked one at a time (8 calls each) and every
+  prompt carries the answers already given. As in replicant, the page stops at the first field that fails; the
+  fields after it are logged with `attempt: 0` (never asked). `stop_on_failure=False` keeps going.
+- `ConstrainedResult.values` holds validated fields only. A field that fails stays missing. It is not imputed,
+  not defaulted and not read out of prose. Filter on `completed` / `valid` before analysis, and report the
+  completion table next to every result.
+- `completion_summary` columns: `n_planned` (pass `planned=`; the default is the number of results seen, which
+  hides runs that crashed), `n_results`, `n_completed`, `completion_rate` (completed / planned), `attempts`,
+  `failed_<field>` (failed after all retries) and `missing_<field>` (failed or never reached).
+
+Why the completion table matters (re-counted by this module from replicant
+`papers/ertan2009/results/otree_{default,random,cooperative}_raw.json`, the logged page answers and
+`FIELD_FAILURE` entries; 50 bots per condition, stepfun/step-3.5-flash, a one-shot vignette version of Ertan, Page
+& Putterman 2009, not the original repeated game):
+
+| condition | Baseline page | Voting page | Regimes page | Punishment page |
+|---|---|---|---|---|
+| no persona (default) | 50/50 | 50/50 | 50/50 | 50/50 |
+| random Big Five personas | 50/50 | 50/50 | 50/50 | 50/50 |
+| hyper-cooperative personas | 50/50 | 50/50 | **30/50** | **7/50** |
+
+- All 43 field failures in the cooperative run (20 on the regimes page, 23 on the punishment page) ended with an
+  empty last response after 8 attempts. The cause (for example a reasoning budget used up before any answer
+  text) was never confirmed by a rerun.
+- The dropout is not random. The 20 bots that failed the regimes page had a mean baseline contribution of 17.6,
+  against 15.8 for the 30 that finished it (re-counted from the same raw file). Dropping the failures silently
+  would shift the sample.
+- replicant's summary JSON for that run still says n=50. That is why `completion_summary` keeps `n_planned` and
+  `n_completed` side by side.
+
+Deviations from replicant, all deliberate:
+- **Dropped `_try_direct_value`.** It salvaged a value from non-JSON text by substring and first-number matching,
+  so it reads "yes" inside "no, yes ...". A non-JSON reply is now a failed attempt. The one-field single-key
+  salvage (`{"answer": 4}` for field `contribution`) is kept, as in replicant.
+- **No transport code.** OpenRouter, `requests` and the 429 sleep are not ported; `simengine.llm` owns retries,
+  backoff and budgets. Backend errors (budget, auth) propagate. replicant turned every exception into an empty
+  answer.
+- **Feedback.** An unparseable reply gets replicant's "could not be parsed as JSON" message. In replicant this
+  branch was unreachable because the missing-field errors came first. Every retry prompt ends with
+  "(Attempt k of n.)", so a cached backend does not replay the same bad answer.
+- **Field hints.** Float fields say "number from a to b". Fields without bounds say "(integer)" / "(number)".
+  replicant only had integer hints. Batch prompts keep replicant's "Field to answer:" heading.
+- **`max_tokens` default 1024.** replicant sent 16000 on every call. The cap is a treatment (in edsl-test's who-to-punish run the bare model
+  punished the free-rider every period at max_tokens 8192 and never at the default cap; single run, and the
+  default-cap run was partly None-corrupted; `experiments/07_who_to_punish/results/2026-06-11_15-08-37_baseline/ANALYSIS.md`), so it is stored on every result and row.
+- **Partial values are kept** in `values` with `completed=False`. replicant discarded the whole page.
+
 ## Design notes and deviations from the research code
 - **English field names.** The panel field names (`score`, `choice`, `reason`, `intent`, `remark`,
   `<f>_answer`) and runner prompt wording are English translations of the Turkish sahne prompts. The
@@ -203,7 +279,7 @@ primary measure).
 
 ## Tests
 `tests/test_sim_parse.py`, `test_sim_panel.py`, `test_sim_runners.py`, `test_sim_distribution.py`,
-`test_sim_prediction.py`, `test_sim_evaluate.py` (55 tests, offline, FakeLLM, under 1 s):
+`test_sim_prediction.py`, `test_sim_evaluate.py`, `test_sim_constrained.py` (74 tests, offline, FakeLLM, under 1 s):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'

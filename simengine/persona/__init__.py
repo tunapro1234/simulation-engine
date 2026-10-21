@@ -6,7 +6,12 @@
     src = sp.ClaudeSource(llm)                                                 # any simengine.types.LLM
     panel = src.generate(sp.AudienceSpec(...), n=20)
     answers = src.ask(panel, "Rate this ad 1-10", {"score": "int 1-10"})
+    texts = sp.sample_texts("homo_silicus", n=4, seed=1)                      # persona method zoo (methods/)
+    people = sp.sample_bigfive(50, seed=0); res = sp.validate_bigfive(llm)    # Big Five + Mini-IPIP fidelity
 """
+from . import methods
+from .bigfive import (DOMAINS as BIGFIVE_DOMAINS, PROFILES, SOTO_JOHN_2017_CORR, SOTO_JOHN_2017_NORMS,
+                      US_ADULT_NORMS, bfi2_text, bigfive_audience, bigfive_traits, sample_bigfive)
 from .builders import (TALP_FIELDS, Mapping, age_band, auto_mapping, from_row, from_table, gender_value,
                        narrate, to_frames)
 from .history import (LEVELS, from_history, purchase_history_text, summarize_purchases,
@@ -15,9 +20,12 @@ from .schema import (ABSOLUTE_WORDS, AGE_BAND, BRAND_AWARENESS, COMMITMENT, ENUM
                      INCOME_TIER, LABELS, PERSONA_MODE, USAGE, Audience, AudienceSpec, Authored, Behavioral,
                      Disposition, Evidence, Identity, Persona, Trait, Trigger, Triggers, dump_personas, enum_for,
                      load_personas)
+from .methods import (METHODS, AgentBank, PersonaDataNotFound, PersonaMethod, get_method, list_methods,
+                      method_personas, sample_texts)
 from .sources import (ASK_PROMPT, GENERATE_PROMPT, SYSTEM_ASK, SYSTEM_GENERATE, BudgetExceeded, CallCounter,
                       ClaudeSource, FakeSource, LLMError, LLMSource, PersonaSource, Reply, Request, TalpSource,
                       build_persona, cell_plan, json_extract, open_source)
+from .validate import MINI_IPIP, score_mini_ipip, to_card_row, validate_bigfive
 
 __all__ = [
     # schema
@@ -34,4 +42,11 @@ __all__ = [
     "TALP_FIELDS",
     # history
     "from_history", "survey_profile_text", "summarize_purchases", "purchase_history_text", "LEVELS",
+    # persona method zoo
+    "methods", "METHODS", "PersonaMethod", "PersonaDataNotFound", "list_methods", "get_method", "sample_texts",
+    "method_personas", "AgentBank",
+    # Big Five
+    "bfi2_text", "bigfive_traits", "sample_bigfive", "bigfive_audience", "PROFILES", "US_ADULT_NORMS",
+    "SOTO_JOHN_2017_NORMS", "SOTO_JOHN_2017_CORR", "BIGFIVE_DOMAINS", "MINI_IPIP", "score_mini_ipip",
+    "validate_bigfive", "to_card_row",
 ]

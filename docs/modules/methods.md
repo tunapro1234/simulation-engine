@@ -16,6 +16,7 @@ that combine an LLM prediction with a model learned from data.
 | `TwinStack`, `pooled_logistic_oof`, `column_correlation`, ... | person-level digital twin: matrix completion + kNN + optional LLM column, ridge-stacked per column | Twin-2K-500 fair LLM-free baseline **0.342** corr; LLM adds +0.006 |
 | `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout` | conditional multinomial logit for conjoint / discrete choice | 0.509 new-person accuracy on camera conjoint (HB 0.519, HB not ported) |
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank | 26.94 vs **31.60** exact next action on OPeRA |
+| `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -281,6 +282,71 @@ LightGBM beats Markov-2 by +4.66 [+2.04, +7.55], and by [+1.68, +7.66] user-clus
 [-0.14, +3.11]); the two are not separable. Part of the gain is per-user history. Use `use_user_prior=False` to
 ablate it. The source's page-structure, click-type and text-overlap features were dataset-specific and are **not
 ported**; pass equivalents as `numeric` / `categorical`.
+
+## Theory-persona mixture calibration (`mixture.py`)
+
+Port of edsl-test `personas/homo_silicus/calibrate.py` (`fit_weights`, `mixture` and the duplicate-row
+warning). edsl-test has no LICENSE file; it has the same owner and is reused internally with this provenance note. A population is modelled as a mixture over a few theory types ("You only care about your own
+pay-off.", ...). Each type's behaviour on calibration targets is measured once, then simplex weights (w >= 0,
+sum 1) are fitted so the weighted average of the types matches the human targets. This is the "selection" step of
+General Social Agents (Manning, Zhu & Horton) applied to the Homo Silicus types (Horton 2023, arXiv:2301.07543).
+Validation runs on targets that were never fitted, in a different game format.
+
+```python
+import simengine.methods as M
+games = {**M.charness_rabin_games(), "dictator": M.dictator_game()}
+B = M.probe_types(llm, M.THEORY_TYPES, games, reps=10, prefix=M.HUMANIZING_PREFIX)   # type x target
+fit = M.fit_mixture_weights(B, M.CR_HUMAN_LEFT, grid_step=0.02, val=M.ENGEL_DICTATOR)
+fit.weights, fit.train_sse, fit.val_rmse, fit.unidentified_pairs, fit.weight_range
+```
+
+- **Fit.** `fit_mixture_weights(type_behavior, human_target, *, grid_step=0.02, val=None)` searches the whole
+  simplex grid, as the source does, and minimises the SSE on the targets in `human_target.index`. The grid is
+  vectorised and keeps the source's lexicographic order, so ties resolve the same way. Six types at 2% steps are
+  3,478,761 points and take about 0.6 s. `method="slsqp"` (scipy) fits continuous weights for libraries too large
+  for the grid; past `max_grid` points the grid raises and points you there.
+- **Validation.** `val` is either a Series of held-out targets that are columns of `type_behavior`, or a
+  `(val_behavior, val_target)` tuple from a separate probe. If a validation target is also a training target,
+  the call raises. `val_rmse` is computed on those targets only.
+- **Identifiability.** If two types differ by at most `ident_tol` (0.01) on every training target, the pair goes
+  into `unidentified_pairs` and an `UnidentifiedWarning` is raised. The same warning fires when the
+  (targets + 1) x types matrix [behaviour; 1] is rank deficient, for example when a type is a mix of others or
+  there are more types than targets + 1. `weight_range` gives each type's min/max weight over the grid points
+  tied with the best SSE. Without the warning you get the edsl-test v1 bug: in a dictator-only probe,
+  `self_interested` and `efficient` both keep everything, and the grid silently gives their joint weight to
+  whichever type comes first. That zeroes the modal human type (36% of humans give nothing).
+- **Probes.** `probe_types(llm, type_texts, games, reps=10)` runs every (type, game) cell `reps` times
+  through `llm.map`. The type text goes in as `system` (optionally after `HUMANIZING_PREFIX`) and the game text
+  as `user`. Repetition r is passed as `sample=r` so caching backends give independent draws
+  (`sample_kw=None` for a backend that rejects the keyword; then effective n may be 1). Probes are `ProbeGame`s
+  (`choice_game`, `numeric_game`, or the ready `charness_rabin_games()` and `dictator_game()`). A choice
+  reply must name exactly one option. A numeric reply must contain exactly one number in range. Anything else
+  is invalid: it stays missing and is counted in `attrs["n_valid"]` / `attrs["n_invalid"]`, and a warning is
+  raised. A cell with fewer than `min_valid` valid answers is NaN, and `fit_mixture_weights` refuses NaN cells
+  in the targets it uses. `return_rows=True` also returns one row per answer with `persona_method`, `agent_id`,
+  `seed`, persona parameters, `max_tokens`, `wording_id` and `valid`. The prompts end with a one-line answer
+  instruction ("Answer with exactly one word: Left or Right.", "Answer with a single number only."), where the
+  source relied on EDSL's question types.
+- **Constants** (inlined with sources in the module docstring): `CR_GAMES` / `CR_HUMAN_LEFT` (Charness & Rabin
+  2002, QJE 117(3), Table I; Berk29 is .31, Horton's text vector says .68, a typo), `ENGEL_DICTATOR` (Engel 2011
+  meta-analysis: mean give 28.35%, 36.11% give 0, 16.74% split equally), `THEORY_TYPES` (six types: three from
+  Horton Fig. 3, competitive and reciprocal from Charness & Rabin, selfish_but_fair from GSA), and
+  `HORTON_GPT4O_WEIGHTS` (.53 / .37 / .10, Horton Sec. 2.2.1).
+
+Measured in edsl-test (`personas/homo_silicus/weights.json`, `NOTES.md`; gpt-oss-120b, 10 reps per cell; not
+re-measured here). The six-type fit on the CR menus gives self_interested .36, efficient .50, selfish_but_fair
+.14 and 0 for the other three, with train SSE .089. `tests/test_methods_mixture.py` reproduces these weights,
+the SSE and the validation RMSE exactly from the stored behaviour vectors. All six types were distinct on the
+menus, so no identifiability warning was raised.
+
+**When it does not work.**
+- The held-out dictator validation is poor: RMSE **.315**. The mixture gives a mean of 6.7% against the human
+  28.35%, and P(give 0) .86 against .36. A good train fit does not transfer to a new game format.
+- `reciprocal` gets weight 0 for a structural reason. Unilateral menus contain no prior unfair act, so the
+  probes cannot identify reciprocity, so no punisher type survives calibration. In the who-to-punish run
+  with the calibrated group, both votes banned all punishment (`NOTES.md`, v2 results). The edsl-test fix is to add probes with prior unfair
+  behaviour (ultimatum responder, a public-goods punishment stage) and to re-check the warning.
+- All evidence comes from one model (gpt-oss-120b) and 10 reps per cell. Nothing was measured on Claude.
 
 ## Not ported / gaps
 

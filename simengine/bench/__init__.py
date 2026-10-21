@@ -13,10 +13,11 @@ Expected file layout per task: `bench.get(name).layout` (and docs/modules/bench.
 from .base import (ENV_DATA, BenchTask, DataNotFound, Metric, get, list_tasks, methods_in, register,
                    resolve_root)
 from .leaderboard import run, to_markdown
-from .tasks import (BankMarketing, GSSWave, OpenEcommerce, OpinionQAGroups, SimBench, Twin2K500, Upworthy)
+from .tasks import (BankMarketing, BeeBenchB01Prior, EconGamesB01, ErtanWTP, GSSWave, OpenEcommerce, OpinionQAGroups,
+                    SimBench, Twin2K500, Upworthy)
 
 list = list_tasks  # noqa: A001  (bench.list() per the module contract)
 
 __all__ = ["ENV_DATA", "BenchTask", "DataNotFound", "Metric", "get", "list", "list_tasks", "methods_in", "register",
-           "resolve_root", "run", "to_markdown", "BankMarketing", "GSSWave", "OpenEcommerce", "OpinionQAGroups",
-           "SimBench", "Twin2K500", "Upworthy"]
+           "resolve_root", "run", "to_markdown", "BankMarketing", "BeeBenchB01Prior", "EconGamesB01", "ErtanWTP",
+           "GSSWave", "OpenEcommerce", "OpinionQAGroups", "SimBench", "Twin2K500", "Upworthy"]

@@ -11,7 +11,8 @@
 Subpackages are imported lazily on first attribute access, so `import simengine` stays fast and optional
 dependencies (anthropic, lightgbm, sentence-transformers) are only needed by the parts that use them.
 
-Subpackages: llm, persona, sim, methods, abm, evidence, research, bench (plus `types` and `cli`).
+Subpackages: llm, persona, sim, methods, abm, evidence, research, bench, games (plus `types` and `cli`).
+`games` is the one-shot economic game battery with distance-to-human scoring (`se.games.play`, `se.play_games`).
 What works and what does not, with measured numbers: README.md, docs/RESULTS.md, docs/METHODS.md.
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ from typing import Any
 
 __version__ = "0.1.0"
 
-SUBPACKAGES = ("llm", "persona", "sim", "methods", "abm", "evidence", "research", "bench", "types", "cli")
+SUBPACKAGES = ("llm", "persona", "sim", "methods", "abm", "evidence", "research", "bench", "games", "types", "cli")
 
 # Most used entry points, re-exported lazily: name -> (subpackage, attribute)
 _ENTRY_POINTS = {
@@ -51,6 +52,9 @@ _ENTRY_POINTS = {
     "Prereg": ("research", "Prereg"),
     "lock_prereg": ("research", "lock_prereg"),
     "seal": ("research", "seal"),
+    # games
+    "play_games": ("games", "play"),
+    "distance_to_human": ("games", "distance_to_human"),
     # types
     "LLM": ("types", "LLM"),
     "LLMResponse": ("types", "LLMResponse"),

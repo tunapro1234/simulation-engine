@@ -254,6 +254,70 @@ because it is part of kanit. The research module's own lock and loop are separat
 - *Measured:* an Upworthy expectation was sealed before computation (seal bad4549ab3a5). Both results fell
   inside the sealed range [kanit RAPOR §1a].
 
+## Extras: spread, completion, published findings, stylized facts, coefficients (`extras.py`)
+
+Five card sections for questions the baseline ladder does not answer. They are new code (not part of the kanit
+port), built from the ideas in the replicant `analysis/comparison.py` (PaperComparison), the edsl-test
+`benchmark/score_wtp.py` weighting, and the Bisbee and homogeneity notes of the social-simulation reading list.
+Each function returns a JSON-friendly dict with `kind`, `title`, `columns`, `rows`, `notes` and its own numbers.
+`section_markdown(sections)` and `section_html(sections)` render one section or a list (a Markdown table with
+bullet notes, or an HTML `<section>` with no external assets) so it can be appended to `card(...)` output or a
+page. Missing values are never imputed: they are dropped, counted and named in the notes.
+
+```python
+import simengine.evidence as ev
+spread = ev.variance_ratio(frame, "llm")                         # EvalFrame: truth vs pred_llm, per item
+done = ev.completion_row(by_condition={"default": (50, 50), "cooperative": (50, 7, 0)})
+paper = ev.published_findings([{"finding": "vote punish-low", "published": 0.85, "simulated": 0.94,
+                                "source": "<paper, table/page>", "tolerance": 0.10}])
+facts = ev.stylized_facts_score([{"name": "never_punish_high", "value": 1.0, "weight": 3},
+                                 {"name": "punishment_usage", "value": None, "weight": 2}])   # N/A: excluded
+coefs = ev.coefficient_recovery(sim_df, human_df, ("y", "x1", "x2"))
+open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, facts, coefs]))
+```
+
+- **`variance_ratio(df, method, *, item, truth, source, value, human, B=1000, seed=0)`**: simulated SD /
+  human SD per item (ddof = 1) with a percentile bootstrap CI, and a pooled ratio
+  sqrt(Σ simulated variance / Σ human variance), the same pooling as the `yayilim` spread block of `evaluate`.
+  Paired input is an EvalFrame (`truth`, `pred_<method>`; rows resampled jointly within item). Unpaired input is
+  a long table with `source=<column>` (`method` vs `human` rows in `value`; each side resampled independently).
+  Flags: < 0.8 homogenisation, > 1.5 over-dispersion (point estimate). Items with < `min_n` values or zero human SD
+  get no ratio and a reason. *Limit:* the CI is over respondents within the given items, not over new items.
+- **`completion_row(n_planned, n_completed, by_condition, *, n_parse_failed)`**: completion rate with a Wilson CI,
+  per condition and overall, split into valid answers, parse failures (`valid=False`) and silent dropout. With ≥ 2
+  conditions it adds a test of equal completion (Fisher's exact test for 2 × 2, otherwise chi-square), because
+  dropout that differs by condition biases any between-condition comparison. `completion_from_frame(df,
+  n_planned, condition=, valid="valid")` builds it from answer rows.
+  - *Why:* in the replicant Ertan vignette run the hyper-cooperative condition finished the regime page for 30/50
+    agents and the punishment page for 7/50, against 50/50 in the default and random conditions, and the
+    non-completers were not a random subset ([RESULTS.md](../RESULTS.md) §8 row 3; counts re-checked from
+    `papers/ertan2009/results/otree_cooperative_raw.json`). On the punishment-page counts this function gives
+    0.14 [0.07–0.26] for that condition and chi-square p ≈ 7e-27 *(this port's computation)*.
+- **`published_findings(rows)`**: rows of `finding`, `published`, `simulated` (None = not measured), `source`,
+  optional `unit`, `tolerance` and `published_ci`. Gives delta = simulated − published, delta / |published|, a
+  match flag (tolerance, else inside the published CI) and a summary (measured, missing, mean |delta|, matches).
+  It is the replicant `PaperComparison` as a card section; the mean |delta| only makes sense when units match.
+- **`stylized_facts_score(criteria)`**: weighted mean of 0–1 scores. A criterion whose value is None or NaN is
+  N/A and drops out of numerator and denominator, as in the edsl-test who-to-punish scorer (weights there: 3
+  institutional/treatment, 2 behavioural mechanics, 1 distribution shape). Values outside [0, 1] raise: score
+  against the human target inside the criterion. `weight_coverage` reports the observed share of the total
+  weight, because an index over fewer criteria is not comparable with one over all of them.
+  - *Caveat from the source:* the edsl-test index weights were never sensitivity-checked, and ranks inside its top
+    four methods were not significant ([RESULTS.md](../RESULTS.md) §8 row 7). Report the index with its seeds and coverage.
+- **`coefficient_recovery(sim_df, human_df, formula_cols, *, alpha=0.05)`**: fits the same OLS with intercept on
+  both samples (`{"y": ..., "x": [...]}` or `(y, x1, ...)`, numeric columns, listwise deletion counted) and
+  compares coefficients with z = (b_sim − b_human) / sqrt(se_sim² + se_human²). Summary: `sign_agreement`,
+  `share_differ` and `sign_flip_when_human_significant`; the intercept is left out unless `include_intercept`.
+  Classical SEs: collapsed simulated variance gives small SEs, so read `differs` together with `diff`.
+  - *Context, unverified:* the reading list summarises Bisbee et al. ("Synthetic Replacements for Human Survey
+    Data", Political Analysis) as 48 % of coefficients differing from ANES and 32 % flipping sign, with compressed
+    variance. These figures come from an AI-assembled note; check the paper before citing them.
+
+Tests: `tests/test_evidence_extras.py` (21 tests, synthetic data, < 1 s): variance ratio 1 on identical data and
+0.5 on halved spread (point and CI), unpaired input, missing and degenerate items, Turkish aliases; completion
+counts, tests and md/html rendering; published-finding deltas with missing values; N/A exclusion; coefficient
+recovery on same vs sign-flipped processes.
+
 ## When not to trust a number
 - Few items (< 20): only PPI++ is shown. Bayes shrinkage and "simulation alone" depend on hitting a single mean.
 - A method above the human ceiling: check leakage first.

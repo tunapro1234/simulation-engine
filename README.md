@@ -5,7 +5,11 @@ trust it. It builds personas from tables or histories, runs simulated surveys, A
 per-person predictions with Claude (or an offline `FakeLLM`), and ships the baselines that usually win: persistence,
 marginals, TF-IDF, logistic and GBDT. It also has agent-based models for adoption, opinion, markets and cascades, an
 evidence pipeline (baseline ladder, paired bootstrap CIs, audits, "worth N humans" via PPI++, sealed predictions,
-cards and dashboards), a pre-registered research loop, and benchmark tasks. The measured lesson: pure persona panels
+cards and dashboards), a pre-registered research loop, and benchmark tasks. A second porting round added a persona
+method zoo (10 methods) with a Big Five fidelity check, schema-constrained answers with re-prompting, a one-shot
+economic game battery scored by distance to published human numbers, a who-to-punish agent society, theory-persona
+mixture calibration, extra evidence sections (variance ratio, completion, coefficient recovery) and harness-variant
+sweeps. The measured lesson: pure persona panels
 rarely beat simple baselines. The LLM helps when there is no data, when it is stacked with a learner, and when it
 serves as a prior in small tests. Every number below has a source in [docs/RESULTS.md](docs/RESULTS.md). This is
 prior work: declare it if you use it at a hackathon (it is proprietary, not open source; cite a dated commit).
@@ -80,26 +84,32 @@ simengine loop examples/loop.json --max-turns 10
 | modül | ne yapar | belge |
 |---|---|---|
 | `simengine.llm` | Claude / `claude -p` / FakeLLM arka uçları, disk önbelleği, maliyet defteri, bütçe, 401'de durma | [llm](docs/modules/llm.md) |
-| `simengine.persona` | persona şeması, tablodan / geçmişten persona, LLM ile üretim, enum doğrulama, sızıntı koruması | [persona](docs/modules/persona.md) |
-| `simengine.sim` | anket, SSR, A/B paneli + güven kontrolü, tartışma turu, segment dağılımı, kişi başı tahmin (L0/L1/L2) | [sim](docs/modules/sim.md) |
-| `simengine.methods` | tabanlar, sepet yöntemleri, A/B (TF-IDF, LLM, stack, erken test Bayes), stack, büzülme, MNL, sonraki eylem | [methods](docs/modules/methods.md) |
-| `simengine.abm` | benimseme ABM + ABC, fikir kayması, pazar ABM, elastisite, retweet eğrileri (Hawkes, SEISMIC), ajan toplumu | [abm](docs/modules/abm.md) |
-| `simengine.evidence` | `evaluate`, taban merdiveni, eşli CI, denetimler, PPI++ çarpanı, mühür, kart, pano | [evidence](docs/modules/evidence.md) |
-| `simengine.research` | ön kayıt + kilit, arama uzayı, öneriler (rastgele, ızgara, açgözlü, halving, LLM), dev/seçim/test döngüsü | [research](docs/modules/research.md) |
-| `simengine.bench` | 7 kıyas görevi (bank marketing, GSS, Open e-commerce, OpinionQA, SimBench, Twin-2K-500, Upworthy) | [bench](docs/modules/bench.md) |
+| `simengine.persona` | persona şeması, tablodan / geçmişten persona, LLM ile üretim, enum doğrulama, sızıntı koruması; persona yöntem hayvanat bahçesi (10 yöntem, ajan bankası), Big Five kurucu + Mini-IPIP sadakat kontrolü (`validate_bigfive`) | [persona](docs/modules/persona.md) |
+| `simengine.sim` | anket, SSR, A/B paneli + güven kontrolü, tartışma turu, segment dağılımı, kişi başı tahmin (L0/L1/L2); şemalı cevap + hata geri bildirimiyle yeniden sorma (`ask_constrained`, tahmin/kurtarma yok) | [sim](docs/modules/sim.md) |
+| `simengine.methods` | tabanlar, sepet yöntemleri, A/B (TF-IDF, LLM, stack, erken test Bayes), stack, büzülme, MNL, sonraki eylem; teori-persona karışım ağırlıkları + tanımlanabilirlik uyarısı (`fit_mixture_weights`) | [methods](docs/modules/methods.md) |
+| `simengine.abm` | benimseme ABM + ABC, fikir kayması, pazar ABM, elastisite, retweet eğrileri (Hawkes, SEISMIC), ajan toplumu; ekonomik oyun toplumları (kimi cezalandırmalı oylaması, tekrarlı PD, güven) | [abm](docs/modules/abm.md) |
+| `simengine.evidence` | `evaluate`, taban merdiveni, eşli CI, denetimler, PPI++ çarpanı, mühür, kart, pano; ek bölümler: varyans oranı, tamamlama satırı (sessiz kayıp), yayımlanmış bulgularla fark, stilize olgu puanı, katsayı geri kazanımı | [evidence](docs/modules/evidence.md) |
+| `simengine.research` | ön kayıt + kilit, arama uzayı, öneriler (rastgele, ızgara, açgözlü, halving, LLM), dev/seçim/test döngüsü; ön kayıtta beyan edilen hedefler (`declare_targets`), tek değişiklikli düzenek taraması (`harness_variants`, `harness_sweep`: ifade, max_tokens, sıcaklık) | [research](docs/modules/research.md) |
+| `simengine.games` | 15 tek atışlık ekonomik oyun (10 kalibrasyon, 5 ayrılmış), maliyet kapılı koşucu, alıntılı insan değerlerine uzaklık (ajan bootstrap CI, W1/KS), tutarlılık denetimi, kimi cezalandırmalı 9 ölçütlü karne | [games](docs/modules/games.md) |
+| `simengine.bench` | 10 kıyas görevi: 7 veri görevi (bank marketing, GSS, Open e-commerce, OpinionQA, SimBench, Twin-2K-500, Upworthy) + 3 oyun görevi (`econ_games_b01`, `ertan_wtp` veri istemez; `beebench_b01_prior` yerel b01 tablosunu okur) | [bench](docs/modules/bench.md) |
 | `simengine.cli` | `evaluate`, `card`, `bench`, `loop`, `demo` | bu dosya |
 
 Kısayollar: `se.Claude`, `se.FakeLLM`, `se.from_table`, `se.survey`, `se.ab_test`, `se.segment_distribution`,
 `se.predict_people`, `se.evaluate`, `se.card`, `se.dashboard`, `se.worth_humans`, `se.Loop`, `se.Space`, `se.Prereg`,
-`se.seal`. Alt paketler ilk erişimde yüklenir.
+`se.seal`, `se.play_games`, `se.distance_to_human`. Alt paketler ilk erişimde yüklenir.
 
 Örnekler (`examples/`): `quickstart.py`, `ab_test.py`, `segment_distribution.py`, `research_loop.py` + `loop.json`,
-`abm_adoption.py` ve bir günlük yarışma planı [`hackathon_day.md`](examples/hackathon_day.md). Yöntem notları:
-[docs/METHODS.md](docs/METHODS.md).
+`abm_adoption.py`, `econ_games.py` (persona yöntemleri → oyunlar → insana uzaklık → kıyas → kimi cezalandırmalı
+karnesi; çevrimdışı, ~3 sn) ve bir günlük yarışma planı [`hackathon_day.md`](examples/hackathon_day.md). Yöntem
+notları: [docs/METHODS.md](docs/METHODS.md). Alan haritası ve doğrulama: [docs/landscape.md](docs/landscape.md)
+(rakip iddiaları, açık simülatörler, kıyaslar; her sayı "makale" ya da "satıcı beyanı" etiketli),
+[docs/validation.md](docs/validation.md) (jürilerin tanıdığı doğrulama ölçütleri → simengine işlevi),
+[docs/failure-modes.md](docs/failure-modes.md) (bilinen hata türleri, sayıları ve onları yakalayan denetim).
 
 ## Ölçülen sonuçlar
 
-Hepsi araştırma kodunda ölçüldü; kaynak dal ve dosya sağda. Tam liste ve güven aralıkları
+Hepsi araştırma kodunda ölçüldü; kaynak dal ve dosya sağda. Son üç satır önceki iki depodan (replicant,
+edsl-test) gelir ve Claude dışı modellerde ölçüldü; ayrıntı ve uyarılar RESULTS §8'de. Tam liste ve güven aralıkları
 [docs/RESULTS.md](docs/RESULTS.md)'de. "(yeniden)" işaretli satırlar bu kütüphanede gerçek veriyle tekrar üretildi.
 
 | görev | sonuç | kaynak |
@@ -120,6 +130,9 @@ Hepsi araştırma kodunda ölçüldü; kaynak dal ve dosya sağda. Tam liste ve 
 | bank marketing AUC | lojistik **0.748**; LightGBM 0.665; Haiku persona 0.684 (yeniden: tabanlar) | intent `gbdt/lig/bank_lig.json` |
 | GSS dalga tahmini, ortalama z | PCA ridge **0.560**; ridge 0.512; persistence 0.491 (yeniden) | dongu `turlar/gss_dalga/test/OZET.md` |
 | araştırma döngüsü, Twin kiti | LLM gözlemci − rastgele arama +0.0018 [−0.0011, +0.0046]: rastgele yetti | dongu `turlar/twin_kit/test/OZET.md` |
+| Big Five sadakati (BFI-2 ile atanan, Mini-IPIP ile ölçülen), N=20 — önceki depo, Claude değil | havuzlanmış r .911, ama uyumluluk +0.74, nevrotiklik −0.69 kayıyor | replicant `papers/ertan2009/results/validation_continuous.json` |
+| Ertan vinyeti, düşük katkıyı cezalandırma oyu — önceki depo, Claude değil | personasız 0.94; rastgele persona 0.80; aşırı işbirlikçi 0.46; aşırı işbirlikçide ceza sayfasını yalnız 7/50 bitirdi | replicant `papers/ertan2009/results/otree_*` |
+| b01 oyunları, ayrılmış oyunlarda insana MAE — önceki depo verisi, simengine hesabı | en iyi persona (gps) 0.113; düzgün rastgele 0.201; çıplak model 0.341: çıplak model rastgeleden kötü | edsl-test `benchmark/beebench/b01/results.csv`, RESULTS §8 |
 
 ## Dürüst sınırlar
 
@@ -137,6 +150,10 @@ Hepsi araştırma kodunda ölçüldü; kaynak dal ve dosya sağda. Tam liste ve 
   kendi testleri `FakeLLM` ile çalışır; gerçek API çağrısı içermez. Bazı varyantlar taşınmadı: hiyerarşik Bayes (HB)
   konjoint, NPE benimseme varyantı, retweet GBM'i. Veri setleri pakette yok; `bench` veri kökü verilmezse
   `missing_data` döner.
+- **Oyun ve persona sonuçları Claude'da ölçülmedi.** Persona yöntem sıralamaları, Big Five sapmaları ve oyun
+  sonuçları stepfun/step-3.5-flash ve gpt-oss-120b koşularından gelir; `simengine.llm` ile yeniden koşulmadan
+  Claude'a aktarılamaz. Bütün araçlar ve normlar İngilizce ve ABD temelli; Türkçe persona iddiası için
+  `validate_bigfive` ve oyunlar Türkçe yeniden koşulmalı.
 - Kanıt raporunun metinleri (manşet cümlesi, kart ve panodaki bazı etiketler, denetim ayrıntıları) Türkçedir;
   rapor sözlüğü `manset`, `merdiven`, `kanit_kart` anahtarlarını korur. `summary()` İngilizce düz bir görünüm ve
   `headline_en` verir. İngilizce bir etkinlik için `se.card(rep, path, lang="en")` (ya da `--lang en`) Türkçe
@@ -162,13 +179,21 @@ koşulları oku: ticari olmayan (NC) ve yalnız akademik setler bir yarışma te
 | GSS panelleri (NORC) | `bench` gss | ücretsiz, atıf zorunlu, **yeniden dağıtım yok** | veriyi teslimle birlikte paylaşma |
 | Dominick's | ABM elastisite sonuçları | **yalnız akademik araştırma** | yarışmada kullanmadan önce organizatörle netleştir |
 | SEISMIC (SNAP) | retweet eğrisi sonuçları | **lisans belirtilmemiş**, araştırma; atıf Zhao vd. 2015 | ödüllü kullanımda kaynak sahibine danış |
+| GSS örneklemi (NORC) | `persona.methods` demographic (`gss_sample.csv`) | ücretsiz, atıf zorunlu, **yeniden dağıtım yok** | veriyi teslimle birlikte paylaşma |
+| Twin-2K-500 persona örneklemi | `persona.methods` twin2k (`twin2k_personas_sample.json`) | CC BY 4.0 (veri kartına göre) | atıf; pakette yok |
+| Anthology backstories (Moon vd. 2024, arXiv:2407.06576) | `persona.methods` anthology (`anthology_backstories.json`) | **lisans doğrulanmadı**; veri setinin kartından kontrol et | pakette yok; ödüllü kullanımdan önce koşulları oku |
+| GPS madde ifadeleri (Falk vd., QJE 2018) | `persona.methods` gps | yayımlanmış anket maddeleri; atıf | GPS verisi pakette yok, yalnız atıflı madde ifadeleri |
+| BFI-2 madde içeriği (Soto & John 2017) | `persona.bigfive` cümle bankası (düzey-0 cümleleri madde köklerini izler) | © yazarlar; **ticari olmayan araştırma** için ücretsiz | ticari kullanımdan önce yazarlardan izin al |
+| BeeBench b01 sonuç tablosu (edsl-test) | `bench` beebench_b01_prior / econ_games_b01, `games.read_results` | aynı sahip; LICENSE yok (tüm hakları saklı) | pakette yok; yerel kopyadan okunur |
+| Ertan, Page & Putterman (2009) çalışma metni | `games.wtp` hedefleri (sayfa atıflı sabitler) | **telif hakkı yazarlarda** | PDF pakette yok; yalnız atıflı sayılar |
 
 Koşullar araştırma notlarından (`makro/arastirma/veri-ham.md`, `makro/abm/arastirma/literatur.md`, `web/PROTOKOL.md`)
 ve adaptörlerin `meta["source"]` alanından alındı; bağlayıcı olan her setin kendi sayfasıdır.
 
 ## Lisans
 
-Tescilli yazılım, tüm hakları saklı (`LICENSE`). Açık kaynak değil; depo özeldir.
+Tescilli yazılım, tüm hakları saklı (`LICENSE`). Açık kaynak değil; depo özeldir. Taşınan kaynaklar ve lisansları
+(replicant MIT; edsl-test aynı sahip) `NOTICE` dosyasında; üçüncü taraf veri setleri dağıtılmaz.
 
 ## Önceden yapılmış iş beyanı
 

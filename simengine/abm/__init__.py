@@ -1,7 +1,8 @@
 """Agent-based models: adoption ABM + ABC + analogy prior (with Bass controls and curve baselines), opinion drift
 (bounded confidence vs persistence / mean shift), elasticity prior with shrinkage, repeat-purchase market ABM,
-self-exciting cascade predictors (Hawkes / SEISMIC; measured: they do not beat the shape baseline) and a turn-based
-LLM agent society (measured: no better than a single LLM score).
+self-exciting cascade predictors (Hawkes / SEISMIC; measured: they do not beat the shape baseline), a turn-based
+LLM agent society (measured: no better than a single LLM score) and economic-game societies (who-to-punish,
+repeated PD, trust; infrastructure, no measured result in this port).
 
 See docs/modules/abm.md for when each one works, with measured numbers and provenance.
 """
@@ -18,7 +19,9 @@ from .elasticity import (ElasticityShrinkage, PreEventMean, category_elasticity,
 from .market import MarketABM
 from .diffusion import (SeismicPredictor, cascade_counts, cumulative_curve, curve_rmse, hawkes_mean_field,
                         power_kernel, seismic_kernel, select_power_kernel, shape_forecast, shape_growth)
-from .society import AgentSociety, ChoiceWorld, ShareCascadeWorld, SocietyAgent, SocietyRun, World, extract_json
+from .society import (AgentSociety, ChoiceWorld, ShareCascadeWorld, SocietyAgent, SocietyRun, World, extract_json,
+                      InvalidAnswer, PD_PAYOFFS, WTP_DESIGN, run_repeated_pd, run_trust_interaction,
+                      run_who_to_punish)
 
 __all__ = [
     # engines
@@ -40,4 +43,6 @@ __all__ = [
     "cascade_counts", "cumulative_curve", "shape_growth", "shape_forecast", "curve_rmse",
     # society
     "AgentSociety", "SocietyAgent", "SocietyRun", "World", "ShareCascadeWorld", "ChoiceWorld", "extract_json",
+    # economic-game societies
+    "run_who_to_punish", "run_repeated_pd", "run_trust_interaction", "WTP_DESIGN", "PD_PAYOFFS", "InvalidAnswer",
 ]

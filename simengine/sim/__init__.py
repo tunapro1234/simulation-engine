@@ -9,6 +9,7 @@ Runners (each returns a JSON-safe dict; a matching *_frame turns it into an Eval
   persona_distribution                per-persona probability vectors
   predict_people / prediction_frame   per-person L0 / L1 / L2 / SSR prediction prompts
   batch_calibrate, retest_stats       label-free calibration and test-retest of repeated samples
+  ask_constrained / completion_summary  schema-validated JSON answers with retry feedback; completion table
 Controls: no_persona and persona_swap arms run inside survey and ab_test (`controls=`); control_personas and
 control_plan expose them for custom runners. Personas are duck-typed (as_personas); simengine.persona objects,
 TALP-schema dicts, flat dicts and plain strings all work.
@@ -17,6 +18,7 @@ Offline: FakeLLM(schema_responder()) answers every prompt here with deterministi
 What works and what does not, with measured numbers: docs/modules/sim.md.
 """
 from .ab import ab_frame, ab_many, ab_test, confidence_check, paars_decision
+from .constrained import ConstrainedResult, FieldSpec, ask_constrained, completion_summary, validate_answers
 from .distribution import (DIST_TEMPLATE, FRAMINGS_HIDDEN, FRAMINGS_NAMED, distribution_frame, distribution_prompt,
                            persona_distribution, segment_distribution, w1_ordinal)
 from .panel import Usage, ask_panel, build_prompts, schema_responder
@@ -41,4 +43,5 @@ __all__ = [
     "ask_panel", "build_prompts", "Usage", "schema_responder",
     "PersonaView", "as_persona", "as_personas", "control_personas", "control_plan",
     "parse_json", "normalize_probs", "parse_distribution", "parse_item_probs", "parse_text_fields",
+    "FieldSpec", "ConstrainedResult", "validate_answers", "ask_constrained", "completion_summary",
 ]

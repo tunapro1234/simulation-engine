@@ -30,7 +30,7 @@ def run_cli(*argv):
 class TestPackage(unittest.TestCase):
     def test_version_and_subpackages(self):
         self.assertRegex(se.__version__, r"^\d+\.\d+\.\d+")
-        for name in ("llm", "persona", "sim", "methods", "abm", "evidence", "research", "bench"):
+        for name in ("llm", "persona", "sim", "methods", "abm", "evidence", "research", "bench", "games"):
             self.assertTrue(hasattr(getattr(se, name), "__all__"), name)
         self.assertIn("llm", dir(se))
 
@@ -40,6 +40,8 @@ class TestPackage(unittest.TestCase):
         self.assertIs(se.Loop, se.research.Loop)
         self.assertIs(se.from_table, se.persona.from_table)
         self.assertIs(se.survey, se.sim.survey)
+        self.assertIs(se.play_games, se.games.play)
+        self.assertIs(se.distance_to_human, se.games.distance_to_human)
         self.assertIsInstance(se.FakeLLM(), se.LLM)
         with self.assertRaises(AttributeError):
             se.no_such_thing  # noqa: B018
@@ -232,6 +234,12 @@ class TestExamples(unittest.TestCase):
     def test_abm_adoption(self):
         self.assertIn("MAE", self._run("abm_adoption.py"))
 
+    def test_econ_games(self):
+        txt = self._run("econ_games.py")
+        self.assertIn("econ_games_b01 MAE", txt)
+        self.assertIn("who-to-punish index", txt)
+        self.assertIn("invalid: 0", txt)
+
 
 class TestHygiene(unittest.TestCase):
     SKIP_DIRS = {".git", "__pycache__", "runs", "data", "build", "dist", ".cache", "secrets", ".venv", "venv"}
@@ -255,6 +263,21 @@ class TestHygiene(unittest.TestCase):
                 if bad.search(line) and not any(rel.as_posix() == f and s in line for f, s in self.ALLOWED):
                     self.fail(f"{rel}:{i}: machine path or key-like string: {line.strip()[:120]}")
         self.assertGreater(seen, 50)
+
+    def test_no_large_committable_files(self):
+        import shutil
+        import subprocess
+        if not shutil.which("git") or not (ROOT / ".git").exists():
+            self.skipTest("not a git checkout")
+        out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "--cached", "--others", "--exclude-standard"],
+                             capture_output=True, text=True, check=True).stdout.splitlines()
+        big = [f for f in out if (ROOT / f).is_file() and (ROOT / f).stat().st_size > 500_000]
+        self.assertEqual(big, [], "files over 500 KB would be committed")
+
+    def test_gitignore_blocks_loader_data(self):
+        text = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        for pat in ("*.pdf", "persona_methods/", "beebench_b01/", "*_backstories.json", "*personas_sample.json"):
+            self.assertIn(pat, text)
 
 
 if __name__ == "__main__":

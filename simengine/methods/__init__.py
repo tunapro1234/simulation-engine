@@ -14,6 +14,9 @@ from .bayes_prior import (EarlyTestBayes, calibrate_prior, early_lor, equivalent
 from .conjoint import MNL, evaluate_mnl, null_scores, person_holdout
 from .hybrid import (BinaryCalibrator, DevStack, LLMFeatureGBDT, ShrunkDeviation, ridge_to_prior,
                      select_lambda)
+from .mixture import (CR_GAMES, CR_HUMAN_LEFT, ENGEL_DICTATOR, HORTON_GPT4O_WEIGHTS, HUMANIZING_PREFIX,
+                      THEORY_TYPES, MixtureFit, ProbeGame, UnidentifiedWarning, charness_rabin_games, choice_game,
+                      dictator_game, fit_mixture_weights, identifiability, mixture, numeric_game, probe_types)
 from .next_action import (Markov2Baseline, NextActionRanker, add_history, attach_priors, build_features,
                           hit_at_k, markov2_score, negative_sample, top1, transition_priors)
 from .twin import (TwinStack, base_predict, binned_median, column_correlation, donor_sample,
@@ -41,5 +44,9 @@ __all__ = [
     # next action
     "Markov2Baseline", "NextActionRanker", "add_history", "transition_priors", "attach_priors", "build_features",
     "markov2_score", "negative_sample", "top1", "hit_at_k",
+    # theory-persona mixture calibration
+    "fit_mixture_weights", "MixtureFit", "UnidentifiedWarning", "identifiability", "mixture", "probe_types",
+    "ProbeGame", "choice_game", "numeric_game", "dictator_game", "charness_rabin_games",
+    "CR_GAMES", "CR_HUMAN_LEFT", "ENGEL_DICTATOR", "THEORY_TYPES", "HUMANIZING_PREFIX", "HORTON_GPT4O_WEIGHTS",
     "lightgbm_available",
 ]

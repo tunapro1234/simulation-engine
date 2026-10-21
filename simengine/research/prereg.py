@@ -11,6 +11,11 @@ Two tools:
    hash chain *before* the ground truth is opened. `grade_sealed` refuses to join predictions with the truth unless the
    hash matches a sealed record.
 
+3. **Declared targets.** `declare_targets` normalises the paper findings a replication will be compared against
+   (replicant's `PAPER_FINDINGS`: `{"metric": (value, "description")}`) and writes them into the pre-registration
+   before it is locked, so the lock hash covers them. `compare_targets` later sets observed metrics against them;
+   a metric that was not declared is reported as "undeclared", a missing one stays missing.
+
 A git commit time and a local clock are the author's own claim, not third-party evidence. For stronger proof, publish
 the SHA-256 somewhere external (an email, an issue comment) at lock time.
 """
@@ -50,9 +55,13 @@ class Prereg:
     stop_rule: str = ""
     notes: str = ""
     extra: dict = field(default_factory=dict)
+    targets: dict = field(default_factory=dict)   # declare_targets(...) output; hashed with the file at lock time
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if not d["targets"]:          # keeps the bytes of preregs without targets identical to earlier versions
+            d.pop("targets")
+        return d
 
     def to_markdown(self) -> str:
         def blok(x):
@@ -71,6 +80,13 @@ class Prereg:
                 L += [f"## {baslik}", blok(deger), ""]
         if self.extra:
             L += ["## Extra", blok(self.extra), ""]
+        if self.targets:
+            L += ["## Declared targets", "", "| metric | target | description | source |", "|---|---|---|---|"]
+            for m, t in self.targets.items():
+                cell = [str(x).replace("|", "\\|").replace("\n", " ")
+                        for x in (m, _target_text(t), t.get("description", ""), t.get("source", ""))]
+                L.append("| " + " | ".join(cell) + " |")
+            L += ["", f"Targets sha256: `{targets_sha256(self.targets)}`", ""]
         L += ["## Machine-readable copy", "```json", json.dumps(self.to_dict(), indent=1, ensure_ascii=False,
                                                                  sort_keys=True), "```", ""]
         return "\n".join(L)
@@ -157,6 +173,9 @@ def lock_prereg(path, *, git_commit: bool = False, lock_path=None, overwrite: bo
     rec = {"file": p.name, "sha256": sha, "size": p.stat().st_size,
            "locked_at": now.isoformat(timespec="seconds"),
            "locked_at_utc": now.astimezone(timezone.utc).isoformat(timespec="seconds")}
+    tg = _prereg_targets(p)
+    if tg:
+        rec["targets_sha256"], rec["n_targets"] = targets_sha256(tg), len(tg)
     lp.write_text(json.dumps(rec, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     if git_commit:
         rec = dict(rec, git_commit=_git_commit([p, lp], f"prereg: lock {p.name} {sha[:12]}"))
@@ -179,6 +198,8 @@ def verify_prereg(path, *, lock_path=None, check_git: bool = False) -> dict:
     ok = rec.get("sha256") == sha
     out = {"ok": ok, "sha256": sha, "expected": rec.get("sha256"), "locked_at": rec.get("locked_at"),
            "reason": "match" if ok else "content changed after lock"}
+    if rec.get("targets_sha256"):
+        out["targets_sha256"] = rec["targets_sha256"]
     if check_git:
         cwd = p.resolve().parent
         name = str(p.resolve())
@@ -190,6 +211,180 @@ def verify_prereg(path, *, lock_path=None, check_git: bool = False) -> dict:
         if ok and not out["git"]["clean"]:
             out["reason"] = "lock matches but git copy is missing or differs"
     return out
+
+
+# ===================================================================== declared targets (replicant PAPER_FINDINGS)
+
+TARGET_FIELDS = ("value", "description", "tolerance", "interval", "source", "unit", "notes")
+
+
+def _target_value(metric, v):
+    if hasattr(v, "item") and not isinstance(v, (str, bytes)):
+        v = v.item()
+    if isinstance(v, (bool, str)) or v is None:
+        return v
+    if isinstance(v, (int, float)):
+        if not math.isfinite(v):
+            raise ValueError(f"target {metric!r}: value must be finite, got {v!r}")
+        return v
+    raise ValueError(f"target {metric!r}: value must be a number, a string or a bool, got {type(v).__name__}")
+
+
+def _one_target(metric, spec) -> dict:
+    if isinstance(spec, dict):
+        t = dict(spec)
+    elif isinstance(spec, (tuple, list)):
+        if not 1 <= len(spec) <= 3 or (len(spec) == 3 and not isinstance(spec[2], dict)):
+            raise ValueError(f"target {metric!r}: use (value, description) or (value, description, {{fields}})")
+        t = {"value": spec[0]}
+        if len(spec) > 1:
+            t["description"] = spec[1]
+        if len(spec) == 3:
+            t.update(spec[2])
+    else:
+        t = {"value": spec}
+    unknown = sorted(set(t) - set(TARGET_FIELDS))
+    if unknown:
+        raise ValueError(f"target {metric!r}: unknown field(s) {unknown}; allowed {list(TARGET_FIELDS)}")
+    out = {}
+    if t.get("value") is not None:
+        out["value"] = _target_value(metric, t["value"])
+    if t.get("interval") is not None:
+        iv = t["interval"]
+        if not isinstance(iv, (tuple, list)) or len(iv) != 2:
+            raise ValueError(f"target {metric!r}: interval must be [lo, hi]")
+        lo, hi = (_target_value(metric, x) for x in iv)
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (lo, hi)) or lo > hi:
+            raise ValueError(f"target {metric!r}: interval must be two numbers with lo <= hi, got {iv!r}")
+        out["interval"] = [lo, hi]
+    if t.get("tolerance") is not None:
+        tol = _target_value(metric, t["tolerance"])
+        if isinstance(tol, bool) or not isinstance(tol, (int, float)) or tol < 0:
+            raise ValueError(f"target {metric!r}: tolerance must be a number >= 0")
+        if not isinstance(out.get("value"), (int, float)) or isinstance(out.get("value"), bool):
+            raise ValueError(f"target {metric!r}: tolerance needs a numeric value")
+        out["tolerance"] = tol
+    if "value" not in out and "interval" not in out:
+        raise ValueError(f"target {metric!r}: give a value or an interval")
+    for k in ("description", "source", "unit", "notes"):
+        if t.get(k) not in (None, ""):
+            out[k] = str(t[k])
+    return out
+
+
+def declare_targets(findings, prereg=None, *, overwrite: bool = False) -> dict:
+    """Normalise the findings a run will be compared against and (optionally) write them into a pre-registration.
+
+    `findings` (port of replicant `papers/TEMPLATE/config.py` PAPER_FINDINGS, declared before the run):
+      - `{"metric": (value, "description")}` as in PAPER_FINDINGS, or `(value, "description", {fields})`,
+      - `{"metric": value}`,
+      - `{"metric": {"value": .., "description": .., "tolerance": .., "interval": [lo, hi], "source": .., ...}}`,
+      - or a list of such dicts with a `"metric"` key.
+    Values must be finite (no NaN targets). Returns `{metric: {...}}` sorted by metric.
+
+    `prereg`: a `Prereg` (its `.targets` is set in place) or the path of a prereg file written by `Prereg.write` (the
+    file is rewritten with the targets). A path that is already locked is refused unless `overwrite=True`, and then
+    the old lock no longer verifies until `lock_prereg(..., overwrite=True)`: targets belong *before* the lock."""
+    if isinstance(findings, Prereg):
+        findings = findings.targets
+    if isinstance(findings, (list, tuple)):
+        d = {}
+        for row in findings:
+            if not isinstance(row, dict) or not (row.get("metric") or row.get("name")):
+                raise ValueError("a list of targets needs dicts with a 'metric' key")
+            row = dict(row)
+            m = str(row.pop("metric", None) or row.pop("name"))
+            row.pop("name", None)
+            if m in d:
+                raise ValueError(f"target {m!r} declared twice")
+            d[m] = row
+        findings = d
+    if not isinstance(findings, dict):
+        raise TypeError("findings must be a dict {metric: spec} or a list of {'metric': ..} dicts")
+    out = {}
+    for m, spec in findings.items():
+        if not isinstance(m, str) or not m.strip():
+            raise ValueError(f"target metric names must be non-empty strings, got {m!r}")
+        out[m.strip()] = _one_target(m.strip(), spec)
+    if len(out) != len(findings):
+        raise ValueError("target metric names collide after stripping whitespace")
+    out = dict(sorted(out.items()))
+    if isinstance(prereg, Prereg):
+        prereg.targets = out
+    elif prereg is not None:
+        p = Path(prereg)
+        if _lock_path(p).exists() and not overwrite:
+            raise ValueError(f"{p} is already locked; targets must be declared before the lock "
+                             "(write an addendum and pass overwrite=True, then re-lock)")
+        doc = Prereg.read(p)
+        doc.targets = out
+        doc.write(p)
+    return out
+
+
+def targets_sha256(targets) -> str:
+    """SHA-256 of the canonical form of the declared targets (key order and float noise do not matter)."""
+    return _sha(canonical_bytes({"targets": declare_targets(targets)}))
+
+
+def _target_text(t: dict) -> str:
+    s = "" if "value" not in t else str(t["value"])
+    if "tolerance" in t:
+        s += f" ± {t['tolerance']}"
+    if "interval" in t:
+        s += (" " if s else "") + f"[{t['interval'][0]}, {t['interval'][1]}]"
+    return s + (f" {t['unit']}" if t.get("unit") else "")
+
+
+def _prereg_targets(path) -> dict:
+    """Targets of a prereg file written by `Prereg.write`, or {} for any other file."""
+    try:
+        return Prereg.read(path).targets
+    except (ValueError, TypeError, KeyError, OSError):
+        return {}
+
+
+def compare_targets(targets, observed: dict) -> pd.DataFrame:
+    """Set observed metrics against declared targets. One row per declared metric, plus one per observed metric
+    that was not declared (status "undeclared": a post-hoc metric, report it as such).
+
+    status: "pass"/"fail" (inside/outside `interval`, or |observed - value| <= `tolerance`; for a non-numeric value,
+    equality), "reported" (a numeric target with neither tolerance nor interval: the difference is shown, no verdict),
+    "missing" (no observed value, or None/NaN: never filled in), "undeclared".
+
+    `targets`: the `declare_targets` output, raw findings, a `Prereg` or a prereg file path."""
+    if isinstance(targets, (str, Path)):
+        targets = Prereg.read(targets).targets
+    tg = declare_targets(targets)
+    rows = []
+    for m, t in tg.items():
+        v = t.get("value")
+        o = observed.get(m)
+        if hasattr(o, "item") and not isinstance(o, (str, bytes)):
+            o = o.item()
+        num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+        row = {"metric": m, "target": v, "lo": t.get("interval", [None, None])[0],
+               "hi": t.get("interval", [None, None])[1], "tolerance": t.get("tolerance"), "observed": o,
+               "diff": None, "status": None, "description": t.get("description", "")}
+        if o is None or (isinstance(o, float) and math.isnan(o)):
+            row["observed"], row["status"] = None, "missing"
+        else:
+            if num(o) and num(v):
+                row["diff"] = float(o) - float(v)
+            if "interval" in t:
+                row["status"] = "pass" if num(o) and t["interval"][0] <= o <= t["interval"][1] else "fail"
+            elif "tolerance" in t:
+                row["status"] = "pass" if num(o) and abs(float(o) - float(v)) <= t["tolerance"] else "fail"
+            elif num(v):
+                row["status"] = "reported"
+            else:
+                row["status"] = "pass" if o == v else "fail"
+        rows.append(row)
+    for m in sorted(set(observed) - set(tg), key=str):
+        rows.append({"metric": m, "target": None, "lo": None, "hi": None, "tolerance": None, "observed": observed[m],
+                     "diff": None, "status": "undeclared", "description": ""})
+    cols = ["metric", "target", "lo", "hi", "tolerance", "observed", "diff", "status", "description"]
+    return pd.DataFrame(rows, columns=cols)
 
 
 # ===================================================================== sealed predictions (port of kanit.onkayit)

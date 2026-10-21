@@ -4,7 +4,8 @@ Every number in this file was measured by the TALP prep research code (October 2
 the research repository `talp-simulation-hackathon-2026/uretim/<branch>/`. The **source** column names the branch and
 file. This library is a port of that code; unless a row says **(re-run)** or **(new)**, the library itself did not
 re-measure the number. **(re-run)** means the library reproduced it on the real data; **(new)** means the library
-computed it and the research code has no counterpart.
+computed it and the research code has no counterpart. Section 8 is the exception: its rows come from two earlier
+repositories (replicant and edsl-test) run on non-Claude models, with sources relative to those repos.
 
 `[a, b]` is a 95% bootstrap CI. "Gap closed" is (method − baseline) / (ceiling − baseline).
 
@@ -191,6 +192,56 @@ The short version:
 | evidence report | `--hizli` 8.6 s synthetic; full B = 1000: OE 23-37 s, Twin 179-219 s | kanit `RAPOR.md` §3 |
 | ABM bank | cold 53-85 s at default size; warm fits seconds | makro `abm/m1/NOTLAR.md` |
 | retweet society | 3,348 calls, $0.94 | makro `abm/yayilim24/SONUC.md` |
+
+## 8. Economic games, persona methods and Big Five fidelity (earlier repos, non-Claude models)
+
+**These rows are results from two earlier repositories, not from the TALP research code, and none was measured on
+Claude.** replicant ran on stepfun/step-3.5-flash; edsl-test ran on gpt-oss-120b, except the per-method paper
+replications, which used the model each paper used (listed in the row). No ranking here transfers to Claude until it
+is rerun through `simengine.llm`. Sources are written relative to each repo's root (`replicant: ...`,
+`edsl-test: ...`). The ported code lives in `persona.methods`, `persona.validate`, `sim.constrained`, `games`,
+`abm.run_who_to_punish`, `methods.mixture` and the `econ_games_b01` / `ertan_wtp` / `beebench_b01_prior` bench
+tasks. **Checked** means the number was re-read from the source file during the port (the port's own check, not a
+re-run); rows without it are carried from the porting notes.
+
+| # | result | caveat | source |
+|---|---|---|---|
+| 1 | Persona fidelity, BFI-2 sentences assigned, Mini-IPIP measured: pooled r = .911, R² = .830, MAE = .666. Bias A +0.735 (4.02 → 4.75), N −0.692 (2.94 → 2.25), O +0.660, C +0.444, E −0.034 (**checked**; `sample_bigfive(20, seed=42)` reproduces the assigned scores exactly) | stepfun/step-3.5-flash, N = 20, seed 42; NaN answers were imputed as 3 in the source (simengine's `validate_bigfive` does not impute). Rank order survives while levels drift | replicant: `papers/ertan2009/results/validation_continuous.json` |
+| 2 | Ertan vignette: no-persona agents fit the institutional result best, vote punish-low 0.94 (47/50), punish-high 0.00; random Big Five personas 0.80 / 0.00; hyper-cooperative personas 0.46 (**checked**) | one-shot individual vignettes, not the original repeated game (never call it a replication); individual votes are compared with group votes | replicant: `papers/ertan2009/results/otree_{default,random,cooperative}_summary.json`, `comparison.json` |
+| 3 | Completion cliff, hyper-cooperative condition: 30/50 finished the regime page and 7/50 the punishment page, vs 50/50 in default and random. Dropout is not random: on the regime page, non-completers' baseline contribution was 17.6 (n = 20) vs 15.83 for completers (n = 30); on the punishment page, 16.44 for non-completers (n = 43) vs 17.14 for completers (n = 7) (**checked**, recounted from the raw JSON); this port's Wilson CI for 7/50 is 0.14 [0.07, 0.26] **(new)** | the summary JSON wrongly says n = 50; all 43 field failures ended with an empty last response, but the reasoning-budget cause was never confirmed by a rerun | replicant: `papers/ertan2009/results/otree_cooperative_raw.json`, `otree_cooperative_flat.csv`, `papers/ertan2009/replicated/paper.tex` |
+| 4 | Harness sensitivity, same model and temperature: random-persona vote punish-low 0.14 (EDSL harness) vs 0.80 (oTree harness); default-condition baseline contribution 0 vs 1.0 (**checked**) | single runs | replicant: `papers/ertan2009/results/big5_random_summary.json`, `default_summary.json`, `otree_random_summary.json`, `otree_default_summary.json` |
+| 5 | Legacy trait-behaviour correlation with baseline contribution: A r = +0.54, N r = −0.43 | traits were rebuilt by re-seeding the RNG (fragile); N = 50; about 30 uncorrected p-values in that repo | replicant: `papers/ertan2009/results/big5_random_baseline.csv`, `papers/ertan2009/legacy/fig_personality.py` |
+| 6 | Cost: output tokens about 20× input tokens on a reasoning model | the logged $13.10 uses placeholder $1/$1 per M prices and the paper's $0.45 has no log, so only the token ratio is reported | replicant: `papers/ertan2009/results/*_{baseline,voting,regimes,punishment}.csv`, `papers/ertan2009/replicated/paper.tex` |
+| 7 | Who-to-punish human-likeness index (9 criteria, mean of 3 seeds per method; value_anchor is the mean of 4 runs because seed 1 ran twice, .659 and .968): construction .813, demographic .797, value_anchor .786, twin2k .783, baseline .694, big5 .688, gps .688, homo_silicus .677, anthology .617 (**checked**); within-method range up to 0.37 across seeds | gpt-oss-120b; 1 group of 4 per seed; ranks inside the top 4 are not significant; criterion weights not sensitivity-checked; baseline and homo_silicus have effective n = 1 (cached answers). `ertan_wtp` ports the scorer, but these indices come from the source's original scorer: simengine makes punishment_targeting N/A where the source wrote 0.0 and never_punish_high N/A when no vote records punish_high, so runs with no paid punishment (e.g. anthology seed 2 and big5 seed 2, targeting 0.000 in the source) get different index values here. A constant full-cooperation run scores 0.769 on 6 of 9 criteria **(new)**, so read coverage next to the index | edsl-test: `benchmark/REPORT.md`, `benchmark/wtp_scores.csv` |
+| 8 | The bare model always dismantles the punish-low institution (final_vote_punish_low and no_dismantling = 0 in all 3 seeds); "never allow punishing high contributors" held in every run (never_punish_high = 1.000 in all 28 runs of `wtp_scores.csv`, i.e. 56/56 group votes at 2 votes per run; REPORT.md says 54/54, which predates the csv's extra value_anchor run and does not match it) (**checked**) | same as row 7 | edsl-test: `benchmark/REPORT.md`, `personas/RESULTS.md` |
+| 9 | Bare-model corner behaviour: dictator $0, trust $0 sent (10/10), public goods $0 of $20 (4/4), PD defect 5/5 rounds, bomb risk exactly 50 boxes with SD 0 (trust, PG, PD, bomb **checked**) | early single runs; who-to-punish runs before commit 15b9531 turned None answers into $0 (simengine never does) | edsl-test: `experiments/0[3-6]*/results/*/summary.txt`, `personas/METHODS.md` §C |
+| 10 | `max_tokens` acts as a treatment: the bare model punishes free-riders at 8192 but not at the default cap | single run; the default-cap morning run (07-37-23) was partly None-corrupted by truncation, so it is not evidence about model behaviour: the source says the "never punishes" claim "conflated model behavior with a truncation artifact". `games.play` and `abm.run_who_to_punish` store `max_tokens` on every row for this reason | edsl-test: `experiments/07_who_to_punish/results/2026-06-11_15-08-37_baseline/ANALYSIS.md`, `personas/README.md` |
+| 11 | BeeBench b01: 10,920 rows (7 methods × 14 games × 10 agents × 3 runs), $1.27, 30 invalid (0.27%); twin2k trust_sender 23% invalid (7/30) and twin2k pg_punishment 23% invalid (21/90), so 28 of the 30 invalid rows are in these two cells (**checked**; `games.read_results` parses all 10,920 rows) | b01 itself has no human-distance scoring; per-game numbers must come from `games.distance_to_human` (see the next table) | edsl-test: `benchmark/beebench/b01/results.csv`, `benchmark/beebench/b01/ANOMALIES.md` |
+| 12 | Paper replications 8/8 PASS (**checked**: every `replication.json` says pass), e.g. twin2k holdout accuracy .7075 vs paper .6802 (test-retest .7475; gpt-4.1-mini); demographic 24/24 strong partisans aligned (Llama-3.1-70B); construction MAE .347 vs paper .20, i.e. worse (gpt-4o) | small n; mostly implementation-fidelity checks; models differ by method (gpt-4o, gpt-4.1-mini, Llama-3.1-8B/70B, phi-4) | edsl-test: `personas/*/replication.json`, `personas/*/REPLICATION.md` |
+| 13 | homo_silicus calibrated weights: self_interested .36, efficient .50, selfish_but_fair .14; train SSE .089; held-out dictator RMSE .315; the reciprocal type gets 0, so the method can never legalise punishment (`methods.fit_mixture_weights` reproduces .36/.50/.14, SSE .088936, RMSE .31485 from the stored behaviour vectors **(re-run)**) | gpt-oss-120b behaviour vectors; one grid fit | edsl-test: `personas/homo_silicus/weights.json`, `personas/homo_silicus/NOTES.md` |
+| 14 | Literature anchors (paper numbers, not repo runs): Park et al. 1,052 people, 85% of test-retest (v1; v3 says 83%); SSR 90% of test-retest; SimBench 40.80/100; analytic flexibility r .23 to .84; social desirability 1.20 SD (GPT-4); conjoint augmentation saves 24.9-79.8% | verified against the arXiv abstracts where `docs/landscape.md` says "verified". **Do not cite** Bisbee 48% / 32% and Larooij–Törnberg 15/35 until checked against the paper; General Social Agents 53-73%, Twin-2K ~87% and Bisbee "33 vs 270+" come from vault summaries, not abstracts | awesome-llm-social-simulation notes vault; per-number tags in `docs/landscape.md`, `docs/validation.md`, `docs/failure-modes.md` |
+
+**Distance to human on the b01 table (new).** simengine's own computation on the edsl-test b01 results (read in
+place, not copied) with `bench.get("beebench_b01_prior")`: mean absolute error of share-scale moments against the
+cited human values, B = 1000 resampling whole games. Lower is better.
+
+| arm | holdout MAE, 8 moments / 4 games | all-games MAE, 24 moments / 12 games |
+|---|---|---|
+| b01 gps | 0.113 [0.070, 0.187] | 0.171 [0.125, 0.218] |
+| b01 twin2k | 0.185 [0.104, 0.239] | 0.179 [0.128, 0.213] |
+| midpoint baseline (uniform answers) | 0.201 [0.100, 0.316] | 0.254 [0.143, 0.351] |
+| b01 anthology | 0.202 [0.116, 0.289] | 0.188 [0.132, 0.251] |
+| b01 demographic | 0.212 [0.124, 0.317] | 0.283 [0.209, 0.357] |
+| b01 big5 | 0.246 [0.167, 0.363] | 0.220 [0.166, 0.270] |
+| b01 value_anchor | 0.250 [0.133, 0.458] | 0.297 [0.187, 0.401] |
+| bare model (b01 `baseline`) | 0.341 [0.212, 0.506] | 0.404 [0.334, 0.470] |
+| rational corner baseline | 0.452 [0.326, 0.590] | 0.456 [0.390, 0.531] |
+
+Caveats: one model (gpt-oss-120b), 10 agents × 3 runs per method, the holdout CI rests on 4 game clusters, so the
+order among persona methods is not significant; several human references are approximate (see
+`docs/modules/games.md`). The one robust reading: the bare model is worse than uniform-random answers on both
+splits. Source: edsl-test: `benchmark/beebench/b01/results.csv`; computation `docs/modules/bench.md`
+("Economic-game tasks").
 
 ## Measurement facts that shape the defaults
 
