@@ -8,7 +8,7 @@ experiments. Each one is a registered `BenchTask` (layout, load, baselines, fram
 |---|---|---|---|---|
 | `hillstrom_uplift` | MineThatData e-mail challenge (Hillstrom 2008), 64,000 customers | e-mail (`arm="any"`: mens or womens vs none; `"mens"`, `"womens"`: that e-mail vs none) | `visit`, `conversion` (2 weeks) | recency, history, history_segment, mens, womens, zip_code, newbie, channel |
 | `criteo_uplift` | Criteo Uplift v2.1 (Diemert et al. 2021), 13,979,592 users | targetable for ads (85%) | `visit`, `conversion` | f0..f11 (anonymised, dense) |
-| `x5_uplift` | X5 RetailHero (ODS.ai 2019-20), 200,039 clients | SMS (50%) | `target` (purchase) | age, gender, card issue day, first redeem day, redeem delay |
+| `x5_uplift` | X5 RetailHero (ODS.ai 2019-20), 200,039 clients | SMS (50%) | `target` (purchase) | age, gender, card issue day, first redeem day, redeem delay (a first redemption after 2019-03-18 is masked: post-treatment, see Limitations) |
 
 ## API
 
@@ -48,7 +48,8 @@ task.score_all(frame, B=1000)                 # every method x (qini, auuc, upli
 - `auuc`: same normalisation on the uplift curve (Y_t/N_t - Y_c/N_c)(x) * x, with scikit-uplift's
   `perfect_uplift_curve` ordering. Diemert et al. 2021 use a "separate, relative" AUUC without a closed formula in
   the paper, so numbers here are not comparable to theirs.
-- `uplift@30`: treated minus control response rate in the top 30% by score (scikit-uplift `uplift_at_k`, overall).
+- `uplift@30`: treated minus control response rate in the first int(0.3 n) rows by score (scikit-uplift
+  `uplift_at_k`, strategy "overall"; ties broken by sort order).
 - CI: 95% percentile row bootstrap, `default_rng(42)`, B = 1000. A replicate is a multinomial row-count weight
   vector on the one fixed sort (exactly a row resample; tested), so it costs O(n) instead of a re-sort.
 - Ties: scores equal to each other enter the curve together (evaluated only at distinct scores).
@@ -71,8 +72,11 @@ No hyper-parameter search: these are reference points, not tuned competitors.
 
 ## Measured numbers
 
-All numbers below come from one run each on the local catalogue on 2026-10-22 (test split as above, B = 1000),
-command, from the repository root with the data under `$SIMENGINE_DATA`:
+Hillstrom and X5 numbers below were re-run on 2026-10-23 after the X5 post-treatment fix and the uplift@k row count
+change (qini / auuc on Hillstrom unchanged to the digit, uplift@30 moved by at most 0.001; X5 GBDT rows dropped, see
+below). Criteo numbers are from 2026-10-22 runs (uplift@30 there counted ceil(0.3 n) rows, at most one row more than
+now, invisible at three decimals). Test split as above, B = 1000 unless stated; command, from the repository root
+with the data under `$SIMENGINE_DATA`:
 
 ```python
 from simengine import bench
@@ -88,31 +92,31 @@ Cells are `value [95% CI]`.
 
 | method | qini | auuc | uplift@30 |
 |---|---|---|---|
-| t_logistic | 0.033 [0.004, 0.065] | 0.020 [0.003, 0.038] | 0.087 [0.060, 0.112] |
+| t_logistic | 0.033 [0.004, 0.065] | 0.020 [0.003, 0.038] | 0.087 [0.060, 0.111] |
 | s_gbdt | 0.030 [0.001, 0.059] | 0.017 [0.001, 0.035] | 0.079 [0.053, 0.102] |
-| class_transform | 0.030 [0.002, 0.059] | 0.017 [0.001, 0.034] | 0.083 [0.060, 0.106] |
-| t_gbdt | 0.026 [-0.003, 0.054] | 0.015 [-0.002, 0.031] | 0.075 [0.051, 0.099] |
+| class_transform | 0.030 [0.002, 0.059] | 0.017 [0.001, 0.034] | 0.082 [0.060, 0.105] |
+| t_gbdt | 0.026 [-0.003, 0.054] | 0.015 [-0.002, 0.031] | 0.075 [0.051, 0.098] |
 | random | 0.016 [-0.014, 0.045] | 0.008 [-0.009, 0.025] | 0.075 [0.050, 0.097] |
 
 ### hillstrom_uplift, arm="womens", outcome="visit" (n_test 8,539; treated share 0.501; test ATE +0.045)
 
 | method | qini | auuc | uplift@30 |
 |---|---|---|---|
-| s_gbdt | 0.049 [0.013, 0.083] | 0.023 [0.006, 0.039] | 0.081 [0.052, 0.106] |
-| t_gbdt | 0.039 [0.004, 0.076] | 0.018 [0.002, 0.035] | 0.064 [0.037, 0.089] |
-| class_transform | 0.033 [-0.003, 0.067] | 0.015 [-0.001, 0.030] | 0.064 [0.039, 0.089] |
-| t_logistic | 0.031 [-0.006, 0.066] | 0.014 [-0.002, 0.031] | 0.054 [0.026, 0.084] |
-| random | 0.024 [-0.007, 0.058] | 0.011 [-0.003, 0.027] | 0.050 [0.025, 0.077] |
+| s_gbdt | 0.049 [0.013, 0.083] | 0.023 [0.006, 0.039] | 0.081 [0.052, 0.107] |
+| t_gbdt | 0.039 [0.004, 0.076] | 0.018 [0.002, 0.035] | 0.063 [0.037, 0.090] |
+| class_transform | 0.033 [-0.003, 0.067] | 0.015 [-0.001, 0.030] | 0.064 [0.040, 0.089] |
+| t_logistic | 0.031 [-0.006, 0.066] | 0.014 [-0.002, 0.031] | 0.054 [0.026, 0.083] |
+| random | 0.024 [-0.007, 0.058] | 0.011 [-0.003, 0.027] | 0.051 [0.025, 0.077] |
 
 ### hillstrom_uplift, arm="mens", outcome="visit" (n_test 8,523; treated share 0.500; test ATE +0.077)
 
 | method | qini | auuc | uplift@30 |
 |---|---|---|---|
-| s_gbdt | -0.001 [-0.034, 0.033] | -0.000 [-0.018, 0.017] | 0.081 [0.050, 0.111] |
-| random | -0.010 [-0.043, 0.025] | -0.005 [-0.022, 0.012] | 0.080 [0.051, 0.106] |
+| s_gbdt | -0.001 [-0.034, 0.033] | -0.000 [-0.018, 0.017] | 0.080 [0.051, 0.111] |
+| random | -0.010 [-0.043, 0.025] | -0.005 [-0.022, 0.012] | 0.080 [0.051, 0.107] |
 | t_gbdt | -0.013 [-0.047, 0.025] | -0.007 [-0.025, 0.012] | 0.069 [0.040, 0.096] |
-| class_transform | -0.014 [-0.046, 0.018] | -0.007 [-0.023, 0.009] | 0.067 [0.036, 0.096] |
-| t_logistic | -0.020 [-0.054, 0.013] | -0.010 [-0.028, 0.007] | 0.056 [0.028, 0.087] |
+| class_transform | -0.014 [-0.046, 0.018] | -0.007 [-0.023, 0.009] | 0.067 [0.036, 0.097] |
+| t_logistic | -0.020 [-0.054, 0.013] | -0.010 [-0.028, 0.007] | 0.056 [0.028, 0.088] |
 
 ### hillstrom_uplift, arm="any", outcome="conversion" (n_test 12,800; test ATE +0.005)
 
@@ -126,12 +130,15 @@ Cells are `value [95% CI]`.
 
 ### x5_uplift (n_test 40,008; treated share 0.500; test ATE +0.033)
 
+Before the redeem-date mask (2026-10-22, same split) t_gbdt scored qini 0.006 and s_gbdt 0.006; the qini of the two
+logistic learners was the same. The leaked post-campaign dates helped the trees a little, not the linear models.
+
 | method | qini | auuc | uplift@30 |
 |---|---|---|---|
-| t_logistic | 0.012 [0.006, 0.019] | 0.019 [0.009, 0.029] | 0.065 [0.049, 0.081] |
-| class_transform | 0.012 [0.006, 0.018] | 0.019 [0.009, 0.028] | 0.066 [0.050, 0.082] |
-| s_gbdt | 0.006 [-0.001, 0.012] | 0.008 [-0.002, 0.018] | 0.045 [0.028, 0.062] |
-| t_gbdt | 0.006 [-0.001, 0.012] | 0.008 [-0.003, 0.018] | 0.050 [0.032, 0.067] |
+| t_logistic | 0.012 [0.006, 0.019] | 0.019 [0.009, 0.029] | 0.064 [0.048, 0.081] |
+| class_transform | 0.012 [0.005, 0.018] | 0.019 [0.008, 0.029] | 0.067 [0.049, 0.083] |
+| s_gbdt | 0.005 [-0.001, 0.011] | 0.008 [-0.002, 0.018] | 0.050 [0.032, 0.067] |
+| t_gbdt | 0.003 [-0.004, 0.009] | 0.004 [-0.006, 0.014] | 0.040 [0.024, 0.058] |
 | random | 0.000 [-0.006, 0.007] | 0.001 [-0.009, 0.010] | 0.034 [0.016, 0.051] |
 
 ### criteo_uplift, outcome="visit", all rows (n_test 2,795,918; treated share 0.850; test ATE +0.0103)
@@ -178,8 +185,9 @@ Why class transformation fails on Criteo conversion (measured, 2026-10-23): a Li
 treatment flag from f0..f11 (3M random rows, 80/20 split, same GBDT parameters) reaches held-out AUC 0.509, and the
 treated share runs from 0.846 to 0.867 across its predicted-propensity deciles (about 60,000 rows each, so a binomial
 SE near 0.0015). Class transformation assumes a constant treated share; the reweighting fixes the overall share
-but not the share at x. Its target z is then driven by e(x) with slope about -1 when the outcome is rare, and a
-0.02 swing in e(x) is an order of magnitude above the 0.001 conversion uplift, so the method ranks by inverse
+but not the share at x. With a rare outcome z is almost 1 - t, so P_w(z=1|x) is about 1 - e_w(x), the reweighted
+treated share at x (e_w = 0.5 at e = 0.85, slope de_w/de = 0.25 / (e (1-e)), about 2). A 0.02 swing in e(x) moves
+the score by about 0.08 (2 x 2 x 0.02), against a 0.001 conversion uplift, so the method ranks by inverse
 propensity. The T- and S-learners do not have this term. With visit (uplift 0.01) the bias is smaller and
 class transformation only trails.
 
@@ -204,6 +212,12 @@ On Criteo conversion the ordering is unstable (wide CIs) and class transformatio
 
 ## Limitations
 
+- X5 `first_redeem_date` runs to 2019-11, past the 2019-03-18 end of the purchase history, and spikes on
+  2019-03-21/22 (the SMS). A first redemption after the cutoff is post-treatment: among clients with one, 50.8% are
+  treated (11,490 vs 11,110, 2.5 binomial SE above one half), among clients with none 48.1% (8,438 vs 9,108, 5 SE
+  below), against 50.0% among clients who redeemed before (measured 2026-10-23). The loader masks
+  those dates (redeem day and delay become missing, as for a client who has not redeemed yet). The cutoff is
+  `X5Uplift.CUTOFF`; the campaign date itself is not in the files.
 - X5 uses client profile features only; the purchase history (`purchases.csv.gz`, 639 MB) is not read, and winning
   X5 solutions are built on it, so these X5 numbers understate what is reachable.
 - Criteo is subsampled non-uniformly by the publisher for privacy, so its ATE and uplift levels are not real ad
