@@ -9,7 +9,7 @@ person dict; `render` stays pure.
     import simengine.persona.inject as pi
     from simengine.persona.inject import interview as iv
     person = {"id": "u1", "interview": [("Tell me about your life.", "I grew up in a small town ..."), ...]}
-    people = iv.prepare(llm, [person])                 # adds interview_summary + reflections (LLM calls)
+    people = iv.prepare(llm, [person])                 # adds interview_summary + expert_reflections (LLM calls)
     questions = iv.route_experts(llm, questions)       # optional: question["expert"] as in the paper
     p = pi.get_injector("interview_transcript", budget_tokens=8000)(people[0], question)
     res = pi.compare_injectors(llm, people, questions, "answers",
@@ -17,8 +17,9 @@ person dict; `render` stays pure.
                                 pi.get_injector("interview_lesion", drop=0.8)], max_tokens=1024)
 
 Person fields: `interview` (str or [(question, answer)]), `interview_summary` ({key: value}, from
-`summarize_interview`), `reflections` ({expert: [note, ...]}, from `expert_reflections`), `answers` (only
-interview_plus_survey, through `known_answers`). Dict-valued so `plain_fields` never prints them.
+`summarize_interview`), `expert_reflections` ({expert: [note, ...]}, from `reflect_experts`; not the memory
+family's `reflections` list), `answers` (only interview_plus_survey, through `known_answers`). Dict-valued so
+`plain_fields` never prints them.
 
 cot=True (the paper's prompt) needs room for the reasoning: call with max_tokens >= 1024, or a truncated reply
 loses its final JSON line and scores as unparsed.
@@ -283,7 +284,7 @@ class InterviewSummary(_InterviewBase):
 class InterviewExpertReflection(_InterviewBase):
     """The paper's full agent: transcript + the reflections of the expert best suited to the question."""
     name = "interview_expert_reflection"
-    needs = ("interview", "reflections")
+    needs = ("interview", "expert_reflections")
     description = ("Transcript + one expert's reflections (psychologist, behavioral economist, political scientist, "
                    "demographer). expert='auto' uses question['expert'] (route_experts) or a keyword rule; 'all' "
                    "appends all four; transcript=False keeps the reflections only (compressed).")
@@ -295,7 +296,11 @@ class InterviewExpertReflection(_InterviewBase):
         self.expert, self.with_transcript = expert, transcript
 
     def render(self, person: dict, question: dict) -> Prompt:
-        refl = {_expert_name(k): v for k, v in person["reflections"].items()}
+        raw = person["expert_reflections"]
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"person {person.get('id')!r}: expert_reflections must be {{expert: [note, ...]}} "
+                            f"(build with interview.reflect_experts or prepare), not {type(raw).__name__}")
+        refl = {_expert_name(k): v for k, v in raw.items()}
         chosen = list(refl) if self.expert == "all" else [
             keyword_expert(question) if self.expert == "auto" else self.expert]
         fallback = not any(e in refl for e in chosen)
@@ -394,7 +399,7 @@ def summarize_interview(llm, person: dict, *, budget_tokens: int | None = None, 
     return parse_summary(llm.complete(s, u, max_tokens=max_tokens, **kw).text)
 
 
-def expert_reflections(llm, person: dict, experts: Sequence[str] = EXPERTS, *, budget_tokens: int | None = None,
+def reflect_experts(llm, person: dict, experts: Sequence[str] = EXPERTS, *, budget_tokens: int | None = None,
                        max_tokens: int = 2048, **kw: Any) -> dict[str, list[str]]:
     """One call per expert -> {expert: [note, ...]} (paper: 4 experts, up to 20 notes each, made once)."""
     exps = [_expert_name(e) for e in experts]
@@ -421,7 +426,7 @@ def route_experts(llm, questions: Sequence[dict], **kw: Any) -> list[dict]:
 def prepare(llm, people: Sequence[dict], *, summary: bool = True, reflections: bool = True,
             experts: Sequence[str] = EXPERTS, budget_tokens: int | None = None, max_tokens: int = 2048,
             parallel: int = 4, **kw: Any) -> list[dict]:
-    """Copies of `people` with interview_summary and/or reflections added (fields already present are kept).
+    """Copies of `people` with interview_summary and/or expert_reflections added (fields already present are kept).
     Calls: one summary + len(experts) reflections per person that lacks them."""
     exps = [_expert_name(e) for e in experts]
     jobs: list[tuple[int, str]] = []
@@ -432,7 +437,7 @@ def prepare(llm, people: Sequence[dict], *, summary: bool = True, reflections: b
         if summary and not p.get("interview_summary"):
             jobs.append((i, "summary"))
             prompts.append(summary_prompt(p, budget_tokens))
-        if reflections and not p.get("reflections"):
+        if reflections and not p.get("expert_reflections"):
             for e in exps:
                 jobs.append((i, e))
                 prompts.append(reflection_prompt(p, e, budget_tokens))
@@ -442,11 +447,11 @@ def prepare(llm, people: Sequence[dict], *, summary: bool = True, reflections: b
         if what == "summary":
             out[i]["interview_summary"] = parse_summary(r.text)
         else:
-            out[i].setdefault("reflections", {})[what] = parse_notes(r.text)
+            out[i].setdefault("expert_reflections", {})[what] = parse_notes(r.text)
     return out
 
 
 __all__ = ["InterviewTranscript", "InterviewLesion", "InterviewSummary", "InterviewExpertReflection",
            "InterviewPlusSurvey", "EXPERTS", "EXPERT_FOCUS", "TRUNCATE", "transcript_units", "fit_budget", "lesion",
-           "keyword_expert", "summarize_interview", "expert_reflections", "route_expert", "route_experts",
+           "keyword_expert", "summarize_interview", "reflect_experts", "route_expert", "route_experts",
            "prepare", "parse_summary", "parse_notes", "summary_prompt", "reflection_prompt"]
