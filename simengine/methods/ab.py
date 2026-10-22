@@ -8,11 +8,18 @@ Measured on Upworthy, the same 300 significant headline tests (chance 0.50; uret
     longer headline wins 0.533 · TF-IDF on past tests 0.773 · Opus 5.5 direct 0.765 ·
     stack (TF-IDF + Opus) 0.817 [0.770, 0.860], AUC 0.906; story-clean training 0.807 [0.760, 0.847];
     blind one-shot on 136 new pairs 0.824 [0.757, 0.890].
+
+    from simengine.methods.ab import ABStack, LLMDirectAB, ab_archive, ab_responder
+    pairs = ab_archive(raw, test="test_id", text_a="headline", clicks_a="clicks", n_a="impressions")
+    direct = LLMDirectAB(FakeLLM(ab_responder(len)))   # offline dry run; a real LLM in the run
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -112,18 +119,23 @@ class LLMDirectAB:
     Invalid or missing answers stay at 0.5 and are counted in ``coverage_`` (share of valid predictions).
 
     Measured (uretim/deney/RAPOR.md 1.1, llm300): Opus 5.5 0.765 [0.720, 0.808], Sonnet 5.5 0.688, Haiku 5.5 0.608.
-    Works with any ``simengine.types.LLM`` (use ``FakeLLM`` offline)."""
+    Works with any ``simengine.types.LLM``; offline: ``LLMDirectAB(FakeLLM(ab_responder(len)))``.
+
+    Counters (summed over ``predict`` calls): ``calls_`` = requests actually sent to the backend, ``cache_hits_`` =
+    answers served from the local disk cache (``LLMResponse.cached``); a fully cached re-run adds 0 to ``calls_``."""
 
     def __init__(self, llm, context: str | None = None, batch: int = 15, reverse: bool = True,
                  max_tokens: int = 1024, parallel: int = 4, **llm_kw: Any):
         self.llm, self.context, self.batch, self.reverse = llm, context, batch, reverse
         self.max_tokens, self.parallel, self.llm_kw = max_tokens, parallel, llm_kw
-        self.calls_ = 0
+        self.calls_ = self.cache_hits_ = 0
 
     def fit(self, train=None):
         return self
 
     def prompt(self, rows: pd.DataFrame) -> str:
+        """The prompt contract: one line per pair, ``{i}. A: "{a}" | B: "{b}"`` (parsed by :func:`ab_responder`);
+        the reply is a JSON list ``[{"i": 0, "p_a": 0.63}, ...]``."""
         lines = "\n".join(f'{i}. A: "{a}" | B: "{b}"' for i, (a, b) in enumerate(zip(rows.text_a, rows.text_b)))
         return (f"Context: {self.context or DEFAULT_CONTEXT}\n"
                 "For each pair, estimate the probability that variant A gets the HIGHER click rate than B in the real test.\n"
@@ -135,7 +147,9 @@ class LLMDirectAB:
         chunks = [df.iloc[i:i + self.batch] for i in range(0, n, self.batch)]
         outs = self.llm.map([(SYSTEM, self.prompt(c)) for c in chunks], max_tokens=self.max_tokens,
                             parallel=self.parallel, **self.llm_kw)
-        self.calls_ += len(chunks)
+        hits = sum(bool(getattr(r, "cached", False)) for r in outs)
+        self.calls_ += len(outs) - hits
+        self.cache_hits_ += hits
         p, ok = np.full(n, 0.5), np.zeros(n, bool)
         for ci, (ch, r) in enumerate(zip(chunks, outs)):
             try:
@@ -165,6 +179,42 @@ class LLMDirectAB:
         return p
 
 
+PAIR_LINE = re.compile(r'^(\d+)\. A: "(.*?)" \| B: "(.*)"$', re.M)
+
+
+def _hash_score(text: str) -> float:
+    """Stable pseudo-random score in [-1, 1) from a sha256 of the text."""
+    return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16) / 2 ** 31 - 1
+
+
+def ab_responder(score_fn: Callable[[str], float] | None = None, noise: float = 0.0,
+                 seed: int = 0) -> Callable[[str, str], str]:
+    """Offline ``FakeLLM`` responder for :class:`LLMDirectAB`: parses the pair lines of :meth:`LLMDirectAB.prompt`
+    and answers ``[{"i", "p_a"}]`` with p_a = sigmoid(score_fn(a) - score_fn(b) + noise * N(0, 1)).
+
+    ``score_fn`` defaults to a hashed pseudo-random score in [-1, 1) (no signal, stable per text); ``len`` makes
+    the longer text win. Equal scores without noise give exactly 0.5 (like a real LLM's ties). The noise draw is
+    seeded by ``seed`` and the (a, b) pair, so the same pair gets the same answer in any batch and order; the swapped
+    pair (``reverse=True``) gets its own draw, a stand-in for position noise.
+
+        llm = FakeLLM(ab_responder(len, noise=0.5))
+        p = LLMDirectAB(llm).predict(pairs)        # coverage_ == 1.0
+    """
+    score = score_fn or _hash_score
+
+    def respond(system: str, user: str) -> str:
+        out = []
+        for i, a, b in PAIR_LINE.findall(user):
+            z = float(score(a)) - float(score(b))
+            if noise:
+                h = int(hashlib.sha256(f"{a}\x00{b}".encode("utf-8")).hexdigest()[:8], 16)
+                z += noise * float(np.random.default_rng([seed, h]).standard_normal())
+            out.append({"i": int(i), "p_a": round(float(sigmoid(z)), 6)})
+        return json.dumps(out)
+
+    return respond
+
+
 class LogitAverageAB:
     """Fixed logit average of a learner and an LLM (weight 0.5, no tuning). llm300: 0.803 [0.757, 0.847]."""
 
@@ -190,7 +240,16 @@ class ABStack:
     Invalid LLM predictions count as logit 0 (only the learner speaks for that pair).
 
     ``learner`` defaults to :class:`TfidfAB`; ``llm_method`` is any object with ``predict`` and (optionally)
-    ``valid_`` such as :class:`LLMDirectAB`, or ``None`` with ``llm_prob`` columns supplied via ``predict_from``.
+    ``valid_`` such as :class:`LLMDirectAB`, or ``None`` with precomputed LLM probabilities passed to
+    ``predict(test, p_llm=...)`` / ``combine`` (dev weights then via ``fit_weights``).
+
+    Report the direct arm too, with one LLM pass over the test pairs (``fit`` already asked about dev)::
+
+        direct = LLMDirectAB(llm)
+        stack = ABStack(llm_method=direct).fit(train)
+        p_direct = direct.predict(test)                                  # the direct arm
+        p_stack = stack.predict(test, p_llm=p_direct, valid=direct.valid_)  # no second LLM pass
+
     Measured: 0.817 [0.770, 0.860] llm300; blind one-shot 0.824 [0.757, 0.890], +7.4 [0.7, 14.7] over TF-IDF
     (uretim/deney/RAPOR.md 1.1, 1.3). Caveat: much of the gain over the LLM alone is the learner breaking the
     LLM's exact-0.5 ties; on the LOLA v1 setup the stack with Opus (0.775) was not better than embeddings+TF-IDF.
@@ -265,10 +324,69 @@ class ABStack:
         z = np.c_[logit(p_learner), np.where(valid, logit(p_llm), 0.0)] @ self.w_
         return sigmoid(z)
 
-    def predict(self, test):
+    def predict(self, test, p_llm=None, valid=None):
+        """P(A wins) for ``test``. ``p_llm`` = precomputed direct-arm probabilities for the same rows (e.g. the
+        ``LLMDirectAB.predict(test)`` you also report), so the LLM is not asked again; ``valid`` = its validity mask
+        (default all valid; an invalid answer left at 0.5 has logit 0 either way)."""
         test = _prep(test)
         pt = self.learner.predict(test)
+        if p_llm is not None:
+            pl = np.asarray(p_llm, float)
+            if len(pl) != len(test):
+                raise ValueError(f"p_llm has {len(pl)} values for {len(test)} test pairs")
+            return self.combine(pt, pl, valid)
         if self.llm_method is None:
-            raise ValueError("ABStack.predict needs llm_method; use combine(p_learner, p_llm) for precomputed LLM")
+            raise ValueError("ABStack.predict needs llm_method or p_llm= (precomputed LLM probabilities)")
         pl = self.llm_method.predict(test)
         return self.combine(pt, pl, getattr(self.llm_method, "valid_", None))
+
+
+def ab_archive(df: pd.DataFrame, test: str, text_a: str, text_b: str | None = None, clicks_a: str = "clicks_a",
+               n_a: str = "n_a", clicks_b: str | None = None, n_b: str | None = None, drop_ties: bool = True,
+               one_pair_per_test: bool = True, seed: int = 0) -> pd.DataFrame:
+    """Past A/B archive -> the standard pair frame of :class:`LLMDirectAB`, :class:`ABStack` and
+    ``bayes_prior.simulate_saving_calibrated``.
+
+    Arguments name the columns of ``df``. Wide input (one row per pair): ``text_a``, ``clicks_a``, ``n_a`` and
+    ``text_b``, ``clicks_b``, ``n_b``. Long input (one row per variant, e.g. the raw Upworthy archive): leave
+    ``text_b`` / ``clicks_b`` / ``n_b`` as None; ``text_a`` / ``clicks_a`` / ``n_a`` then name the variant's text,
+    clicks and impressions, and every two variants of a test form a pair (A = earlier row).
+    Rows with missing text, missing counts or ``n <= 0`` are dropped; ``drop_ties`` drops exact CTR ties (else they
+    stay with ``tie`` True and y = 0); ``one_pair_per_test`` keeps one random pair per test (seeded, after the tie
+    drop, so a tied pair does not use up a test).
+
+    Returns columns ``group`` (test id), ``text_a``, ``text_b``, ``clicks_a``, ``n_a``, ``clicks_b``, ``n_b``,
+    ``ctr_a``, ``ctr_b``, ``y`` (1 = ctr_a > ctr_b, the same rule as ``simulate_saving_calibrated``), ``tie``:
+
+        f = ab_archive(raw, test="test_id", text_a="headline", clicks_a="clicks", n_a="impressions")
+        simulate_saving_calibrated(f.ctr_a, f.ctr_b, prior, f.clicks_a, f.clicks_b)
+    """
+    df = pd.DataFrame(df)
+    wide = [text_b, clicks_b, n_b]
+    if any(c is None for c in wide) and not all(c is None for c in wide):
+        raise ValueError("ab_archive: pass all of text_b, clicks_b, n_b (wide) or none of them (long)")
+    need = [test, text_a, clicks_a, n_a] + [c for c in wide if c is not None]
+    miss = [c for c in need if c not in df.columns]
+    if miss:
+        raise KeyError(f"ab_archive: columns not found: {miss}; have {list(df.columns)}")
+    if text_b is None:
+        v = df[[test, text_a, clicks_a, n_a]].set_axis(["group", "text", "clicks", "n"], axis=1)
+        v = v.dropna().loc[lambda d: d.n > 0]
+        v = v.assign(_k=np.arange(len(v)))
+        out = v.merge(v, on="group", suffixes=("_a", "_b")).loc[lambda d: d._k_a < d._k_b]
+        out = out.drop(columns=["_k_a", "_k_b"])
+    else:
+        out = df[need].set_axis(["group", "text_a", "clicks_a", "n_a", "text_b", "clicks_b", "n_b"], axis=1)
+        out = out.dropna().loc[lambda d: (d.n_a > 0) & (d.n_b > 0)]
+    out = out[["group", "text_a", "text_b", "clicks_a", "n_a", "clicks_b", "n_b"]].reset_index(drop=True)
+    for c in ("text_a", "text_b"):
+        out[c] = out[c].astype(str)
+    out["ctr_a"] = out.clicks_a.astype(float) / out.n_a.astype(float)
+    out["ctr_b"] = out.clicks_b.astype(float) / out.n_b.astype(float)
+    out["tie"] = out.ctr_a == out.ctr_b
+    out["y"] = (out.ctr_a > out.ctr_b).astype(int)
+    if drop_ties:
+        out = out[~out.tie]
+    if one_pair_per_test and len(out):
+        out = out.groupby("group", sort=False).sample(1, random_state=seed)
+    return out.reset_index(drop=True)

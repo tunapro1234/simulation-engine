@@ -14,7 +14,7 @@ that combine an LLM prediction with a model learned from data.
 | `EarlyTestBayes`, `simulate_saving_calibrated`, ... | LLM prior + small early test, normal-normal Bayes on the log-odds ratio | **about 2.3x** impression saving at 100 impressions/arm, no gain at 800+ |
 | `ShrunkDeviation`, `ridge_to_prior`, `select_lambda`, `LLMFeatureGBDT`, `DevStack`, `BinaryCalibrator` | ways of letting an LLM prediction into a data model, tuned on dev | the LLM term mostly adds ~0 once a strong data baseline exists; tuning keeps it from hurting |
 | `TwinStack`, `pooled_logistic_oof`, `column_correlation`, ... | person-level digital twin: matrix completion + kNN + optional LLM column, ridge-stacked per column | Twin-2K-500 fair LLM-free baseline **0.342** corr; LLM adds +0.006 |
-| `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout` | conditional multinomial logit for conjoint / discrete choice | 0.509 new-person accuracy on camera conjoint (HB 0.519, HB not ported) |
+| `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout`; `conjoint_hb.HBMNL`, `conjoint_hb.MixedLogit` | conditional multinomial logit for conjoint / discrete choice; hierarchical Bayes MNL (person posterior for known persons, population mixture for new ones) and an xlogit mixed-logit wrapper | 0.509 new-person accuracy on camera conjoint (HB 0.519); same person, new task MNL 0.482 vs **HB 0.715** |
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, `next_action.sessions` / `funnel`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank; step table -> session table (first-k prefix, outcome) and per-step funnel | 26.94 vs **31.60** exact next action on OPeRA |
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
@@ -65,6 +65,9 @@ M.column_correlation(truth.loc[test_person_ids], point)
 # --- conjoint
 m = M.MNL(["price", "quality"], scale={"price": 100}).fit(train_rows)
 m.accuracy(test_rows), M.null_scores(test_rows)
+from simengine.methods.conjoint_hb import HBMNL
+hb = HBMNL(["price", "quality"], scale={"price": 100}, draws=1000, burn=1000, seed=0).fit(train_rows)
+hb.log_likelihood(known_person_new_tasks), hb.log_likelihood(new_person_rows, new=True)
 
 # --- next action: steps (ex, session, step, action, user, page) + candidates (ex, key, features...)
 te, s = M.Markov2Baseline().fit(tr_steps, tr_cands).score(te_steps, te_cands)
@@ -160,7 +163,30 @@ In the kit rehearsal the stack scored 0.813, TF-IDF 0.780, `TfidfWordAB` 0.760 a
 `ABStack` gets its dev set from the `dev` frame you pass, or else holds out `dev_n=200` groups from training.
 If neither is possible it falls back, with a warning, to the stored Upworthy dev300 weights (1.3, 2.75). Invalid
 LLM answers count as logit 0. `LLMDirectAB` asks 15 pairs per call and, by default, asks again with A and B
-swapped (position bias). `coverage_` is the share of pairs with a valid answer.
+swapped (position bias). `coverage_` is the share of pairs with a valid answer. `calls_` counts requests actually
+sent and `cache_hits_` answers served from the disk cache, so a fully cached re-run reports `calls_ == 0`.
+
+To report the direct LLM arm next to the stack without asking the LLM about the test pairs twice, pass the direct
+arm's probabilities to the stack (`fit` has already asked about dev):
+
+```python
+from simengine.methods.ab import ABStack, LLMDirectAB, ab_archive, ab_responder
+
+pairs = ab_archive(raw, test="test_id", text_a="headline", clicks_a="clicks", n_a="impressions")
+direct = LLMDirectAB(llm)
+stack = ABStack(llm_method=direct).fit(train)
+p_direct = direct.predict(test)
+p_stack = stack.predict(test, p_llm=p_direct, valid=direct.valid_)
+```
+
+`ab_archive` turns a past A/B archive into this standard frame (`group`, `text_a`, `text_b`, `clicks_a`, `n_a`,
+`clicks_b`, `n_b`, `ctr_a`, `ctr_b`, `y`, `tie`), the frame `LLMDirectAB`, `ABStack` and
+`simulate_saving_calibrated(f.ctr_a, f.ctr_b, prior, f.clicks_a, f.clicks_b)` take. Input can be wide (one row per
+pair: pass the `_b` columns too) or long (one row per variant, as in the raw Upworthy archive: leave the `_b`
+columns out, and every two variants of a test form a pair). By default it drops exact CTR ties and keeps one
+seeded random pair per test. For a dry run with no API, `FakeLLM(ab_responder(score_fn, noise, seed))` answers
+the `LLMDirectAB` prompt with p_a = sigmoid(score(a) - score(b) + noise). With `score_fn=len` the longer text
+wins; the default is a hashed score that carries no signal.
 
 ## LLM prior + early test (`bayes_prior.py`)
 
@@ -197,6 +223,27 @@ is **2.27x (1.67-3.11)** impressions. Other priors and settings (calibration on 
 **When it does not work.** There is no gain at 800+ impressions per arm. Most of the gain is tie-breaking in tests
 with very few clicks: "human decides, prior breaks ties" alone gives 0.786. The replay is circular, but the
 adversarial check found that this biases *against* the hybrid **[deney 2.1]**.
+
+**Comparing priors, weak priors, censoring, the card.** These live in `simengine.methods.bayes_prior`:
+
+- `simulate_saving_calibrated(..., return_pairs=True)` also returns `hybrid_pairs` / `human_pairs` (per-pair
+  accuracy per n, means equal the aggregate) and `decisions_n0` (draws x reps x pairs, True = ship A).
+- `compare_priors({"tfidf": p1, "llm": p2}, ctr_a, ctr_b)` runs every prior on the same replays, tie coins,
+  calibration sets and bootstrap resamples. Each prior's numbers equal a separate `simulate_saving_calibrated`
+  call. `diffs` gives accuracy and multiplier minus the first prior, `vs_human` gives accuracy minus human-only,
+  both with paired 95% CIs. `cluster=<test id per pair>` resamples tests instead of pairs.
+- Weak-prior guard. A RuntimeWarning (also in `warnings`) fires when the free calibration slope k spans 0 over the
+  blocks x draws calibration sets (`k_calib`), or when prior-only accuracy is below 0.6. Calibrated on 20 tests,
+  such a prior can cost traffic. `mode="tiebreak"` is the safe choice there: the human decides and the prior only
+  breaks ties, so it cannot do worse than human-only in expectation as long as the prior is right on at least
+  half of the tied tests.
+- Censoring. When the hybrid beats the top of the human curve, `multiplier` is None, `multiplier_censored=True`
+  and `multiplier_lower_bound = max(ns) / n0` (16x with the defaults). Bootstrap replicates above the curve rank
+  above every finite one, and a CI endpoint in that tail is None (`ci_censored`). Earlier versions dropped those
+  replicates, which made the CI too low. `multiplier_at_floor` marks a value clamped at the bottom of the curve.
+- `saving_section(result)` turns either result into an evidence-card section that
+  `simengine.evidence.section_markdown` renders. It shows accuracy at n0, the multiplier with its CI and
+  censoring, n_calib and the calibration slope, so the traffic multiplier can sit next to the card.
 
 ## Hybrids (`hybrid.py`)
 
@@ -281,8 +328,40 @@ ASC-only model.
 
 Measured on the Sawtooth camera conjoint **[deney 1.5]**: for a new person, holdout accuracy is 0.210 with equal
 shares, **0.509 with MNL** and 0.519 with hierarchical Bayes. For the same person on a new task, MNL scores 0.482
-against **0.715** for HB. Person-level tastes matter there and MNL ignores them. **HB is not ported.** LLM arms did
-not beat MNL or HB on these sets.
+against **0.715** for HB. Person-level tastes matter there and MNL ignores them. LLM arms did not beat MNL or HB on
+these sets.
+
+### Hierarchical Bayes and mixed logit (`conjoint_hb.py`) [prova-d8]
+
+Same long rows as `MNL`, plus a required `person` column. Import from the module:
+`from simengine.methods.conjoint_hb import HBMNL, MixedLogit`.
+
+`HBMNL(attrs=, scale=, base_alt=, asc=True, draws=500, burn=500, thin=1, seed=0)` is the Allenby-Rossi sampler in
+numpy: Gibbs over individual betas, the population mean `mu` (normal, prior N(0, 100 I)) and a full covariance
+`Sigma` (inverse Wishart, nu = K + 3, scale nu I). Each person's beta moves by random-walk Metropolis with proposal
+covariance step^2 Sigma; the step is adapted per person toward 0.3 acceptance during burn-in and then frozen. All
+parameters, ASCs included, are random. A fixed `seed` gives identical draws. The defaults are small; for a real
+run use draws and burn of 1000 or more and check `acceptance_` (0.2-0.4 is healthy).
+
+- `predict_person(df)`: known person, held-out task. Averages the probabilities over that person's own draws.
+  Persons not seen in fit raise, or with `unknown="population"` are scored by `predict_new`.
+- `predict_new(df, n=2000)`: new person. Population mixture of betas drawn from N(mu_t, Sigma_t) over the kept
+  draws.
+- `log_likelihood(df, new=False)` (mean per task) and `accuracy(df, new=False)`.
+- Fitted: `draws_` (draws x persons x K), `mu_draws_`, `sigma_draws_`, posterior means `beta_` (persons x names),
+  `mu_`, `sigma_`, `names_`, `persons_`, `acceptance_`.
+
+`MixedLogit(attrs=, randvars={attr: "n"}, scale=, asc=True, n_draws=200, seed=0)` wraps `xlogit.MixedLogit`
+(panel by person, simulated ML). xlogit is optional and is not installed by simengine; without it `fit` raises an
+ImportError that names the package. xlogit itself raises an opaque `IndexError` when rows are not contiguous per
+person, so the wrapper sorts rows by person / task / alternative and pads missing alternatives as unavailable
+before passing `panels`. `predict_proba` returns population (new-person) probabilities in the input row order.
+For a known person, use `HBMNL.predict_person`.
+
+On a synthetic panel with tastes that flip sign across persons (120 persons, 12 training tasks, 4 held out), HB
+person-level held-out log-likelihood per task is about -0.83 against -1.04 for pooled MNL. For new persons, HB's
+population mixture is level with MNL. In the D8 rehearsal (task B, known persons) HB and mixed logit tied:
+HB - MXL -0.001 [-0.028, +0.025] LL per task.
 
 ## Next action (`next_action.py`)
 
@@ -425,7 +504,8 @@ gt.predict(test[feats + ["country"]])          # person-level
 gt.predict_groups(test[feats + ["country"]])   # stage A level per new country (rate for binary targets)
 ```
 
-`oof_predict(model, df, *, features, target, group=None, n_splits=None, seed=0, method="predict", folds=None)`
+`oof_predict(model, df, *, features, target, group=None, n_splits=None, seed=0, method="predict", folds=None,
+weight=None)`
 - `model`: any object with `fit(X, y)` / `predict(X)` (sklearn estimator, simengine baseline, `GroupTransfer`) or a
   zero-argument factory. It is cloned (or deep-copied) per fold. If `fit` / `predict` accept `groups=`, the fold's
   group labels are passed, which is how `GroupTransfer` gets the groups.
@@ -455,6 +535,14 @@ gt.predict_groups(test[feats + ["country"]])   # stage A level per new country (
 - It returns a float Series aligned with `df.index`. Rows with a missing target (or group) are not trained on and
   stay NaN. `.attrs["fold"]` holds each row's fold number, -1 when the row was not predicted. The Series can go
   straight into an EvalFrame `pred_<method>` column.
+- `weight=`: per-row training weights, a column name of `df` or an array / Series aligned with `df` (e.g.
+  `1/(se^2 + tau^2)` when the noise of the rows differs 30-fold, as in the D5 rehearsal). Each fold's training rows
+  go to `fit(..., sample_weight=w)`. An sklearn `Pipeline` (nested too) gets `<last step>__sample_weight`, so
+  `make_pipeline(StandardScaler(), Ridge())` works; the scaler itself stays unweighted (`TabularRidge` below
+  weights it). If the model's `fit` has no `sample_weight` parameter (`GroupTransfer`, `RandomEffectsMean`, and
+  for now `LogisticBaseline` / `LightGBMBaseline`), `TypeError` names the model. Missing, infinite or negative
+  weights on rows with a target raise `ValueError`. Predictions are not weighted: report a weighted metric
+  separately.
 - Group-level scores of pooled group-held-out predictions are biased **negative** when there is no real group
   signal. This is pessimistic, not leakage: a held-out group's prediction leans on the other groups' mean, which
   is lower when the held-out groups' own mean is higher. With a few dozen groups, the group-level Spearman of the
@@ -527,6 +615,58 @@ D2 fit it on about 34 groups per fold, so keep group features few.
 - The D2 numbers come from one dataset and one CV split and have no bootstrap CI. `tests/test_methods_transfer.py`
   only checks that, on synthetic groups with a real composition effect, `GroupTransfer` beats a global mean and
   a person-only ridge in group-held-out CV (and that the prior helps when it carries signal).
+
+## Tabular regression and cell baselines (`tabular.py`)
+
+The no-LLM rung for a plain table of categorical + numeric columns and a continuous target: the best ordinary
+regression on the same columns, or the level of the row's cell (outcome x year). The G2 and D5 rehearsals each
+hand-wrote these (`SIMENGINE-EKSIK.md` G2 #3, D5 #3 and #4). Every class has `fit(X, y[, sample_weight])` /
+`predict(X)` on a DataFrame, so it goes straight into `oof_predict`. The classes are not re-exported from
+`simengine.methods` yet; import them from `simengine.methods.tabular`.
+
+```python
+from simengine.methods import oof_predict
+from simengine.methods.tabular import GroupStat, RandomEffectsMean, TabularGBDT, TabularRidge
+feats = ["outcome", "year", "n", "pre"]                           # df also has "ate", "se", "w", "study"
+oof_ridge = oof_predict(TabularRidge(cat=["outcome", "year"], num=["n", "pre"]), df, features=feats,
+                        target="ate", group="study", weight="w")
+oof_gbdt = oof_predict(TabularGBDT(cat=["outcome", "year"]), df, features=feats, target="ate", group="study")
+oof_re = oof_predict(RandomEffectsMean(by=["outcome", "year"], se_col="se"), df,
+                     features=["outcome", "year", "se"], target="ate", group="study")
+oof_med = oof_predict(GroupStat(by=["outcome", "year"], stat="median"), df, features=["outcome", "year"],
+                      target="ate", group="study")
+```
+
+- `TabularRidge(cat=None, num=None, *, alphas=logspace(-2, 4, 25), min_count=1)`: one-hot categoricals (NaN is
+  its own category; categories seen fewer than `min_count` times are dropped; unseen ones get all-zero dummies)
+  plus numerics filled with the training mean and standardised, then `RidgeCV` (efficient leave-one-out over
+  `alphas`). With `sample_weight`, the fill / centring / scaling and the ridge are all weighted. `None` for
+  `cat` / `num` = the remaining columns of `X` by dtype (numeric -> `num`), `()` = none. Put numeric codes such as
+  a year in `cat` to get one dummy per value. `alpha_`, `coef_` (by encoded column name) and `intercept_` after fit.
+- `TabularGBDT(cat=None, num=None, *, backend="auto", seed=0, **params)`: LightGBM with native categoricals when
+  it is importable, else sklearn `HistGradientBoostingRegressor` with a `RuntimeWarning` (`backend_` says which ran;
+  `backend="sklearn"` forces the fallback). Small-table defaults: 300 trees, lr 0.05, 15 leaves, 20 rows per leaf.
+  `params` override them, using LightGBM names for LightGBM and sklearn names for the fallback.
+- `RandomEffectsMean(by, se_col="se", *, tau2="dl", min_n=2)`: per cell of `by`, the DerSimonian-Laird random-effects
+  mean, `sum(y/(se^2+tau2)) / sum(1/(se^2+tau2))`, with `tau2 = max(0, (Q-(k-1))/C)` estimated inside the cell
+  (`tau2=<float>` fixes it). A cell with fewer than `min_n` rows, and any cell unseen at predict time, falls back to
+  the next coarser prefix of `by` (`by[:-1]`, ...), then to the grand random-effects mean. `level(X)` returns the
+  cell depth each prediction came from (0 = grand). `se_col` must be in `features=`. Rows with NaN se are dropped
+  with a warning, and `se <= 0` raises. There is no `sample_weight`, because the weights are the precisions. The
+  pooling function itself is `dersimonian_laird(y, se) -> (mu, tau2, se_mu)`.
+- `GroupStat(by, stat="median", *, weight=None, min_n=1)`: per-cell `"median"`, `"mean"` or `"wmean"`, with the
+  same fallback. Weights come from `X[weight]`, or else from `sample_weight` (`oof_predict(weight=)`). When weights
+  are present, `mean` / `wmean` are the weighted mean and `median` is the weighted median. `wmean` without weights
+  raises.
+
+**Measured.** These classes have not been run on rehearsal data yet. In D5, the hand-written level baselines
+(`kod/ortak.py` `Duzey`) scored dev MAE between 1.524 and 1.549, and their paired CIs overlapped (D5 #10). `tests/test_methods_tabular.py` checks the DL `tau2` / mean against a hand calculation, the cell
+fallback, that weighted fits move toward the heavy rows (TabularRidge, both GBDT backends, GroupStat, a
+`make_pipeline` routed through `oof_predict`), and the `TypeError` for models without `sample_weight`.
+
+**When it does not help.** With only a handful of rows per cell, a per-cell DL `tau2` is noisy (it is 0 whenever
+`Q < k-1`). Raise `min_n` so that small cells use the coarser level. Median vs mean matters for MAE: in D5 the median scored
+1.547 and the weighted mean 1.524. Try both, and cross-fit them the same way.
 
 ## Item cold start (`coldstart.py`)
 
@@ -680,8 +820,8 @@ to the transfer baseline made it worse (-0.300 [-0.85, +0.05]).
 
 - The persona panel (LLM personas voting) and PAARS-style agents are left to the `sim` / `persona` modules. Their
   measured A/B numbers are 0.685 (Opus persona panel) and a 1.41x prior.
-- Hierarchical Bayes / mixed logit for conjoint, BTYD and ReCANet for repeat purchase, and the person x category
-  LightGBM for next basket are not ported.
+- BTYD and ReCANet for repeat purchase, and the person x category LightGBM for next basket are not ported
+  (hierarchical Bayes / mixed logit for conjoint: `conjoint_hb.py`).
 - The research kits' scale conversions (deciles, point units) are not ported in `TwinStack`: targets are used in
   their raw numeric unit.
 - PPI++ is in `simengine.evidence`, not here.
@@ -767,7 +907,6 @@ Cautions:
 - `seasonal_naive` was the worst rung on M5 weekly data (0.600). It wins only where the season really repeats
   (the synthetic test).
 
-
 ### Growth and saturating targets, origin-time features [prova-d7]
 
 The D7 task was adoption per 100 people for 361 country x technology series from a fixed 1997 origin, 1-5
@@ -812,6 +951,7 @@ F.extrapolation_check(fr, dev_backtest["truth"], margin=0.25)        # or agains
   (id, time, variable) rows raise; series whose target is never observed are dropped (`dropna_series`).
   Missing cells inside the panel still count as `fill_value` (0.0) in the forecasters; pass
   `fill_value=float("nan")` when missing means unknown rather than zero.
+
 
 ## Repeated surveys: next-wave distributions (`waves.py`) [prova-d6]
 
