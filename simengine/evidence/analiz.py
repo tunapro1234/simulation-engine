@@ -2,6 +2,7 @@
 
 Yayılım (yayilim) ölçütleri, görev başına:
     sürekli / ikili etiket   sd oranı = sd(tahmin) / sd(gerçek), madde içinde havuzlanır
+    her madde tek satır      sürekli / ikili / çok sınıf yayılımı uygulanamaz (madde içi sd 0/0): "uygulanamaz" nedeni
     ikili olasılık           sd(p) / √(p̄(1−p̄)) (Bernoulli sd'si; 0 = sabit tahmin, 1 = kesin 0/1): sd_bernoulli.
                              0/1 gerçeğin sd'siyle kıyas anlamsız, sd_orani boş (uygulanamaz)
     dağılım                  sd oranı (hücre içi şık yayılımı), entropi oranı = ort. H(tahmin) / ort. H(gerçek)
@@ -260,8 +261,15 @@ def yayilim(veri, sutun_dizileri: dict, B: int, tohum: int) -> dict:
     out = {}
     orn = Orneklem(veri.kume, B=B, B_toplu=min(B, 100), tohum=tohum, iki_yon=veri.iki_yon)
     madde = veri.df["madde"].to_numpy() if "madde" in veri.df else np.zeros(len(veri.df), int)
+    # her madde tek satırsa madde içi sd/entropi 0 çıkar ve "homojenleşme" diye yanlış uyarırdı
+    tek_satir = ("madde" in veri.df and veri.gorev in ("surekli", "ikili", "cok_sinif")
+                 and not (veri.df.groupby("madde").size() > 1).any())
     for sutun, (y, p, maske) in sutun_dizileri.items():
         if maske is not None:
+            continue
+        if tek_satir:
+            out[sutun] = {"sd_orani": None, "sd_orani_alt": None, "sd_orani_ust": None, "entropi_orani": None,
+                          "w1": None, "uygulanamaz": "her madde tek satır: madde içi yayılım yok (one row per item)"}
             continue
         bern = veri.gorev == "ikili" and olasilik_tahmini(p)
         oran, ent = _yayilim_bir(veri, y, p, bernoulli=bern)

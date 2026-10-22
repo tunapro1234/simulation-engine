@@ -28,6 +28,27 @@ class SingleRowItemsTest(unittest.TestCase):
         self.assertNotEqual(rep["manset"]["en_iyi_baseline"]["sutun"], "taban_rastgele")
         self.assertIsNotNone(rep["manset"]["taban_tavana_oran"])
 
+    def test_within_item_audits_not_applicable(self):
+        # one row per item: shuffle control, within-item metrics and spread ratio would be 0/0 or copy ours
+        rep = ev.evaluate(_one_row_frame(), task="continuous", primary="mae", ours="ours", raw="raw")
+        self.assertNotIn("kontrol_karistir_ours", rep["sonuclar"])
+        den = {d["kontrol"]: d for d in rep["denetim"]}
+        self.assertEqual(den["persona karıştırma (birey bilgisi kullanılıyor mu)"]["durum"], "atlandi")
+        self.assertIn("tek satır", den["persona karıştırma (birey bilgisi kullanılıyor mu)"]["ayrinti"])
+        self.assertEqual(den["dağılım çöküşü (sd oranı)"]["durum"], "atlandi")
+        self.assertFalse(any("demeaned_r2" in k or "madde_ici_kor" in k for k in den))
+        for r in rep["sonuclar"].values():
+            self.assertNotIn("demeaned_r2", r["metrikler"])
+        self.assertEqual(rep["sonuclar"]["taban_marjinal"]["etiket"], "Genel medyan (madde başına tek satır)")  # mae → median
+
+    def test_two_row_items_keep_within_item_audits(self):
+        df = _one_row_frame()
+        df = pd.concat([df, df.assign(truth=df.truth + .2, pred_ours=df.pred_ours + .1)], ignore_index=True)
+        rep = ev.evaluate(df, task="continuous", primary="mae", ours="ours", raw="raw")
+        self.assertIn("kontrol_karistir_ours", rep["sonuclar"])
+        self.assertIn("demeaned_r2", rep["sonuclar"]["tahmin_ours"]["metrikler"])
+        self.assertEqual(rep["sonuclar"]["taban_marjinal"]["etiket"], "Madde medyanı")
+
     def test_mixed_frame_single_rows_draw_from_other_items(self):
         df = pd.DataFrame({"madde": ["a", "a", "a", "b", "c", "d"],
                            "gercek": [1.0, 2.0, 3.0, 10.0, 20.0, 30.0]})

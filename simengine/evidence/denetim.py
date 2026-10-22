@@ -99,7 +99,7 @@ def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5, bernou
             e = y["entropi_orani"]
             return _k("dağılım çöküşü (entropi oranı)", "uyari" if e < esik else "tamam",
                       f"entropi oranı {_f(e, 2)} (1 = insan kadar çeşitli)", e)
-        return _k("dağılım çöküşü (sd oranı)", "atlandi", "hesaplanamadı")
+        return _k("dağılım çöküşü (sd oranı)", "atlandi", (y or {}).get("uygulanamaz") or "hesaplanamadı")
     o = y["sd_orani"]
     ek = ""
     if y.get("entropi_olcut"):   # dağılım: entropi (ortalamaların oranı) ve hücreler arası ayrışma

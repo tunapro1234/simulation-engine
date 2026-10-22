@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses as _dc
 import datetime as _dt
+import difflib
 import math
 import warnings
 
@@ -18,6 +19,59 @@ from .sema import ON_EK, _normalle, _sinif_vektoru, _vektor, _vektor_mu, gercek_
 SURUM = "0.1"
 BILGI_B_ETIKET = "ayar B: hedef sorunun öbür hücrelerinin cevabı (setting B)"
 DOLGU_ESIK = 0.05   # kol başına dolgu (geçersiz → tekdüze) payı bunu aşarsa denetim uyarısı
+AZ_KUME = 10        # bootstrap birimi (küme; ab'de test) bundan azsa GA anlamsız: denetim uyarısı, rozet "yüksek" olmaz
+# api.METRIC_TO_INTERNAL'a ek İngilizce yazımlar (sklearn / yaygın adlar) → metrik.aile iç adı
+BIRINCIL_EK_ADLAR = {"log_loss": "logloss", "cross_entropy": "logloss", "roc_auc": "auc", "f1": "macro_f1",
+                     "f1_macro": "macro_f1", "brier_score": "brier", "balanced_acc": "dengeli_dogruluk",
+                     "acc": "dogruluk", "cohen_kappa": "kappa", "mean_absolute_error": "mae",
+                     "root_mean_squared_error": "rmse", "r_squared": "r2"}
+
+
+def _metrik_adlari() -> tuple[dict, dict]:
+    """(İngilizce/eş ad → iç ad, iç ad → İngilizce ad). Tablo api'de; geç içe aktarma (api bu modülü içe aktarır)."""
+    from .api import METRIC_TO_ENGLISH, METRIC_TO_INTERNAL
+    return {**METRIC_TO_INTERNAL, **BIRINCIL_EK_ADLAR}, METRIC_TO_ENGLISH
+
+
+def birincil_ic(ad: str | None) -> str | None:
+    """Birincil metrik adı → metrik.aile iç adı: İngilizce ad ya da eş ad (accuracy, log_loss, logloss, Log-Loss...)
+    kabul edilir; iç ad (dogruluk) ve bilinmeyen ad olduğu gibi döner (bilinmeyeni degerlendir anlamlı hatayla reddeder)."""
+    if ad is None:
+        return None
+    tablo, _ = _metrik_adlari()
+    if ad in tablo:
+        return tablo[ad]
+    duz = str(ad).strip().lower().replace("-", "_").replace(" ", "_")
+    return tablo.get(duz, ad)
+
+
+def _birincil_hatasi(ad, adlar: list[str], gorev: str) -> ValueError:
+    """Bu görevde olmayan birincil metrik: İngilizce adlar + difflib 'did you mean' önerisi."""
+    tablo, en = _metrik_adlari()
+    adaylar = {en.get(a, a): a for a in adlar}
+    adaylar.update({a: a for a in adlar})
+    adaylar.update({k: v for k, v in tablo.items() if v in adlar})
+    yakin = difflib.get_close_matches(str(ad).strip().lower(), list(adaylar), n=1, cutoff=0.6)
+    oneri = f"; did you mean {en.get(adaylar[yakin[0]], adaylar[yakin[0]])!r}?" if yakin else ""
+    from .sema import GOREVLER, GOREVLER_EN
+    gorev_en = dict(zip(GOREVLER, GOREVLER_EN)).get(gorev, gorev)
+    return ValueError(f"primary metric {ad!r} is not available for task {gorev_en!r}: "
+                      f"{[en.get(a, a) for a in adlar]} (internal: {adlar}){oneri}")
+
+
+def _az_kume(veri) -> dict | None:
+    """Bootstrap birimi (küme; ab görevinde ayrıca test = madde) AZ_KUME'den azsa denetim satırı: GA anlamlı değil."""
+    d = veri.df
+    say = {veri.kume_adi: veri.n_kume}
+    if veri.gorev == "ab" and "madde" in d:
+        say["madde"] = int(d["madde"].nunique())
+    ad, n = min(say.items(), key=lambda x: x[1])
+    if n >= AZ_KUME:
+        return None
+    en = {"madde": "tests" if veri.gorev == "ab" else "items", "grup": "clusters (group)", "satir": "rows"}.get(ad, ad)
+    return {"kontrol": "küme sayısı (bootstrap GA)", "durum": "uyari", "deger": n, "esik": AZ_KUME,
+            "ayrinti": (f"only {n} {en}; CI is not meaningful (cluster bootstrap needs at least {AZ_KUME}; "
+                        f"yalnız {n} '{ad}' kümesi, GA anlamsız): the badge is not 'high confidence'")}
 
 
 def _diz(veri, sutun, kaynak: str | None = None):
@@ -469,6 +523,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     blok: blok bootstrap sütunu (ör. tahmin kökeni / hafta): küme yerine bu sütunun her değeri bir blok olarak
     yerine koymalı örneklenir (blok içindeki bütün satırlar/kümeler birlikte); sütun, merdiven, manşet ve eşleşik fark
     GA'ları. Tek değerliyse uygulanmaz (varsayılan kümeye dönülür, denetimde not)."""
+    birincil = birincil_ic(birincil)
     if gercek_yok(df):
         return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
                         etiketler=etiketler, birincil=birincil, onkayit=onkayit, sinirlar=sinirlar, duzey=duzey,
@@ -486,10 +541,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     blok_bilgi = _blok_kur(veri, blok, tahmin_gorevi)
     etiketler = dict(etiketler or {})
     madde_var = "madde" in d
+    # her madde tek satırsa madde içi ölçüt (madde_ici_kor, demeaned_r2) ve karıştırma kontrolü tanımsız
+    madde_ici = madde_var and bool((d.groupby("madde").size() > 1).any())
     olasilik = veri.gorev != "cok_sinif" or isinstance(d[ON_EK + veri.yontemler[0]].iloc[0], np.ndarray)
     birim_aralik = veri.gorev == "surekli" and d["gercek"].between(0, 1).all()
     oranli = tahmin_gorevi or birincil in ORAN_METRIKLERI
-    metrikler = aile(veri.gorev, olasilik, madde_var and veri.gorev in ("ikili", "surekli"), birim_aralik, oran=oranli)
+    metrikler = aile(veri.gorev, olasilik, madde_ici and veri.gorev in ("ikili", "surekli"), birim_aralik, oran=oranli)
     adlar = [m.ad for m in metrikler]
     dengesiz_not = None
     if not birincil and veri.gorev in ("ikili", "cok_sinif"):
@@ -500,7 +557,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                             "doğruluk tabloda duruyor.")
     birincil = birincil or ("bir_eksi_mae" if birim_aralik else BIRINCIL[veri.gorev])
     if birincil not in adlar:
-        raise ValueError(f"birincil metrik {birincil} bu görevde yok: {adlar}")
+        raise _birincil_hatasi(birincil, adlar, veri.gorev)
     M = {m.ad: m for m in metrikler}[birincil]
     bizim_sec_oto = bizim is None
     bizim = bizim or veri.yontemler[-1]
@@ -551,7 +608,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     kontrol_sutun = {}
     sabit_kontrol = []   # madde içinde sabit tahmin: karıştırma kişi bilgisini sınamaz, atlanır
     grup_kontrol = []    # grup düzeyi, madde yok: karıştırma yalnız grupları permüte eder, atlanır
+    tek_kontrol = []     # her madde tek satır: madde içi karıştırma tahmini yerinde bırakır (kontrol = bizim), atlanır
     for y_ in ([] if tahmin_gorevi else dict.fromkeys([bizim] + ([ham] if ham else []))):
+        if madde_var and not madde_ici:
+            tek_kontrol.append(ON_EK + y_)
+            continue
         if _madde_ici_sabit(veri, ON_EK + y_):
             sabit_kontrol.append(ON_EK + y_)
             continue
@@ -829,6 +890,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                     "ayrinti": "atlandı: tahmin her maddede birimler arasında sabit (kişi bilgisi yok); karıştırma "
                                "bizimle aynı sonucu verirdi (skipped: predictions constant within item, no person "
                                f"information); {takas_ipucu}"})
+    elif bc in tek_kontrol:
+        den.append({"kontrol": "persona karıştırma (birey bilgisi kullanılıyor mu)", "durum": "atlandi", "deger": None,
+                    "uygulanamaz": True,
+                    "ayrinti": "atlandı: her madde tek satır; madde içinde karıştırılacak başka birim yok, kontrol bizimle "
+                               "aynı olurdu (skipped: one row per item, a within-item shuffle leaves every prediction in "
+                               f"place); {takas_ipucu}"})
     elif bc in grup_kontrol:
         den.append({"kontrol": "persona karıştırma (birey bilgisi kullanılıyor mu)", "durum": "atlandi", "deger": None,
                     "uygulanamaz": True,
@@ -906,6 +973,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                     "ayrinti": "'bizim' yöntem açıkça belirtilmedi (son sütun alındı); yöntemi önceden belirleyin", "deger": None})
     elif len(veri.yontemler) > 1:
         den.append(_secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, onkayit_metin, n_yapilandirma))
+    az = _az_kume(veri)
+    if az:
+        warnings.warn(az["ayrinti"], UserWarning, stacklevel=3)
+        den.append(az)
     for n_ in veri.notlar:
         den.append({"kontrol": "girdi notu", "durum": "uyari" if "düşürüldü" in n_ else "tamam", "ayrinti": n_, "deger": None})
 
@@ -1243,9 +1314,9 @@ def bekleyen(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | Non
     tsut = [ON_EK + y for y in yontemler] if yontemler else [c for c in df.columns if isinstance(c, str) and c.startswith(ON_EK)]
     eksik = [c for c in tsut if c not in df.columns]
     if eksik:
-        raise ValueError(f"eksik tahmin sütunları: {eksik}")
+        raise ValueError(f"missing prediction columns: {['pred_' + c[len(ON_EK):] for c in eksik]} (alias: {eksik})")
     if not tsut:
-        raise ValueError("en az bir 'tahmin_<yontem>' sütunu gerekli")
+        raise ValueError("at least one 'pred_<method>' column is required (alias: tahmin_<method>)")
     d = df
     if "bolum" in d.columns:
         from .sema import TEST_ADLARI

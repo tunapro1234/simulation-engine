@@ -138,6 +138,9 @@ def baselineler(veri, ozet_surekli: str = "mean", rastgele_tohum: int = 0) -> di
         out["rastgele"] = ("Rastgele (başka maddenin gerçek değeri; madde başına tek satır)" if tek
                            else "Rastgele (madde içi gerçek değer)", _rastgele_surekli(veri, rastgele_tohum))
         ad = "Madde medyanı" if ozet_surekli == "median" else "Madde ortalaması"
+        if tek and (veri.egitim is None or not len(veri.egitim)):
+            # tek satırlı madde dışarıda bırakılan katta görülmez: değer eğitim katlarının genel özetidir
+            ad = ("Genel medyan" if ozet_surekli == "median" else "Genel ortalama") + " (madde başına tek satır)"
         out["marjinal"] = (ad if "madde" in d else ad.replace("Madde", "Genel"), _skaler_baseline(veri, ozet_surekli, False))
         if seg:
             out["demografi"] = (f"Demografi ({veri.segmentler[0]})", _skaler_baseline(veri, ozet_surekli, True))
