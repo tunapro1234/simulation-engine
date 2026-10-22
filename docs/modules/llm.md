@@ -35,7 +35,8 @@ print(r.text, r.cost_usd, r.cached)
 
 rs = llm.map([("You are a survey respondent.", q) for q in questions], max_tokens=200, parallel=4)
 data = llm.complete_json("Return JSON only.", 'Give {"p": <probability>} for ...')
-print(llm.stats)            # calls, cache_hits, retries, errors, cost_usd, ledger_total_usd
+print(llm.stats)            # calls, cache_hits, retries, errors, cost_usd, ledger_total_usd (llm.stats() works too)
+print(llm.spent_usd)        # = llm.stats["cost_usd"]: this instance's real-call spend
 
 obs = ClaudeCode(model="claude-haiku-5-5", cache_dir=".cache", max_calls=50, timeout=300)
 proposal = json_extract(obs.complete("You review experiment logs.", log_text).text)
@@ -83,6 +84,12 @@ the cache are still served; a new call raises `AuthError`.
   kept 0.1x on purpose as a conservative estimate (`talp73/kod/llm/claude_api.py`), and so does this module. A model
   that is not in the table raises `KeyError` when the backend is constructed, because an unpriced model would make
   the budget guard blind. Pass `prices=` to add one.
+- **Reading spend and counters.** `llm.stats` is a snapshot dict (`calls`, `cache_hits`, `retries`, `errors`,
+  `cost_usd`, `ledger_total_usd`). It can also be called: `llm.stats()` returns a plain-dict copy, because the
+  recipe rehearsal G4 (#5) tried the call form first. `llm.spent_usd` is `stats["cost_usd"]`, the spend of this
+  backend instance's real calls in this process. Cache hits cost 0, and so do `ClaudeCode` subscription calls,
+  whose price is in `list_price_usd`. The whole ledger (other backends and processes on the same file, the number
+  the budget guard reads) is `stats["ledger_total_usd"]` or `llm.ledger.total()`. G6 (#4) looked for `spent_usd` first.
 - **Budget guard.** Before every real call (retries included), `BudgetExceeded` is raised if `ledger.total() >= budget_usd`.
   The total covers the whole ledger file, so every process that writes to the same ledger shares one budget, as the
   research code's ledger did. The guard checks spend that has already happened. One call in flight can still push
@@ -168,8 +175,13 @@ llm = Claude(model="claude-haiku-5-5", ledger=led)
   llm.complete(sys, user, tag="prior")        # TSV tag: prova-d3/dev:prior   JSONL: tag="dev:prior", tag_prefix="prova-d3/"
   # or: export SIMENGINE_SPEND_TAG_PREFIX=prova-d3/
   ```
-- Passing `spend_log=`/`agent=`/`tag_prefix=` together with a `ledger=CostLedger(...)` instance raises `ValueError`;
-  configure that instance instead.
+- `spend_log=`/`agent=`/`tag_prefix=` together with `ledger=` work both ways. With a path, the backend builds
+  `CostLedger(path, tsv_path=spend_log, agent=agent, tag_prefix=tag_prefix)`. With a `CostLedger(...)` instance,
+  the backend calls `ledger.attach(...)`: settings the instance did not get as arguments (env or default values)
+  are filled in, and `ValueError` is raised only when an explicit value differs. The message gives the one-line
+  correct call, and the instance is left unchanged. Attached values count as explicit, so a second backend that
+  shares the ledger with another `agent=` is refused too. Before this, any combination raised, and the recipe
+  rehearsal G1 (#7) lost a background run to it.
 - A TSV write failure warns once (`RuntimeWarning`) and never fails the call; the row is still in the JSONL ledger.
 
 ## Soft refusals: `looks_like_refusal(text)`
