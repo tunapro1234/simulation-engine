@@ -26,9 +26,9 @@ signal.
 | `survey`, `survey_frame` | `survey.py` | Survey panel. Likert questions get a free-text answer plus a direct 1-5 score, and optionally SSR on the text. Numeric questions (`kind="numeric"`, `min`/`max`, e.g. a 0-100 slider) get a number. Multiple-choice questions get an option letter. `free_text=False` drops the free-text field. Each persona can see its own stimulus (`stimulus_col=` or `context={pid: text}`). Soft refusals are re-asked once and counted apart from parse failures. Control arms run by default. The result has bootstrap CIs per arm, a segment breakdown and quotes. See "Survey options" below. |
 | `interview`, `interview_frame` | `interview.py` | Open-ended interview: one free-text question per persona, with the `no_persona` / `persona_swap` control arms and per-person stimuli, as in `survey`. Per arm: answers `{pid: text}` and refused / empty / error counts and ids. Import from `simengine.sim.interview` (not `simengine.persona.inject.interview`). See "Open-ended interview" below. |
 | `SSR`, `SCALES` | `ssr.py` | Semantic similarity rating (Maier et al. 2025). It embeds the answer text, compares it with 5 anchor sentences, and returns a distribution and an expected score (or `to_probability`). `sentence-transformers` is imported lazily. The model loads offline from a local cache. `encoder=` takes any texts-to-vectors function. |
-| `ab_test`, `ab_frame` | `ab.py` | PAARS-style A/B test on a persona panel. Each persona gives a 1-10 score per variant, a choice and a reason. Half of the panel sees the variants reversed, which gives the position effect. Output: winner, preference share, bootstrap win probability, sign test, control arms, `confidence` (`confidence_check`), and a direction check when `truth` is given. |
+| `ab_test`, `ab_frame` | `ab.py` | PAARS-style A/B test on a persona panel. Each persona gives a 1-10 score per variant, a choice and a reason. Half of the panel sees the variants reversed, which gives the position effect. Output: winner, preference share, bootstrap win probability, sign test, control arms, `confidence` (`confidence_check`), and a direction check when `truth` is given. With `reference=` also `lift` and `ab_lift_frame` (see A/B options). |
 | `paars_decision` | `ab.py` | Forced-choice decision from per-persona A/B scores, with a confidence threshold (0.65). |
-| `ab_many` | `ab.py` | Many pairwise tests per call, with all readers in one prompt. The prompt is verbatim from the Upworthy rehearsal. Returns `p_a` with Laplace smoothing. |
+| `ab_many` | `ab.py` | Many pairwise tests per call, with all readers in one prompt. The prompt is verbatim from the Upworthy rehearsal. Returns `p_a` with Laplace smoothing. Calls without a parseable vote are counted and warned about. |
 | `roundtable`, `roundtable_frame` | `roundtable.py` | Multi-round discussion. Round 0 is independent. In later rounds each persona sees its own previous answer and a summary of its segment (or of the whole table). `CONFIRMATION_BIAS` and `KEEP_VIEW` are the measured stance instructions. |
 | `roundtable_strategy` (alias `roundtable_conditions`), `roundtable_strategy_frame`, `hide_persona_fields` | `roundtable.py` | Strategy comparison at an interacting table: one `roundtable` per condition on the same panel (`{id: text}` or a list; `hide_fields=("condition",)` keeps the RCT arm out of the prompt). Output: condition × round × segment means (`table`), paired effect vs the `control` table per round (`effects`), last round − round 0 per persona with bootstrap CI and the change of the effect (`shift`), and `ranking` in round 0 and the last round. The frame helper reuses `roundtable_frame` (unit `<condition>|<unit>`); `effect=True` gives condition − control predictions to score against observed effects. CIs resample personas and ignore the within-table dependence of later rounds. |
 | `strategy`, `strategy_frame` | `strategy.py` | Two or more scenarios × segments. Each persona gives a 0-100 intent and a reason per scenario. Output: ranking, win probability, sign test on the top two, and the segment whose profile diverges most. |
@@ -259,6 +259,49 @@ overrides it.
 ```python
 llm = se.llm.Claude(tag="L1", tag_prefix="d3/", spend_log="spend.tsv", agent="team")
 sim.survey(panel, [q], llm=llm, tag="dev")     # TSV tag column: d3/L1:dev:survey:persona, ...:no_persona, ...
+```
+
+## A/B options (`ab.py`)
+
+**Variants.** A list of `{"id", "text"}` dicts, a list of plain texts (ids A, B, ...), or a mapping
+`{id: text}`. Any other type (a string, a set, a number) raises `TypeError`.
+
+**`controls=` means persona-control arms** (`no_persona`, `persona_swap`), not a control creative. A control
+creative is an ordinary variant; name it in `reference=`.
+
+**Lift against a reference.** `ab_test(..., reference="control")` adds `lift`: for every other variant, the
+paired mean score difference vs the reference (`abs`, 1-10 points) and relative to the reference mean (`rel`),
+each with a paired per-persona percentile bootstrap CI (`abs_ci`, `rel_ci`), `prob_better` (bootstrap
+P(mean difference > 0)) and a sign-test `p` on the per-persona differences. `ab_lift_frame(res)` gives one row
+per variant. Without `reference` the result is unchanged.
+
+**Pairwise win matrix.** `pairwise_win_prob[a][b]` = P(mean score of a > mean score of b), personas resampled
+paired, ties split; also per arm in `arms[arm]["pairwise_win_prob"]`. `win_prob` is P(variant has the highest
+mean of all), so it is near 0 for a weak control; use the pairwise matrix as a pairwise prior (e.g. for
+`EarlyTestBayes`).
+
+**Names.** `tendency` and `winner` hold the same value (highest mean score). `tendency` is the preferred name;
+`winner` is kept as an alias. `overall.choice_winner` is the forced-choice winner; when it differs from the score
+winner, `confidence` gets the reason `choice_disagrees`.
+
+**`ab_frame` columns.** One row per variant, aggregated over personas: `unit` = `<test_id>|<variant>` (`ab|A`
+with the default test id), `item` and `group` = test id, `segment` = `all`; per-persona answers stay in
+`res["answers"]`. `pred_score`, `pred_share`, `pred_win` are the persona arm. `pred_no_persona` and
+`pred_persona_swap` are persona-control arms, not competing methods: leave them out of `evaluate(...,
+methods=[...])` or pass them as `unlabeled_baselines=["no_persona", "persona_swap"]`.
+
+**`ab_many` vote accounting.** A reply without JSON counts in `usage.unparsed_calls`; each (reader, test) pair
+without a vote counts in `usage.missing` (`usage.refused` when the call stayed refused). A call with no vote at
+all raises a `RuntimeWarning` and is listed in `df.attrs["warnings"]`; its tests get `p_a = 0.5`, `n_votes = 0`.
+`schema_responder` answers the default `ab_many` prompt (one vote per reader and test).
+
+```python
+from simengine.sim.ab import ab_lift_frame
+
+res = sim.ab_test(panel, {"control": "Current banner", "C1": "Free delivery tonight", "C2": "15% off"},
+                  llm=llm, reference="control")
+ab_lift_frame(res)                          # variant, abs, abs_low, abs_high, rel, ..., prob_better, p
+res["pairwise_win_prob"]["C1"]["control"]   # P(C1 scores above control)
 ```
 
 ## Open-ended interview (`interview.py`)
