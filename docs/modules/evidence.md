@@ -266,9 +266,9 @@ because it is part of kanit. The research module's own lock and loop are separat
   your repository), and the gzip copy is the full prediction table. Keep the registry git-ignored or outside the repo,
   or seal with `store_copy=False` / `archive_dir=` (see "Options added after rehearsal D3").
 
-## Extras: spread, completion, published findings, stylized facts, coefficients (`extras.py`)
+## Extras: spread, completion, published findings, stylized facts, coefficients, say-do (`extras.py`)
 
-Five card sections for questions the baseline ladder does not answer. They are new code (not part of the kanit
+Six card sections for questions the baseline ladder does not answer. They are new code (not part of the kanit
 port), built from the ideas in the replicant `analysis/comparison.py` (PaperComparison), the edsl-test
 `benchmark/score_wtp.py` weighting, and the Bisbee and homogeneity notes of the social-simulation reading list.
 Each function returns a JSON-friendly dict with `kind`, `title`, `columns`, `rows`, `notes` and its own numbers.
@@ -324,6 +324,30 @@ open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, fact
   - *Context, unverified:* the reading list summarises Bisbee et al. ("Synthetic Replacements for Human Survey
     Data", Political Analysis) as 48 % of coefficients differing from ANES and 32 % flipping sign, with compressed
     variance. These figures come from an AI-assembled note; check the paper before citing them.
+
+- **`extras.say_do(frame, say_col, do_col, preds=None, *, cluster="person", on="level", B=1000, seed=0,
+  alpha=0.05)`**: two anchors per person, what they *said* (stated answer, intention) and what they *did*
+  (observed behaviour). For each prediction column (`"llm"` → `pred_llm`; None = every `pred_*`) it gives the
+  distance of the panel mean to each anchor mean, the person-level MAE to each anchor, and the paired difference
+  `say − do` (negative = closer to say) for both, with a percentile CI from a cluster bootstrap over `cluster`
+  (rows of one person move together; no such column → rows, noted). The verdict reads the CI of the `on`
+  difference: *closer to what people say* / *closer to what people do* / *undecided*. An anchor row gives
+  mean do − mean say with its CI; if that CI covers 0 the anchors are not apart and every verdict is undecided.
+  Each prediction carries a `card_line` for the evidence card. Missing values are dropped per prediction and
+  counted. Gap G2 #2 (rehearsal: the person bootstrap and the "which anchor" scene were hand-written).
+  *Export:* import from `simengine.evidence.extras` for now; the package-level `ev.say_do` lands with the
+  `evidence/__init__` change, and the main card does not print the line yet.
+
+  ```python
+  from simengine.evidence import extras
+  sd = extras.say_do(frame, "said", "did", preds=["llm", "persistence"], cluster="person")
+  print(extras.section_markdown(sd)); [r["card_line"] for r in sd["predictions"]]
+  ```
+
+Tests: `tests/test_evidence_say_do.py` (7 tests, synthetic, < 1 s): a prediction equal to `say` plus noise reads
+closer to say, `do` plus noise closer to do, the midpoint undecided; exact point values; anchors not apart →
+undecided; person-cluster CI wider than the row CI when errors are tied within person; Turkish `tahmin_`
+alias, missing rows, no cluster column, errors and rendering.
 
 Tests: `tests/test_evidence_extras.py` (21 tests, synthetic data, < 1 s): variance ratio 1 on identical data and
 0.5 on halved spread (point and CI), unpaired input, missing and degenerate items, Turkish aliases; completion
