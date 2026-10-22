@@ -111,6 +111,22 @@ class TestDistributionPersons(unittest.TestCase):
                                            metric=lambda t, p: float(np.dot(t, p)))
         self.assertTrue(np.isfinite(r2["arms"]["good"]["point"]))
 
+    def test_numeric_option_order_and_two_part_keys(self):
+        """Numeric answers sort numerically (1, 2, 10), so w1 sees the real scale; alphabetical labels warn under
+        w1; (segment, item) keys work with one scheme."""
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"unit": range(200), "age": rng.choice(["y", "o"], 200), "q": rng.choice([1, 2, 10], 200)})
+        far = {(g, "q"): [0, 0, 1] for g in ("y", "o")}               # all mass on 10
+        near = {(g, "q"): [0, 1, 0] for g in ("y", "o")}              # all mass on 2
+        r = evaluate_distribution_persons(df, ["age"], ["q"], {"far": far, "near": near}, B=20, metric="w1")
+        explicit = evaluate_distribution_persons(df, ["age"], ["q"], {"far": far, "near": near}, B=20, metric="w1",
+                                                 options={"q": [1, 2, 10]})
+        for a in ("far", "near"):
+            self.assertAlmostEqual(r["arms"][a]["point"], explicit["arms"][a]["point"])
+        lab = _people(P=60)
+        with self.assertWarns(UserWarning):
+            evaluate_distribution_persons(lab, ["age"], ["q1"], {"good": GOOD}, B=10, metric="w1")
+
     def test_errors(self):
         df = _people(P=50)
         with self.assertRaises(ValueError):

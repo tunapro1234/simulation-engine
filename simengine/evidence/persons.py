@@ -89,7 +89,14 @@ def _fixed_table(spec, arm: str, schemes: list[str]) -> dict:
             raise ValueError(f"evaluate_distribution_persons: arm {arm!r}: several schemes, add a 'scheme' column")
         sc = spec["scheme"] if "scheme" in spec.columns else [schemes[0]] * len(spec)
         return {(str(s), str(g), str(i)): v for s, g, i, v in zip(sc, spec["segment"], spec["item"], spec[col])}
-    return {(str(k[0]), str(k[1]), str(k[2])): v for k, v in spec.items()}
+    out = {}
+    for k, v in spec.items():
+        if len(k) == 2 and len(schemes) == 1:                         # (segment, item) with a single scheme
+            k = (schemes[0], *k)
+        if len(k) != 3:
+            raise ValueError(f"evaluate_distribution_persons: arm {arm!r}: key {k!r}, use (scheme, segment, item)")
+        out[(str(k[0]), str(k[1]), str(k[2]))] = v
+    return out
 
 
 def _q(x: np.ndarray, alpha: float) -> tuple[float, float]:
@@ -118,8 +125,10 @@ def evaluate_distribution_persons(person_frame: pd.DataFrame, segment_cols: Sequ
     person_frame: one row per person (rows sharing ``id_col`` are resampled together; None or a missing column ->
     each row is a person). segment_cols: segment columns (one per scheme), or {scheme name: column}. items: answer
     columns (option labels; NaN = no answer). pred_cols: {arm: fixed cell table or {item: person-level column}}.
-    metric: "1-tvd" (default), "tvd", "1-w1", "w1", or a callable (truth (k,), pred (k,)) -> float. options:
-    {item: ordered options} (default sorted observed answers; fixed vectors must follow this order).
+    metric: "1-tvd" (default), "tvd", "1-w1", "w1", or a callable (truth (k,), pred (k,)) -> float, read as
+    higher-is-better. options: {item: ordered options} (default the observed answers, numeric order when they are
+    numbers, else alphabetical, which "w1" warns about; fixed vectors must follow this order). Fixed dict keys are
+    (scheme, segment, item), or (segment, item) with one scheme.
     min_n: cells with fewer answering people in the full sample are dropped. pairs: (a, b) differences a - b
     (default every pair in arm order).
 
@@ -152,10 +161,21 @@ def evaluate_distribution_persons(person_frame: pd.DataFrame, segment_cols: Sequ
     else:
         codes, uniq = np.arange(len(df)), np.arange(len(df))
     P, n_cl = len(df), len(uniq)
-    opts = {}
+    opts, alpha_order = {}, []
     for i in items:
         given = (options or {}).get(i)
-        opts[i] = list(given) if given is not None else sorted(df[i].dropna().unique().tolist(), key=str)
+        seen = df[i].dropna().unique().tolist()
+        if given is not None:
+            opts[i] = list(given)
+        elif seen and all(isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool)
+                          for v in seen):
+            opts[i] = sorted(seen)                                    # numeric answers: numeric order (1, 2, 10)
+        else:
+            opts[i] = sorted(seen, key=str)
+            alpha_order.append(i)
+    if alpha_order and name in ("1-w1", "w1"):
+        warnings.warn(f"evaluate_distribution_persons: metric {name!r} uses option order, items {alpha_order} have "
+                      "label answers sorted alphabetically; pass options={item: [ordered labels]}", stacklevel=2)
 
     # truth one-hot (P, k) per item; segment membership (P, S) per scheme
     onehot = {}
@@ -210,28 +230,40 @@ def evaluate_distribution_persons(person_frame: pd.DataFrame, segment_cols: Sequ
             if (s, g, i) not in tab:
                 raise ValueError(f"evaluate_distribution_persons: arm {a!r} has no prediction for cell {(s, g, i)}")
             fixed_vec[(a, s, g, i)] = _vec(tab[(s, g, i)], opts[i], i)
+            if fixed_vec[(a, s, g, i)] is None:
+                raise ValueError(f"evaluate_distribution_persons: arm {a!r}: empty prediction for cell {(s, g, i)}")
+
+    # per (scheme, item) design matrices, so one replicate chunk is a few (R, P) @ (P, S*k) products
+    design = {}
+    for s, i in {(cl[0], cl[3]) for cl in cells}:
+        S = member[s][1] * answered[i][:, None]                       # (P, S) the segment's answering people
+        k = len(opts[i])
+        X = (S[:, :, None] * onehot[i][:, None, :]).reshape(P, -1)
+        pl = {}
+        for a, mats in person_level.items():
+            V, ok = mats[i]
+            pl[a] = ((S[:, :, None] * V[:, None, :]).reshape(P, -1), S * ok[:, None])
+        design[(s, i)] = (S.shape[1], k, X, pl)
+
+    def _share(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+        return np.where(den > 0, num / np.where(den > 0, den, 1), np.nan)
 
     def scores(W: np.ndarray, Wt: np.ndarray) -> np.ndarray:
         """W, Wt: (R, P) person weights for predictions / truth -> (R, n_arms, n_cells) metric values."""
-        out = np.full((W.shape[0], len(arms), len(cells)), np.nan)
+        R = W.shape[0]
+        out = np.full((R, len(arms), len(cells)), np.nan)
         cache = {}
         for c, (s, g_ix, g, i, _) in enumerate(cells):
-            key = (s, i)
-            if key not in cache:
-                S = member[s][1]
-                cnt = np.einsum("rp,ps,pk->rsk", Wt, S, onehot[i])
-                cache[key] = cnt
-            cnt = cache[key][:, g_ix, :]
-            tot = cnt.sum(axis=1, keepdims=True)
-            T = np.where(tot > 0, cnt / np.where(tot > 0, tot, 1), np.nan)
+            if (s, i) not in cache:
+                n_s, k, X, pl = design[(s, i)]
+                cnt = (Wt @ X).reshape(R, n_s, k)
+                T = _share(cnt, cnt.sum(axis=2, keepdims=True))
+                prs = {a: _share((W @ Xv).reshape(R, n_s, k), (W @ ok)[:, :, None]) for a, (Xv, ok) in pl.items()}
+                cache[(s, i)] = (T, prs)
+            T_all, prs = cache[(s, i)]
+            T = T_all[:, g_ix, :]
             for a_ix, a in enumerate(arms):
-                if a in fixed:
-                    Pr = np.broadcast_to(fixed_vec[(a, s, g, i)], T.shape)
-                else:
-                    V, ok = person_level[a][i]
-                    w = W * (member[s][1][:, g_ix] * answered[i])       # the cell's answering people
-                    num, den = w @ V, (w @ ok)[:, None]
-                    Pr = np.where(den > 0, num / np.where(den > 0, den, 1), np.nan)
+                Pr = np.broadcast_to(fixed_vec[(a, s, g, i)], T.shape) if a in fixed else prs[a][:, g_ix, :]
                 out[:, a_ix, c] = fn(T, Pr)
         return out
 
