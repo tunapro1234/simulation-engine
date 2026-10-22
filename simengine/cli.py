@@ -437,9 +437,16 @@ LANG_HELP = ("mixed (default) = English card with the research Turkish labels an
              "(comma decimals); en = English card and English headline (dot decimals)")
 
 
+# evidence.api.METRIC_TO_INTERNAL keys minus "bias", spelled out so building the parser (--help, --version, loop)
+# does not import numpy/pandas; tests/test_cli_newuser.py keeps the two in sync
+PRIMARY_NAMES = ("1-mae", "1-tvd", "accuracy", "auc", "balanced_accuracy", "brier", "demeaned_r2", "ece",
+                 "effect_corr", "js", "kappa", "ks", "logloss", "macro_f1", "mae", "mode_match", "one_minus_mae",
+                 "one_minus_tvd", "pair_sign", "pearson", "r2", "rmse", "scale_error", "simbench", "spearman",
+                 "wape", "wasserstein", "winner_top1", "within_item_corr", "within_spearman", "wmape")
+
+
 def _primary_names() -> str:
-    from .evidence.api import METRIC_TO_INTERNAL
-    return ", ".join(sorted(k for k in METRIC_TO_INTERNAL if k != "bias"))
+    return ", ".join(PRIMARY_NAMES)
 
 
 def build_parser() -> argparse.ArgumentParser:

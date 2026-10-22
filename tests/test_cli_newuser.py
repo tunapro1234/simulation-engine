@@ -143,6 +143,18 @@ class TestHelp(unittest.TestCase):
         for m in ("auc", "pearson", "wmape", "wasserstein"):
             self.assertIn(m, prim)
 
+    def test_primary_names_match_evidence_metrics(self):
+        from simengine.evidence.api import METRIC_TO_INTERNAL
+        self.assertEqual(sorted(cli.PRIMARY_NAMES), sorted(k for k in METRIC_TO_INTERNAL if k != "bias"))
+
+    def test_parser_does_not_import_numpy(self):
+        # --help / --version / loop must work without the numeric stack
+        code = ("import sys; from simengine import cli; cli.build_parser(); "
+                "print(sorted(m for m in ('numpy', 'pandas', 'simengine.evidence.api') if m in sys.modules))")
+        r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "[]")
+
     def test_demo_lang_default_mixed(self):
         self.assertEqual(cli.build_parser().parse_args(["demo"]).lang, "mixed")
 
