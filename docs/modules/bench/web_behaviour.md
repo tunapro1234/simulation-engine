@@ -6,7 +6,7 @@ Human web-shopping behaviour, step by step. Two registered `BenchTask`s built fr
 | task | kind | row | truth | prediction |
 |---|---|---|---|---|
 | `webshop_next_action` | multiclass | every action after a session's first | which of 10 actions the shopper takes next | (n, 10) probabilities, columns in `ACTIONS` order |
-| `webshop_buy` | binary | actions taken on an item page | the action is `buy` (Buy Now on this product) | one probability per row |
+| `webshop_buy` | binary | actions taken on a product page | the action is `buy` (Buy Now on this product) | one probability per row |
 
 For TALP this is the "simulated site visitor" check: a visitor simulator, LLM agent or persona panel has to say what a
 real person does next on a shop page, and how likely they are to buy now, from the same information a human had
@@ -55,7 +55,7 @@ Trajectory files log pages, not clicks, so actions are derived from consecutive 
 
 | action | page move |
 |---|---|
-| `search` | start page -> results |
+| `search` | start page -> results; results / product -> results for other keywords (a new query after a browser back: the start page is not logged then) |
 | `next_page` / `prev_page` | results -> results, page number up / down |
 | `click_item` | results -> product, or product -> another product |
 | `select_option` | product -> same product with other options chosen |
@@ -65,7 +65,13 @@ Trajectory files log pages, not clicks, so actions are derived from consecutive 
 | `buy` | -> done (Buy Now; ends the episode) |
 | `other` | reloads (same page, same content) and odd moves (start page -> product) |
 
-Each session's first action (always `search` from the start page) is not a row: it would add 1,643 free hits.
+Each session's first action is not a row: it is `search` in 1,559 of the 1,643 human sessions and would add free
+hits. In the other 84 it is a start-page reload (`other`), and their first search is a row (at t = 1).
+
+Counts on the 1,643 local trajectories (2026-10-22): 16,802 page moves; the derived `other` covers 120 start-page
+reloads, 119 product-page moves with the same product and options, 40 results reloads and 6 start page -> product.
+7 of 1,642 purchases are pressed from a sub page (5) or a results page (2, browser back); they are `buy` rows on
+`webshop_next_action` but not rows of `webshop_buy`, which only keeps actions taken on a product page.
 
 ## What an LLM agent is scored on
 
@@ -113,7 +119,8 @@ of sessions with `default_rng(seed)`.
 
 ## Measured numbers
 
-One run each on the local catalogue copy on 2026-10-22 (B = 1000; cells `value [95% CI]`). Command, from the
+One run each on the local catalogue copy on 2026-10-22, re-run after the review fixes to `classify_step` and the
+UXAgent mapping (B = 1000; cells `value [95% CI]`). Command, from the
 repository root with the catalogue under `$SIMENGINE_DATA`:
 
 ```python
@@ -133,30 +140,30 @@ Data as loaded: 1,643 trajectories, 1,642 ending in `buy`; mean final reward 0.7
 
 | method | loglik | accuracy | share_tvd |
 |---|---|---|---|
-| logistic | -0.934 [-0.953, -0.916] | 0.641 [0.630, 0.652] | 0.061 [0.054, 0.068] |
-| markov2 | -1.004 [-1.022, -0.986] | 0.616 [0.606, 0.626] | 0.068 [0.058, 0.079] |
-| markov | -1.182 [-1.198, -1.166] | 0.530 [0.520, 0.540] | 0.079 [0.066, 0.091] |
-| uxagent_markov | -1.965 [-2.001, -1.926] | 0.289 [0.277, 0.301] | 0.218 [0.206, 0.233] |
-| frequency | -2.051 [-2.068, -2.035] | 0.243 [0.234, 0.252] | 0.106 [0.090, 0.125] |
+| logistic | -0.933 [-0.952, -0.915] | 0.641 [0.630, 0.651] | 0.061 [0.054, 0.068] |
+| markov2 | -1.003 [-1.021, -0.985] | 0.616 [0.606, 0.626] | 0.068 [0.058, 0.079] |
+| markov | -1.181 [-1.197, -1.164] | 0.530 [0.520, 0.540] | 0.078 [0.066, 0.091] |
+| uxagent_markov | -1.967 [-2.003, -1.928] | 0.289 [0.277, 0.301] | 0.218 [0.206, 0.233] |
+| frequency | -2.051 [-2.068, -2.035] | 0.243 [0.234, 0.252] | 0.107 [0.090, 0.125] |
 | uniform | -2.303 | 0.100 | 0.315 [0.296, 0.335] |
 
-### webshop_buy, split="batch" (train 2,485 rows, buy rate 0.258; test 4,689 rows / 998 sessions, buy rate 0.212)
+### webshop_buy, split="batch" (train 2,485 rows, buy rate 0.258; test 4,689 rows / 997 sessions, buy rate 0.212)
 
 | method | auc | logloss | brier |
 |---|---|---|---|
-| logistic | 0.808 [0.793, 0.824] | 0.414 [0.397, 0.432] | 0.132 [0.126, 0.139] |
+| logistic | 0.808 [0.793, 0.823] | 0.413 [0.397, 0.432] | 0.132 [0.126, 0.139] |
 | markov | 0.719 [0.704, 0.735] | 0.465 [0.451, 0.481] | 0.150 [0.144, 0.157] |
-| uxagent_markov | 0.620 [0.598, 0.641] | 0.524 [0.499, 0.552] | 0.165 [0.156, 0.175] |
+| uxagent_markov | 0.620 [0.598, 0.641] | 0.525 [0.499, 0.552] | 0.165 [0.156, 0.175] |
 | constant | 0.500 | 0.522 [0.510, 0.537] | 0.169 [0.164, 0.176] |
 
 ### split="random", seed=0 (test 493 sessions)
 
 | method | next: loglik | next: accuracy | next: share_tvd | buy: auc | buy: logloss |
 |---|---|---|---|---|---|
-| logistic | -0.968 [-1.013, -0.928] | 0.613 [0.597, 0.629] | 0.024 [0.015, 0.040] | 0.799 [0.772, 0.823] | 0.435 [0.409, 0.467] |
-| markov2 | -1.025 [-1.060, -0.993] | 0.589 [0.575, 0.604] | 0.019 [0.013, 0.040] | | |
-| markov | -1.183 [-1.215, -1.154] | 0.528 [0.513, 0.544] | 0.023 [0.015, 0.047] | 0.711 [0.686, 0.734] | 0.482 [0.459, 0.507] |
-| uxagent_markov | -2.026 [-2.087, -1.967] | 0.267 [0.248, 0.285] | 0.231 [0.215, 0.251] | 0.609 [0.579, 0.642] | 0.562 [0.527, 0.598] |
+| logistic | -0.969 [-1.016, -0.929] | 0.613 [0.595, 0.629] | 0.024 [0.015, 0.040] | 0.798 [0.772, 0.823] | 0.436 [0.409, 0.467] |
+| markov2 | -1.025 [-1.060, -0.994] | 0.589 [0.575, 0.604] | 0.019 [0.013, 0.039] | | |
+| markov | -1.182 [-1.215, -1.154] | 0.528 [0.513, 0.544] | 0.022 [0.014, 0.047] | 0.711 [0.686, 0.734] | 0.482 [0.459, 0.507] |
+| uxagent_markov | -2.027 [-2.087, -1.968] | 0.267 [0.248, 0.285] | 0.230 [0.215, 0.251] | 0.609 [0.579, 0.642] | 0.562 [0.527, 0.598] |
 | frequency / constant | -2.082 [-2.126, -2.043] | 0.228 [0.213, 0.241] | 0.035 [0.020, 0.072] | 0.500 | 0.539 [0.518, 0.561] |
 | uniform | -2.303 | 0.100 | 0.271 [0.249, 0.306] | | |
 
@@ -167,16 +174,16 @@ Data as loaded: 1,643 trajectories, 1,642 ending in `buy`; mean final reward 0.7
 | per session / share of actions | human train | human test | UXAgent |
 |---|---|---|---|
 | sessions | 645 | 998 | 60 |
-| actions | 9.58 | 10.64 | 12.58 |
-| searches | 1.50 | 1.42 | 2.08 |
+| actions | 9.58 | 10.64 | 12.62 |
+| searches | 1.52 | 1.42 | 2.02 |
 | products opened | 1.90 | 2.35 | 2.62 |
 | detail tabs | 0.63 | 0.90 | 1.92 |
 | option clicks | 1.25 | 1.42 | 2.75 |
 | bought | 1.000 | 0.999 | 0.867 |
-| share search / click_item / select_option | 0.157 / 0.198 / 0.131 | 0.133 / 0.221 / 0.133 | 0.166 / 0.208 / 0.219 |
-| share view_detail / buy | 0.066 / 0.104 | 0.084 / 0.094 | 0.152 / 0.146 |
-| share next_page / prev_page | 0.093 / 0.034 | 0.055 / 0.026 | 0.009 / 0.001 |
-| share back / back_to_search / other | 0.141 / 0.053 / 0.023 | 0.200 / 0.040 / 0.014 | 0.041 / 0.000 / 0.058 |
+| share search / click_item / select_option | 0.158 / 0.198 / 0.131 | 0.133 / 0.221 / 0.133 | 0.160 / 0.207 / 0.218 |
+| share view_detail / buy | 0.066 / 0.104 | 0.084 / 0.094 | 0.152 / 0.145 |
+| share next_page / prev_page | 0.093 / 0.033 | 0.055 / 0.026 | 0.009 / 0.001 |
+| share back / back_to_search / other | 0.141 / 0.053 / 0.023 | 0.200 / 0.040 / 0.014 | 0.041 / 0.000 / 0.066 |
 
 What the numbers say: the human's own last two clicks carry most of the signal (`markov2` takes loglik from -2.05 to
 -1.00); state counts add a little more (`logistic` -0.93). A chain learnt from LLM shopping agents scores barely above
@@ -199,8 +206,9 @@ human action mix to be competitive on that metric.
 - UXAgent: Lu et al. (2025), "UXAgent: An LLM Agent-Based Usability Testing Framework for Web Design", CHI 2025 LBW,
   arXiv:2502.12561; HF dataset NEU-HAI/UXAgent, MIT (dataset card). The 60 rows are LLM agents with generated
   personas, not people; their site has a cart, filters and sorting that WebShop lacks. Mapping (`map_uxagent_action`):
-  `add_to_cart` -> buy, cart / checkout / filter / sort / navigate -> other, browser back -> back, typing a query and
-  pressing the search button in the same step -> one search.
+  `add_to_cart` -> buy, cart / checkout / filter / sort / navigate -> other, typing into checkout, payment or
+  quantity fields -> other, browser back -> back, typing a query and pressing the search button in the same step ->
+  one search.
 - Literature numbers (not measured here), Yao et al. 2022: human experts score 82.1 and succeed 59.6% on the 500 test
   instructions (Table 2, section 5.2); the 8 workers in the human evaluation average 75.5 and 50.0% (appendix A.6);
   IL+RL agent 62.4 / 28.7%. Human experts visit 11.3 states, check 1.9 items and search 1.4 times per trajectory on
@@ -214,9 +222,14 @@ human action mix to be competitive on that metric.
 - Actions are inferred from page moves. A reload and an option click that changes nothing look alike (`other`);
   `back` from a product page cannot be told apart from a browser back. Option clicks that keep the same option set
   are not visible.
-- Sessions by the same worker are not clustered: the trajectory files carry no worker id (the MTurk batch CSVs do for
-  some batches; they are not read). With a pool of 13 trained workers described in the paper, the session bootstrap CIs are too narrow for
-  claims about new people.
+- Sessions by the same worker are not clustered: the trajectory files carry no worker id, so the task bootstraps over
+  sessions. The four MTurk batch CSVs next to the trajectories (`wa-human-traj_11..14.csv`) do carry one for 497 of
+  the 998 test sessions (batches 20220513_1 to _4); the task does not read them. A one-off check on those 497
+  (2026-10-22, B = 1000, worker ids turned into integer codes in memory, nothing kept): 8 workers, one of them behind
+  43% of the sessions; `logistic` loglik -0.944 with session CI [-0.973, -0.916] vs worker CI [-1.032, -0.872];
+  `webshop_buy` `logistic` AUC 0.788, session CI [0.762, 0.813] vs worker CI [0.674, 0.841]. Worker-level intervals
+  are about three times wider (and a percentile bootstrap over 8 clusters is itself rough). Read the session CIs as
+  "these sessions", not "new people"; the paper describes a pool of 13 trained workers.
 - The batch split puts a scoring fix and a faster server between train and test; shares move (`back` 0.14 -> 0.20,
   `next_page` 0.09 -> 0.06), which is part of what the task measures but also makes `frequency` look worse than on a
   random split.
