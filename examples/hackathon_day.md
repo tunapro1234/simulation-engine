@@ -116,6 +116,49 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
 
 Skip discussion rounds and agent societies for accuracy: neither moved the result measurably.
 
+## 4b. Trap check before you seal (10 min)
+
+Every item below cost a rehearsal team time or a wrong claim in the two blind rehearsals (22 Oct). `tr`/`te` are the
+train and test inputs, `FEATS` the columns your model uses, `G` the group column (country, store, wave).
+
+1. **Post-response columns.** Columns asked after the stimulus (trust, identity, follow-ups) make CV look great and
+   are missing in test. `sorted(set(FEATS) - set(te.columns))` must be `[]`; derive `FEATS` from `te.columns` and push
+   train and test through the same prep function.
+2. **CI on the wrong unit.** If test is new groups, split and bootstrap by group, not by person:
+   `se.methods.oof_predict(model, tr, features=FEATS, target="y", group=G)` and `evaluate(..., group=G)` or
+   `aggregate_by=G`. Person-clustered CIs are too narrow for a "generalises to new countries" claim.
+3. **Coded non-answers.** Codes like "does not use social media" (`Share == 2`) are not 0. Check
+   `tr[col].value_counts(dropna=False)` against the codebook and filter (`tr[col].isin([0, 1])`) before fitting.
+4. **One dominant group.** If one group is ~20 % of rows, a GroupKFold fold is mostly that group and the pooled
+   metric is mostly that group. Print `tr[G].value_counts(normalize=True).head(3)`, report the group-equal-weighted
+   metric (`tr.assign(p=oof).groupby(G).apply(lambda d: d.y.corr(d.p, method="spearman")).mean()`) next to the pooled
+   one, and say when the dominant group is absent from test.
+5. **Per-person LLM calls.** 17k calls eat a 2-hour window and the budget, and raw personas were at chance in both
+   rehearsals (Spearman 0.025 and −0.073). Measure on ~500-1,000 training people first; if there is no signal, use the
+   LLM as a group-level prior (`GroupTransfer(group_features=prior_df)`, one call per group × a few framings) instead.
+6. **Relative scales.** Items asked "compared with others in your country" (SES ladder, local income bands) are not
+   comparable across groups. Use within-group ranks (`d[c + "_r"] = d.groupby(G)[c].rank(pct=True)`); if a group mean
+   of such a column enters a group-level model, write the limitation on the card.
+7. **Target leakage into the LLM prior.** Never ask the LLM for the target itself (or a near-synonym) as a "prior
+   feature". `grep` the prior prompts for the target's name; if a close indicator stays, register it as its own arm
+   with a memorisation probe (`se.evidence.ezber.correlation_audit`).
+8. **"We beat it" without a paired CI.** Every "beats" line on the card needs ours − baseline with its CI over the
+   right unit; with 20 groups a Spearman difference is very wide (D2: [−0.155, +0.687]). If the CI contains 0, the
+   line goes under "inconclusive". Name the baseline the badge is against, and seal that baseline's test column too.
+9. **Haiku empty replies and soft refusals.** With small `max_tokens`, Haiku 5.5 thinking can use the whole budget
+   (`EmptyResponseError`); pass `thinking="off"` or `max_tokens >= 1024`. Persona panels can get "I can't invent
+   answers for people who don't exist"; `survey` re-asks once and reports `refused` separately. Report the refusal
+   rate: missing answers are not random.
+10. **Background jobs.** Save the PID when you start a long job (`cmd > log/x.log 2>&1 & echo $! > log/x.pid`) and
+    wait on `kill -0 "$(cat log/x.pid)"`, not `pgrep -f` (it matches your own shell). Never pipe a long job into
+    `| tail` (the log and the exit code are lost). Before you submit, stop your own leftover PIDs.
+
+Two rehearsal facts to calibrate expectations: the team with the plain kit took 63 min, the simengine-only team
+37 min; the kit team's CV estimate matched the test (0.308 → 0.306), the simengine team's was optimistic
+(0.311 → 0.283, inside the card's CI). The optimism is consistent with trap 4 (USA was ~20 % of the pooled CV rows and
+absent from test), but that was not proven. Both teams beat the demographic GBM baseline at person level
+(+0.066 [0.026, 0.101] and +0.042 [0.006, 0.084]); neither did at country level or on sharing.
+
 ## 5. Evidence card (15 min)
 
 ```bash
