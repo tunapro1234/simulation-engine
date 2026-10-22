@@ -12,15 +12,17 @@
 had to be built by hand with `llm.map` (G6 rehearsal #3). This runner uses the same pieces as `survey`: the batched
 panel prompt (`build_prompts` / `ask_many`), `control_personas` / `control_plan` for the control arms (persona_swap
 may be a subsample, see result["controls"]["plan"]), the same stimulus handling (`stimulus_col=` or a per-person
-dict; the stimulus is dropped from the profile text) and the same ledger tag layout: `<tag>:<arm>`, default
-`interview:persona`, `interview:no_persona`, `interview:persona_swap` (survey's are `survey:<arm>`).
+dict; the stimulus is dropped from the profile text) and the same ledger tag layout as `survey`: `interview:<arm>`
+(`interview:persona`, `interview:no_persona`, `interview:persona_swap`), or `<tag>:interview:<arm>` with `tag=`.
 
 Per arm, every asked persona ends in exactly one bucket:
   answered  a non-blank answer (cut to max_chars; `truncated` counts the cuts)
-  refused   its batch stayed refused after the research-forecast re-ask (soft refusal or RefusalError)
+  refused   its batch stayed refused after the research-forecast re-ask (soft refusal or RefusalError), or its
+            answer reads like the model declining ("As an AI I can't answer for this person"; `looks_like_refusal`;
+            the text is kept in arm_stats[arm]["refused_answers"]; answer_refusal=False keeps it as an answer)
   error     its batch got no reply (empty reply after the larger-max_tokens re-ask, or another LLMError)
   empty     its batch replied, but this persona's answer is missing, blank or not text
-A refusal written inside the answer field ("I'd rather not say") is an answer, not a refusal: it is the persona's.
+A persona declining in its own voice ("I'd rather not say", "Bunu söylemek istemiyorum") is an answer.
 Not the same module as simengine.persona.inject.interview (interview-transcript injectors).
 """
 from __future__ import annotations
@@ -29,7 +31,7 @@ import pandas as pd
 
 from ..llm.fake import FakeLLM
 from ._stats import Emitter, to_jsonable
-from .panel import Usage, _collect, ask_many, build_prompts
+from .panel import Usage, _collect, ask_many, build_prompts, looks_like_refusal
 from .personas import as_personas, choose_lang, control_personas, control_plan, normalize_controls
 from .survey import _resolve_parallel, _stim_groups, _stimuli, _without_field
 
@@ -76,7 +78,7 @@ def _max_tokens(plan, max_chars: int) -> int:
 
 
 def _arm(llm, personas, question, lang, batch, shared, stim, mode, max_chars, usage, *, tag, llm_tag,
-         parallel, ask_kw) -> tuple[dict, dict]:
+         parallel, ask_kw, answer_refusal=True) -> tuple[dict, dict]:
     """Ask one arm -> ({pid: text}, stats). All batches (every stimulus group) go out in one `ask_many`."""
     plan = []
     for ctx, ps, inline in _stim_groups(personas, shared, stim, mode):
@@ -97,9 +99,13 @@ def _arm(llm, personas, question, lang, batch, shared, stim, mode, max_chars, us
         failed = set()
     answers, ids = {}, {"refused": [], "empty": [], "error": []}
     truncated = 0
+    declined: dict = {}                             # model-voice refusals inside the answer field
     for p in personas:
         t = _text((raw.get(p.pid) or {}).get("answer"))
-        if t is not None:
+        if t is not None and answer_refusal and looks_like_refusal(t):
+            declined[p.pid] = t[:max_chars]
+            ids["refused"].append(p.pid)
+        elif t is not None:
             if len(t) > max_chars:
                 t, truncated = t[:max_chars].rstrip(), truncated + 1
             answers[p.pid] = t
@@ -112,7 +118,8 @@ def _arm(llm, personas, question, lang, batch, shared, stim, mode, max_chars, us
     first = usage.first_calls - before[0]
     rc = usage.refused_calls - before[1]
     stats = {"n": len(personas), "answered": len(answers), **{k: len(v) for k, v in ids.items()},
-             **{f"{k}_ids": v for k, v in ids.items()}, "truncated": truncated, "calls": first,
+             **{f"{k}_ids": v for k, v in ids.items()}, "refused_in_answer": len(declined),
+             "refused_answers": declined, "truncated": truncated, "calls": first,
              "refused_calls": rc, "recovered_calls": usage.recovered_calls - before[2],
              "refusal_rate": round(rc / first, 4) if first else 0.0, "_errors": errors}
     return answers, stats
@@ -122,7 +129,8 @@ def interview(personas, question: str, *, llm, context: str | dict = "", stimulu
               stimuli: dict | None = None, arms=ARMS_DEFAULT, max_chars: int = 600, batch: int = 8,
               lang: str | None = None, stimulus_batching: str = "group", refusal_retry: bool = True,
               cache_refusals: bool = False, empty_retry: bool = True, empty_retry_kw: dict | None = None,
-              parallel: int | None = None, tag: str = "interview", on_event=None) -> dict:
+              parallel: int | None = None, tag: str | None = None, answer_refusal: bool = True,
+              on_event=None) -> dict:
     """Ask every persona one open-ended question; returns a JSON-safe dict with per-person free-text answers per
     arm and refused / empty / error counts and ids (main arm at the top level, every arm in `arm_stats`).
 
@@ -136,7 +144,9 @@ def interview(personas, question: str, *, llm, context: str | dict = "", stimulu
         as a dict context (`context` may then stay a shared text). Use one of the two. The stimulus is removed
         from the profile text in every arm (incl. the swap body).
     stimulus_batching, parallel, refusal_retry, cache_refusals, empty_retry, empty_retry_kw: as in `survey`.
-    tag: ledger tag stem; calls are tagged "<tag>:<arm>".
+    tag: a ledger-tag label, as in `survey`: calls are tagged f"{tag}:interview:{arm}" (default "interview:{arm}").
+    answer_refusal: True (default) moves an answer that reads like the model declining (`looks_like_refusal`) to
+        refused; its text stays in arm_stats[arm]["refused_answers"]. False keeps it as an answer.
     on_event: callback for {"type": "stage" | "row" | "done", "runner": "interview", ...} events.
     Raises the first LLM error when the main arm got no answer and every failure was an error."""
     if stimulus_batching not in STIMULUS_BATCHING:
@@ -177,8 +187,9 @@ def interview(personas, question: str, *, llm, context: str | dict = "", stimulu
             cp, b = control_personas(arm, ps, lang, plan[arm]["n"]), plan[arm]["batch"]
         em.stage(arm, n=len(cp), calls=plan[arm]["calls"] if arm in plan else plan["_main_calls"])
         answers[arm], stats[arm] = _arm(llm, cp, question, lang, b, shared, stim, stimulus_batching, max_chars,
-                                        usage, tag=f"interview:{arm}", llm_tag=f"{tag}:{arm}" if tag else arm,
-                                        parallel=par, ask_kw=ask_kw)
+                                        usage, tag=f"interview:{arm}",
+                                        llm_tag=f"{tag}:interview:{arm}" if tag else f"interview:{arm}",
+                                        parallel=par, ask_kw=ask_kw, answer_refusal=answer_refusal)
         if not cp and arm == "persona_swap":
             stats[arm]["skipped"] = "persona_swap needs at least 2 personas"
             warnings.append("persona_swap skipped: it needs at least 2 personas")
@@ -198,8 +209,9 @@ def interview(personas, question: str, *, llm, context: str | dict = "", stimulu
         hint = ""
         if not answers[main_arm] and isinstance(llm, FakeLLM) and llm.responder is None:
             hint = "; FakeLLM has no responder; use FakeLLM(simengine.sim.schema_responder())"
-        warnings.append(f"{missing} personas without an answer in the {main_arm} arm ({mi['refused']} refused, "
-                        f"{mi['empty']} empty, {mi['error']} error){hint}")
+        inside = f", {mi['refused_in_answer']} of them inside the answer" if mi["refused_in_answer"] else ""
+        warnings.append(f"{missing} personas without an answer in the {main_arm} arm ({mi['refused']} refused"
+                        f"{inside}, {mi['empty']} empty, {mi['error']} error){hint}")
     if mi["refused_calls"]:
         warnings.append(f"{mi['refused_calls']}/{mi['calls']} {main_arm}-arm batches refused at the first ask; "
                         f"{mi['recovered_calls']} recovered by the research-forecast re-ask" if refusal_retry else
@@ -212,7 +224,7 @@ def interview(personas, question: str, *, llm, context: str | dict = "", stimulu
            "controls": {"arms": ctrl, "plan": plan, "answers": {a: v for a, v in answers.items() if a != main_arm}},
            "arm_stats": stats, "segments": seg, "warnings": warnings, "usage": usage.as_dict(),
            **{k: mi[k] for k in ("refused", "empty", "error", "refused_ids", "empty_ids", "error_ids",
-                                 "refusal_rate", "truncated")}}
+                                 "refused_in_answer", "refusal_rate", "truncated")}}
     if stim is not None:
         out["stimuli"] = {p.pid: stim.get(p.pid) for p in ps}
     em.done(n=len(answers[main_arm]))

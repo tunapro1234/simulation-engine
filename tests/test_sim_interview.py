@@ -84,7 +84,7 @@ class TestInterview(unittest.TestCase):
         interview(panel(4), "Why?", llm=llm)
         self.assertEqual(llm.tags, ["interview:persona", "interview:no_persona", "interview:persona_swap"])
         llm = SlotLLM(lambda s, u: answer(u))
-        interview(panel(4), "Why?", llm=llm, tag="dev:interview", arms=["persona"])
+        interview(panel(4), "Why?", llm=llm, tag="dev", arms=["persona"])     # a label, as in survey
         self.assertEqual(llm.tags, ["dev:interview:persona"])
 
     def test_arm_subsets_and_aliases(self):
@@ -126,6 +126,19 @@ class TestInterview(unittest.TestCase):
         st = res["arm_stats"]["persona"]
         self.assertEqual((st["calls"], st["refused_calls"], st["recovered_calls"]), (3, 1, 0))
         self.assertTrue(any("without an answer" in w for w in res["warnings"]))
+
+    def test_model_refusal_inside_answer_is_refused(self):
+        def fn(s, u):
+            return answer(u, lambda pid: "As an AI, I can't speak for this person." if pid == "p0"
+                          else "Bunu söylemek istemiyorum." if pid == "p1" else f"answer of {pid}")
+        res = interview(panel(3), "Why?", llm=SlotLLM(fn), arms=["persona"])
+        self.assertEqual(set(res["answers"]), {"p1", "p2"})       # the persona's own "rather not say" stays
+        self.assertEqual((res["refused_ids"], res["refused_in_answer"]), (["p0"], 1))
+        self.assertIn("p0", res["arm_stats"]["persona"]["refused_answers"])
+        self.assertTrue(any("inside the answer" in w for w in res["warnings"]))
+        self.assertEqual(interview_frame(res).set_index("unit").loc["p0|persona", "status"], "refused")
+        res = interview(panel(3), "Why?", llm=SlotLLM(fn), arms=["persona"], answer_refusal=False)
+        self.assertEqual((res["n_answered"], res["refused"]), (3, 0))
 
     def test_refusal_recovered_by_reframe(self):
         def fn(s, u):
