@@ -1,5 +1,10 @@
 simengine
-Copyright (c) 2026 the simengine authors. All rights reserved (see LICENSE).
+Copyright (C) 2026 the simengine authors (github.com/tunapro1234).
+
+simengine is free software: you can redistribute it and/or modify it under the terms of the GNU Affero
+General Public License as published by the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version. It is distributed WITHOUT ANY WARRANTY; see LICENSE for the full terms.
+Code ported from the sources below keeps the notices listed for it.
 
 This product includes code and material ported from the following sources. The sources were read, not
 executed, and were rewritten onto simengine's LLM protocol; algorithm changes are listed in the module docs.
@@ -30,7 +35,7 @@ replicant (PyPI: pyreplicant 0.3.0), MIT License, same author as simengine
 
   The oTree apps bundled with replicant carry oTree's own MIT license and were not ported.
 
-edsl-test, no LICENSE file (all rights reserved by default), same owner; reused internally
+edsl-test, no LICENSE file, same owner; the owner releases the ported parts under simengine's AGPL-3.0-or-later
   Persona method zoo and agent bank (simengine/persona/methods/); BeeBench b01 game library, runner schema,
   coherence detectors (simengine/games/); who-to-punish scorecard and Ertan targets (simengine/games/wtp.py);
   who-to-punish society loop (simengine/abm/society.py); homo_silicus mixture calibration

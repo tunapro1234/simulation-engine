@@ -12,7 +12,7 @@ mixture calibration, extra evidence sections (variance ratio, completion, coeffi
 sweeps. The measured lesson: pure persona panels
 rarely beat simple baselines. The LLM helps when there is no data, when it is stacked with a learner, and when it
 serves as a prior in small tests. Every number below has a source in [docs/RESULTS.md](docs/RESULTS.md). This is
-prior work: declare it if you use it at a hackathon (it is proprietary, not open source; cite a dated commit).
+prior work: declare it if you use it at a hackathon (open source, AGPL-3.0-or-later; cite the dated `v0.1.0` release).
 
 ---
 
@@ -251,8 +251,11 @@ ve adaptörlerin `meta["source"]` alanından alındı; bağlayıcı olan her set
 
 ## Lisans
 
-Tescilli yazılım, tüm hakları saklı (`LICENSE`). Açık kaynak değil; depo özeldir. Taşınan kaynaklar ve lisansları
-(replicant MIT; edsl-test aynı sahip) `NOTICE` dosyasında; üçüncü taraf veri setleri dağıtılmaz.
+Özgür yazılım: **GNU Affero General Public License v3.0 ya da sonrası** (`AGPL-3.0-or-later`, tam metin `LICENSE`).
+Kütüphaneyi değiştirip dağıtan ya da ağ üzerinden hizmet olarak sunan herkes, değiştirdiği kaynak kodu aynı
+lisansla kullanıcılarına açmak zorundadır. Telif: the simengine authors (github.com/tunapro1234). Taşınan kaynaklar
+ve lisansları (replicant MIT, atfı korunur; edsl-test aynı sahip) `NOTICE` dosyasında; üçüncü taraf veri setleri
+dağıtılmaz ve kendi lisanslarına tabidir. BFI-2 maddeleri ticari olmayan araştırma kullanımı içindir (`NOTICE`).
 
 ## Önceden yapılmış iş beyanı
 

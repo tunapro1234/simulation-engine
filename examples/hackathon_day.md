@@ -4,14 +4,19 @@ From a brief and a CSV to an evidence card in about 1-2 hours. The numbers that 
 [docs/RESULTS.md](../docs/RESULTS.md), which also says where each one was measured; the method notes are in
 [docs/METHODS.md](../docs/METHODS.md).
 
-> **Prior work.** simengine was written before the event. If you use it at a hackathon, say so in the submission
-> and cite the pre-event state so it can be checked: "built on our simengine library, written before the event
-> (v0.1.0, commit `<hash>`, `<date>`)", taken from the last commit before the start
-> (`git log -1 --format='%h %ad' --date=short`). The library is proprietary and private, not open source: do not call
-> it "open", and if the event requires pre-existing code to be public, clear that with the organiser first. Follow
-> the event's rules on existing code. What you build on the day is the data work, the configuration, the sealed
-> predictions and the card. Check the dataset terms too (README, "Veri setleri ve lisanslar"): SimBench is
-> non-commercial, Dominick's and Pew/OpinionQA are research-only, GSS may not be redistributed.
+> **Prior work.** simengine was written before the event and is released under AGPL-3.0-or-later. If you use it at
+> a hackathon, say so in the submission and cite the pre-event state so it can be checked: "built on our
+> open-source simengine library (AGPL-3.0), published before the event: release `v0.1.0`, commit `<hash>`,
+> `<date>`". Follow the event's rules on existing code. What you build on the day is the data work, the
+> configuration, the sealed predictions and the card.
+>
+> **Keep it a dependency, not part of the submission.** Some events (TALP among them, as the owner reports from the
+> application form; the clause text is not in this repo) take a right to use, develop and commercialise what is
+> submitted. Do not copy simengine's code into the submission repo. Install it as a pinned dependency
+> (`pip install "git+https://github.com/tunapro1234/simulation-engine@v0.1.0"`) so the submission holds only the
+> work done on the day, and the library stays under its own licence. Check the dataset terms too (README,
+> "Veri setleri ve lisanslar"): SimBench is non-commercial, Dominick's and Pew/OpinionQA are research-only, GSS
+> may not be redistributed.
 
 ## 0. Before you start (5 min)
 

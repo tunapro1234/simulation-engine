@@ -7,7 +7,7 @@ name = "simengine"
 version = "0.1.0"
 description = "Population simulation with LLM personas, agent-based models and an honest evidence pipeline"
 readme = "README.md"
-license = "LicenseRef-Proprietary"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.10"
 dependencies = ["numpy", "pandas", "scikit-learn", "scipy"]
