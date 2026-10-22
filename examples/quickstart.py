@@ -24,11 +24,12 @@ out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(tempfile.mkdtemp(prefix="
 rng = np.random.default_rng(0)
 n = 100
 df = pd.DataFrame({"uid": [f"u{i:03d}" for i in range(n)], "age": rng.integers(18, 75, n),
-                   "gender": rng.choice(["female", "male"], n), "income_tier": rng.choice(["low", "middle", "high"], n),
+                   "gender": rng.choice(["female", "male"], n), "income_tier": rng.choice(["low", "middle", "affluent"], n),
                    "orders_last_year": rng.poisson(6, n)})
 df["enjoys_online"] = np.clip(np.round(1.5 + df.orders_last_year / 3 + rng.normal(0, 0.8, n)), 1, 5)
 
 # 2. Personas from data. The target goes in `forbidden`: a facet built from it raises (leakage guard).
+#    income_tier uses the TALP enum (low..affluent): a value outside it would be a facet plus a warning.
 panel = se.persona.from_table(df, id_col="uid", segment="income_tier", forbidden=["enjoys_online"])
 
 # 3. Simulated survey with the no-persona and persona-swap control arms (on by default).
