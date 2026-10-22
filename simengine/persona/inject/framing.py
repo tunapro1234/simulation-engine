@@ -24,7 +24,6 @@ guard: a prep step that copied the target into fields does not reach the prompt)
 from __future__ import annotations
 
 import json
-import math
 import random
 from typing import Any, Iterable, Sequence
 
@@ -56,11 +55,19 @@ INTRO = "Before we begin, please tell me about yourself."
 
 
 def _value(v: Any) -> str | None:
-    """Display string; None for empty / NaN (the fragment is omitted, as in Argyle et al.)."""
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return None
+    """Display string; None for empty / NaN / pandas NA / NaT (the fragment is omitted, as in Argyle et al.)."""
+    if getattr(v, "ndim", 0):      # numpy array -> list
+        v = v.tolist()
     if isinstance(v, (list, tuple, set)):
-        v = ", ".join(str(x) for x in v)
+        v = ", ".join(x for x in map(_value, v) if x is not None)
+    elif v is None:
+        return None
+    else:
+        try:
+            if v != v:             # NaN of any float type, NaT
+                return None
+        except TypeError:          # pd.NA: its truth value is ambiguous
+            return None
     s = str(v).strip()
     return s or None
 
@@ -83,7 +90,7 @@ class Framed(Injector):
     def __init__(self, placement: str | None = None, voice: str | None = None, format: str | None = None,
                  order: str = "given", keys: Sequence[str] | None = None, seed: int = 0,
                  header: str | None = None, phrases: dict[str, str] | None = None, closing: str | None = None,
-                 lead: str | None = None, header_sep: str | None = None, **params: Any):
+                 lead: str | None = None, header_sep: str | None = None):
         d = type(self).defaults
         self.placement = placement or d["placement"]
         self.voice = voice or d["voice"]
@@ -93,7 +100,7 @@ class Framed(Injector):
                                    ("format", self.fmt, FORMATS), ("order", order, ORDERS)):
             if val not in allowed:
                 raise ValueError(f"{self.name}: {knob} must be one of {allowed}, not {val!r}")
-        self.keys = list(keys) if keys else None
+        self.keys = list(dict.fromkeys(keys)) if keys else None
         self.seed = seed
         self.header = d.get("header") if header is None else header
         self.phrases = dict(phrases or d.get("phrases") or {})   # {attr: "In terms of my age, I am {value}."}
@@ -101,7 +108,7 @@ class Framed(Injector):
         self.lead = d.get("lead", "") if lead is None else lead              # text before the question itself
         self.header_sep = d.get("header_sep", "\n") if header_sep is None else header_sep
         super().__init__(placement=self.placement, voice=self.voice, format=self.fmt, order=order,
-                         keys=self.keys, seed=seed, **params)
+                         keys=self.keys, seed=seed)   # no **params: a typo (fromat=) must fail, not make a twin arm
 
     # ------------------------------------------------------------ attribute selection
     def attributes(self, person: dict, question: dict) -> list[tuple[str, str]]:
@@ -130,7 +137,7 @@ class Framed(Injector):
     # ------------------------------------------------------------ text pieces
     def sentence(self, k: str, v: str) -> str:
         if k in self.phrases:
-            return self.phrases[k].format(value=v)
+            return self.phrases[k].replace("{value}", v)    # not str.format: other braces stay literal
         poss = {"second": "Your", "third": "Their"}.get(self.voice, "My")
         return f"{poss} {_label(k)} is {v}."
 
