@@ -129,7 +129,7 @@ These are scripted responders, not an LLM. They test the plumbing and show which
   are rich.
 - Book Gini value: not checked. The book is not open access. From memory, the book's Gini series levels off near
   0.5. Treat that as unverified.
-- Secondary replication: Foguelman, Henning, Uhrmacher & Castro, arXiv:2110.08170, §3.4, with their own grid and
+- Secondary replication: Foguelman et al. 2021 (EB-DEVS), arXiv:2110.08170, §3.4, with their own grid and
   parameters (metabolism 1-2, a different max age), report a Gini that "starts around 0.22 … until it reaches a
   stable value of 0.42". Our start (0.236) matches theirs. Our plateau (0.47-0.48) is higher, which fits their remark
   that the final value depends heavily on the grid and parameters.
