@@ -126,8 +126,8 @@ ask = lambda market: (SYSTEM, f"Product: {PRODUCT}\nMarket: {market}")
 names = sorted(desc)
 try:
     replies = llm.map([ask(desc[s]) for s in names] + [ask("a typical market in this country")], max_tokens=200)
-except se.llm.BudgetExceeded as e:
-    sys.exit(f"stopped by the budget: {e}")
+except (se.llm.BudgetExceeded, se.llm.AuthError) as e:          # budget hit / no key: no further calls
+    sys.exit(f"stopped before the LLM step finished: {e}")
 
 def bass_of(r):
     j = se.sim.parse_json(r.text)
