@@ -27,6 +27,9 @@ simengine demo                 # offline check: FakeLLM, about 4 s, writes runs/
 
 No install (dependencies already in the environment): run from the repo root with
 `PYTHONPATH=. python -m simengine demo`; every `simengine ...` command below also works as `python -m simengine ...`.
+`python -I` (isolated mode) ignores `PYTHONPATH`, so that form fails with `No module named 'simengine'`: with `-I`
+use the installed package or put the repo on `sys.path` at the top of the script. For background runs use
+`python -u` or `export PYTHONUNBUFFERED=1`; redirected output is buffered and the log stays empty until exit.
 Keep the day's tables in `data/` and outputs in `runs/`: both are git-ignored, so customer data is never committed.
 
 Set the API key in the environment, never in the repo. Use `se.llm.Claude(model="claude-haiku-5-5", effort="low",
@@ -40,7 +43,16 @@ the first 401 or spend-limit error, and it does not send `temperature`, which Ha
   it lands in that item's slot).
 - **Shared spend log.** `export SIMENGINE_SPEND_LOG=<path>` and `SIMENGINE_AGENT=<name>` make every real call append
   one tab-separated line (time, agent, model, input, output, usd, tag) next to the JSONL ledger; or pass
-  `Claude(..., spend_log=..., agent=...)`. Give each step a `tag=` so the cost splits by step.
+  `Claude(..., spend_log=..., agent=...)`. Give each step a `tag=` so the cost splits by step. With your own ledger
+  the TSV settings go on the ledger instead: `Claude(..., ledger=se.llm.CostLedger(".cache/ledger.jsonl",
+  tsv_path=..., agent=...))`. Passing `spend_log=` / `agent=` / `tag_prefix=` as well raises `ValueError`.
+- **Counters.** `llm.stats` is a property (a dict; `llm.stats()` is a TypeError): `calls`, `cache_hits`, `retries`,
+  `errors`, `cost_usd` for this instance and `ledger_total_usd` for everything in its ledger.
+- **Repeats.** The cache returns the same reply for the same prompt; `complete(..., sample=k)` with k = 0, 1, ...
+  gives independent draws, each cached under its own key. Re-runs with a cleared cache differ (no `temperature`).
+- **Embedding model offline (SSR).** `SSR` loads its embedding model offline. Point `SIMENGINE_HF_CACHE` at the
+  local Hugging Face cache (or pass `SSR(cache_folder=...)`); without it a model that is not in the default cache
+  fails to load (OSError).
 - **Run prefix on the tag.** `export SIMENGINE_SPEND_TAG_PREFIX=prova-d3/` (or `Claude(..., tag_prefix="prova-d3/")`)
   puts the prefix in front of every TSV tag. The backend's own `tag=` and the call's tag are joined:
   `Claude(tag="L1", tag_prefix="d3/")` + `complete(..., tag="prior")` logs `d3/L1:prior`; `survey(..., tag="dev")`
@@ -72,9 +84,20 @@ from simengine.research import Prereg, lock_prereg
 Prereg(title="...", question="...", data="...", split="time: train <= 2024-06, test after",
        metrics="AUC (higher better)", baselines=["constant", "persistence", "logistic"],
        expected="stack beats logistic by >= 0.01 AUC", falsification="CI of stack - logistic includes 0",
-       stop_rule="3 configs on dev, then one test run").write("prereg.md")
-lock_prereg("prereg.md")        # SHA-256 + timestamp in prereg.md.lock.json
+       stop_rule="3 configs on dev, then one test run", notes="ours: stack").write(".onkayit/prereg.md")
+lock_prereg(".onkayit/prereg.md")   # SHA-256 + timestamp in .onkayit/prereg.md.lock.json
 ```
+
+- **Put it in the seal registry.** Write the prereg inside the directory you will pass as `prereg=` / `--prereg` in
+  step 5 (`.onkayit/` by default). The card's selection-bias check reads the `.md` / `.txt` / `.json` / `.yaml`
+  files there that are older than the latest seal and looks for the `ours` arm's name. A prereg kept elsewhere (a
+  hand-written plan committed to git) is not seen, and the card says "ours not found in the pre-registration".
+  `.onkayit/` is git-ignored; to keep the plan in git too, `git add -f .onkayit/prereg.md .onkayit/prereg.md.lock.json`.
+- **Mark the arm: `ours: <arm>`.** When the text also names the baselines, the check needs `ours: stack` (or
+  `primary: stack`) to know which arm is yours; without it the row reads "several method names".
+- **Register against the strongest single baseline**, not a union or blend of baselines. In one rehearsal the
+  registered T1+T2 union came out weaker than T2 alone, so the registered claim was against a weak baseline while
+  the badge used T2.
 
 Hold out the test split (preferably by time or by person) and do not open it until the end.
 
@@ -113,6 +136,13 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
   "test" --registry runs/.onkayit --no-copy`. `evaluate(prereg=)` and `verify_chain` need only the chain.
 - **With a learner:** stack the LLM output with the learner (`ABStack`, `TwinStack`, `DevStack`). Also build the
   stack without the LLM column. On Twin that fair LLM-free stack was what turned a claimed +0.071 into +0.006.
+  `st = methods.DevStack("binary").fit([learner_dev, llm_dev], y_dev)` then `st.predict([learner_test, llm_test])`
+  (cross-fitted dev predictions in `st.dev_pred_`); one probability column is calibrated with
+  `methods.BinaryCalibrator().fit(p_dev, y_dev).predict(p_test)` (Platt below 1,000 dev rows, isotonic from 1,000).
+- **Distributions with a known population:** `methods.ShrunkDeviation(distribution=True).fit(base=pop, llm=llm_seg,
+  y=true_seg, ref=llm_pop)` on training segments keeps the level from the population distribution and adds the LLM's
+  segment deviation (`llm_seg − ref`) times an alpha picked on those segments (0 = ignore the LLM); rows are
+  renormalised. `predict(base=pop, llm=llm_new, ref=llm_pop)` for the test segments.
 - **As a prior in a small test:** `EarlyTestBayes` after `calibrate_prior` on past tests. The gain disappears at
   800+ impressions per arm.
 - **Personas:** `persona.from_table(df, id_col=..., segment=..., forbidden=[target])`, then `sim.survey` /
@@ -120,6 +150,10 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
   arm, the persona is not doing the work. Put a behaviour anchor (last period's value) in the persona when you have
   one: OE went from 0.618 to 0.860 with it, which is about persistence (0.848).
   - `from_table` stops on empty or duplicated ids with the counts; `id_col=None` uses row numbers.
+  - **Free-text history** (reviews, complaints, support tickets): put each text as an event with `t` and `text` in
+    `person["history"]` and render it with the `log_raw` injector (`simengine.persona.inject.from_logs`):
+    `import simengine.persona.inject as pi; pi.get_injector("log_raw", n=5)(person, question)`. Events at or after
+    the question's `cutoff` are hidden.
   - **Soft refusals.** Haiku refused 59 of 150 survey batches in plain text in D2. `survey` / `ask_panel` now detect
     a refusal (`se.looks_like_refusal`), keep it out of the cache and re-ask once with a research-forecast framing.
     Read `res["refused"]`, `res["unparsed"]` (counts, ints) and `res["refusal_rate"]` and put them on the card: the
@@ -174,7 +208,8 @@ train and test inputs, `FEATS` the columns your model uses, `G` the group column
    rate: missing answers are not random.
 10. **Background jobs.** Save the PID when you start a long job (`cmd > log/x.log 2>&1 & echo $! > log/x.pid`) and
     wait on `kill -0 "$(cat log/x.pid)"`, not `pgrep -f` (it matches your own shell). Never pipe a long job into
-    `| tail` (the log and the exit code are lost). Before you submit, stop your own leftover PIDs.
+    `| tail` (the log and the exit code are lost). Start it with `python -u` (or `PYTHONUNBUFFERED=1`), or the log
+    stays empty until the job exits. Before you submit, stop your own leftover PIDs.
 11. **Features rebuilt inside folds** (member stats, SVD taste vectors computed without the fold's items). The OOF
     split must be the same folds: `oof_predict(model, dev, ..., group=item, folds=res.folds)`; its own GroupKFold
     leaves items that shared the SVD basis in training (D3: dev about 0.03 optimistic, ridge proxy 0.865 → 0.835,
@@ -210,6 +245,16 @@ the one-line member-mean baseline 0.856), and its registered claim "the LLM adds
 yourself, and write "passed on dev", not "passed".
 
 ## 5. Evidence card (15 min)
+
+The frame has one row per scored unit: `truth`, one `pred_<arm>` per arm and a `split` column. A test-only frame
+still gets `split="test"`; without the column the card's split check is skipped ("girdide 'bolum' yok"). With
+`train` rows (truth and the same `pred_` columns) next to the `test` rows, metrics use the test rows only, the
+automatic ladder fits on the train rows, and the card checks group overlap (with `group`) and time order (with `time`).
+
+```python
+frame = pd.DataFrame({"truth": te.y, "pred_stack": p_stack, "pred_logistic": p_logit, "split": "test"})
+frame.to_csv("data/frame.csv", index=False)
+```
 
 ```bash
 simengine evaluate data/frame.csv --ours stack --raw llm --task binary --primary auc \
