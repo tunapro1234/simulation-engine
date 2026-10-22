@@ -808,3 +808,51 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
   the same for the truth (pooled; < 1 = groups pulled together). E[position], the within-cell sd ratio, the
   distribution bias and the segment-gap correlation use the numeric option positions above when the frame has
   them (rescaled to 0-1), else equal spacing. The collapse audit row prints both with CIs.
+
+## A/B pairs: pair table -> variant frame, A/B memorization probe (G0b #3 #7, G3 #2 #6)
+
+`evaluate(task="ab")` scores variant rows (`item` = test, `truth` = each variant's outcome) and builds the pairs
+itself. The bench upworthy task, `methods.LLMDirectAB` and `ABStack` give one row per pair instead (`y` = A won,
+prediction = P(A wins)). **`ab_pairs_frame(pairs, pred_cols, y="y", group="test_id", *, a_wins=None, keep=(),
+drop_ties=True)`** (`ab.py`) writes each pair as two rows: A gets truth y and pred p, B gets 1 - y and 1 - p.
+`pred_cols` is a column, a list (`p_llm` -> arm `llm`) or `{arm: column or array}`. A labelled truth column needs
+`a_wins=` (`y="winner", a_wins="a"`; "tie" / "draw" count as ties). Ties carry no pair-sign signal and are dropped
+unless `drop_ties=False`. The item is the *pair*, not the test: Upworthy tests hold several pairs, and one item per
+test would make `pair_sign` compare A of one pair with B of another. The test goes to `group`, the bootstrap
+cluster, so all pairs of a test move together. `arm` (A | B) feeds the arm-majority baseline. `pair_sign` then
+equals the direct pair accuracy (p = 0.5 counts as a half). With `group=None` every pair is its own cluster.
+```python
+f = ev.ab_pairs_frame(test_pairs, {"llm": "p_llm", "stack": "p_stack", "tfidf": "p_tfidf"}, group="test_id")
+rep = ev.evaluate(f, task="ab", ours="stack", raw="llm")      # primary pair_sign; AUC/Brier stay on the pair table
+```
+Until the aggregate-metric cluster-bootstrap fix lands (G3 #3: a test drawn twice merges its rows into one item
+and cross-copy pairs are counted), the CI with `group=` set can be too wide; the point value is exact. With
+`group=None` the CI is the binomial one.
+
+**`ab_memorization(llm, pairs, named_context, neutral_context, *, n=100, paraphrase=False, margin=0.0, seed=0,
+B=1000, batch=15, reverse=True, max_calls=500)`** asks the same n real pairs `LLMDirectAB`-style twice: once with
+the study and source named in the context (for example "Upworthy Research Archive headline tests"), once neutral
+("A/B test of two headlines"). Taste for good headlines helps both arms equally. If naming the source raises pair
+accuracy, the model may remember the published winners. `deger` = accuracy(named) - accuracy(neutral), with a
+paired cluster bootstrap over tests. `durum` is "uyari" when the lower bound is above `margin` (the threshold,
+returned as `esik`), else "tamam"; it is "atlandi" below 5 pairs. The dict also has `accuracy_named` /
+`accuracy_neutral` with CIs, coverage, `n_pairs`, `n_tests` and `calls`, and it is what `evaluate(memorization=...)`
+reads: the card's memorization row shows the named - neutral gap, its CI and the threshold, and "uyari" adds the
+caveat "gain may come from recognition/memorization" to the badge reason (the "not proven: leakage/memorization"
+flag stays while the split or contamination audit is skipped). `paraphrase=True` (the LLM rewrites every text, batched) or a `str -> str`
+callable adds a third arm: the named context on rewritten texts. Memorised wording is lost there, so
+accuracy(named) - accuracy(named, paraphrased) is a second gap (`paraphrase_gap`, CI); its lower bound above
+`margin` also gives "uyari". The planned call count is checked against `max_calls` before any call (cached replies
+count too).
+
+**`ab_memorization_items(pairs, n=100, seed=0)`** builds items for `memorization_audit` (the completion gap): each
+real pair ("which text won? reply with it", expected = the real winner) plus a control pair whose two texts come
+from two different tests, so no one can know a winner (expected = a coin flip). A model with taste also beats the
+controls on real pairs, so read this gap next to `ab_memorization`, which cancels taste. Text columns may be
+`text_a/b`, `headline_a/b` or `metin_a/b`.
+```python
+mem = ev.ab_memorization(llm, test_pairs, "Upworthy Research Archive (2013-2015) headline tests",
+                         "A/B test of two headlines shown to real users", n=100)
+rep = ev.evaluate(f, task="ab", ours="stack", raw="llm", memorization=mem)
+```
+Not yet run on real data. `evaluate(task="ab_pair")` (taking the pair table directly) is still to come.
