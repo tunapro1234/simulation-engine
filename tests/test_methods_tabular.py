@@ -97,6 +97,19 @@ class TabularGBDTTest(unittest.TestCase):
             self.skipTest("lightgbm not installed")
         self._check("lightgbm")
 
+    def test_lightgbm_splits_categories_on_small_tables(self):
+        # LightGBM's own min_data_per_group=100 never split a 6-level category in 200 rows
+        try:
+            import lightgbm  # noqa: F401
+        except ImportError:
+            self.skipTest("lightgbm not installed")
+        rs = np.random.default_rng(0)
+        c = rs.integers(0, 6, 200)
+        df = pd.DataFrame({"c": [f"k{i}" for i in c], "x": rs.normal(0, 1, 200)})
+        y = rs.normal(0, 1.5, 6)[c] + np.sin(2 * df.x) + rs.normal(0, 1, 200)
+        m = TabularGBDT(cat=["c"], num=["x"], backend="lightgbm").fit(df, y)
+        self.assertIn("c", set(m.model_.booster_.trees_to_dataframe().split_feature))
+
 
 class RandomEffectsTest(unittest.TestCase):
     def test_dl_matches_hand_calculation(self):

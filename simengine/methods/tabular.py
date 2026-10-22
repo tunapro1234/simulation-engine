@@ -153,8 +153,9 @@ class TabularGBDT:
     ``backend``: ``"auto"`` (LightGBM when importable, else sklearn ``HistGradientBoostingRegressor`` with a
     ``RuntimeWarning``), ``"lightgbm"`` or ``"sklearn"``. Categoricals use native categorical splits in both
     (training categories; unseen / NaN -> missing). Defaults are for small tables (hundreds to a few thousand rows):
-    300 trees, lr 0.05, 15 leaves, min 20 rows per leaf; ``params`` override them (LightGBM names for LightGBM,
-    sklearn names for the fallback). ``backend_`` after fit says which ran.
+    300 trees, lr 0.05, 15 leaves, min 20 rows per leaf (LightGBM also 20 rows per categorical group and
+    ``cat_smooth=1``; with its own 100 / 10 a 6-level category in a 200-row table got no split); ``params`` override
+    them (LightGBM names for LightGBM, sklearn names for the fallback). ``backend_`` after fit says which ran.
     """
 
     def __init__(self, cat: Sequence[str] | None = None, num: Sequence[str] | None = None, *,
@@ -191,9 +192,11 @@ class TabularGBDT:
         F = self._frame(X)
         if b == "lightgbm":
             import lightgbm as lgb
+            # LightGBM's categorical defaults (min_data_per_group=100, cat_smooth=10) block categorical splits on
+            # small tables: 200 rows, 6 levels, group-held-out MAE 1.47 vs 0.93 with these (3 seeds; ridge 0.97)
             prm = dict(n_estimators=300, learning_rate=0.05, num_leaves=15, min_child_samples=20, subsample=0.8,
-                       subsample_freq=1, colsample_bytree=0.8, num_threads=n_threads(len(X)),
-                       random_state=self.seed, verbose=-1)
+                       subsample_freq=1, colsample_bytree=0.8, min_data_per_group=20, cat_smooth=1.0,
+                       num_threads=n_threads(len(X)), random_state=self.seed, verbose=-1)
             prm.update(self.params)
             self.model_ = lgb.LGBMRegressor(**prm).fit(F, y, sample_weight=w)
         else:
@@ -304,7 +307,9 @@ class RandomEffectsMean(_CellBaseline):
       ``oof_predict(..., weight=)`` raises a clear error for this model.
 
     Attributes after fit: ``tables_`` (list of ``(cols, DataFrame[value, tau2, se, n])``, finest first), ``grand_``.
-    ``level(X)`` tells which cell depth each prediction came from.
+    ``level(X)`` tells which cell depth each prediction came from. The ``se`` column is the plain DL standard error,
+    which ignores the uncertainty in ``tau2``: with real heterogeneity, ``value +- 1.96 se`` covered 0.86-0.93 in
+    simulation (k = 2-30 rows per cell; 0.96 when tau2 = 0), so do not print it as a 95% CI.
     """
 
     def __init__(self, by: Sequence[str], se_col: str = "se", *, tau2="dl", min_n: int = 2):
