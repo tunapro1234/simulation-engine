@@ -38,7 +38,7 @@ class TestPersonas(unittest.TestCase):
         t = p.text()
         self.assertTrue(t.startswith("Persona T, age 25-34, female"))
         self.assertIn("trait11: 11", t)
-        self.assertNotIn("trait12", t)              # traits cut at 12
+        self.assertIn("trait14: 14", t)             # every trait (the old 12-trait cap dropped columns silently)
         self.assertNotIn("x" * 601, t)              # authored text cut at 600
         self.assertIn("Measured: segment=S1; orders=12", t)
 

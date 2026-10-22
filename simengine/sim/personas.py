@@ -8,8 +8,11 @@ The runners accept anything persona-like and never import simengine.persona (duc
     before the prediction moment, never the target)
   * plain strings (one persona description each; ids p001, p002, ...)
 
-Prompt rendering ports sahne/sema.py `Persona.metin` (name/age/gender line, up to 12 traits, authored text cut
-at 600 chars, up to 10 measured facets). Controls port sahne/kosucu/ortak.py (`kontrol_personalari`,
+Prompt rendering ports sahne/sema.py `Persona.metin` (name/age/gender line, traits, LLM-written authored text cut
+at 600 chars, data-derived text (consumer_profile, history_data) uncut, measured facets). Since 22 Oct every
+trait and facet is rendered by default: the port's caps (12 traits, 10 facets) silently dropped columns, e.g. 11
+of 21 Twin fields (Big Five included) in a rehearsal. `max_traits` / `max_facets` still cap, with a warning.
+Controls port sahne/kosucu/ortak.py (`kontrol_personalari`,
 `kontrol_plani`): the swap arm keeps each persona's own id, name and tagline and takes the next persona's
 content (cyclic shift); the fix that keeps the identity line is from 21 Oct (intent: Haiku labelled 6/200
 answers with the swapped identity before the fix).
@@ -17,6 +20,7 @@ answers with the swapped identity before the fix).
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -55,7 +59,15 @@ def _blank(v) -> bool:
     return v is None or v == "" or (isinstance(v, float) and math.isnan(v))
 
 
-def _from_talp(d: dict, cut: int = 600) -> PersonaView:
+def _capped(items: list, cap: int | None, what: str, pid: str) -> list:
+    if cap is None or len(items) <= cap:
+        return items
+    warnings.warn(f"persona {pid}: {len(items)} {what}, only the first {cap} reach the prompt "
+                  f"(max_{what}={cap}; pass None for all)", stacklevel=4)
+    return items[:cap]
+
+
+def _from_talp(d: dict, cut: int = 600, max_traits: int | None = None, max_facets: int | None = None) -> PersonaView:
     i = d.get("identity") or {}
     dem = d.get("demographics") or {}
     pid = str(i.get("persona_id") or d.get("persona_id") or d.get("id") or "")
@@ -64,15 +76,18 @@ def _from_talp(d: dict, cut: int = 600) -> PersonaView:
     body = []
     traits = [t for t in (d.get("traits") or []) if isinstance(t, dict)]
     if traits:
-        body.append("; ".join(f"{t.get('label')}: {t.get('value')}" for t in traits[:12]))
+        body.append("; ".join(f"{t.get('label')}: {t.get('value')}"
+                              for t in _capped(traits, max_traits, "traits", pid)))
     a = d.get("authored") or {}
-    for k in ("persona", "buying_context", "history_data", "behavior_voice"):
+    for k, clipped in (("persona", True), ("buying_context", True), ("consumer_profile", False),
+                       ("history_data", False), ("behavior_voice", True)):
         if a.get(k):
-            body.append(str(a[k])[:cut])
+            body.append(str(a[k])[:cut] if clipped and cut is not None else str(a[k]))
     mb = ((d.get("evidence") or {}).get("measured_behavior") or {})
     facets = mb.get("facets") or {}
     if facets:
-        body.append("Measured: " + "; ".join(f"{k}={v}" for k, v in list(facets.items())[:10]))
+        items = _capped(list(facets.items()), max_facets, "facets", pid)
+        body.append("Measured: " + "; ".join(f"{k}={v}" for k, v in items))
     seg = d.get("segment")
     if _blank(seg):
         seg = facets.get("segment")

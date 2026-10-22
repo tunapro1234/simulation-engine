@@ -14,8 +14,18 @@ written back at the top level by `to_dict`. `None` and empty values are dropped 
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
+
+
+def _capped(items: list, cap: int | None, what: str, pid: str) -> list:
+    """Cut `items` to `cap` with a warning (None = keep all)."""
+    if cap is None or len(items) <= cap:
+        return items
+    warnings.warn(f"persona {pid}: {len(items)} {what}, only the first {cap} reach the prompt "
+                  f"(max_{what}={cap}; pass None for all)", stacklevel=3)
+    return items[:cap]
 
 # ---- enum values (TALP persona-briefs/options)
 INCOME_TIER = ("low", "lower_middle", "middle", "upper_middle", "affluent")
@@ -291,17 +301,25 @@ class Persona(_DictMixin):
         """Measured facts (evidence.measured_behavior.facets); empty dict when none."""
         return (self.evidence.measured_behavior or {}).get("facets", {}) or {}
 
-    def text(self, lang: str = "en", clip: int | None = 600, max_facets: int = 10) -> str:
+    def text(self, lang: str = "en", clip: int | None = 600, max_facets: int | None = None,
+             max_traits: int | None = None) -> str:
         """Short persona description used inside prompts.
 
         Narrative fields written by an LLM (persona, buying_context, behavior_voice) are clipped to `clip`
         characters (None = no clipping), as in the research code. Data-derived fields
-        (consumer_profile, history_data; filled by `from_history`) are never clipped."""
+        (consumer_profile, history_data; filled by `from_history`) are never clipped.
+
+        The id is not part of the text: callers label each block with `p.pid` (e.g. "### <pid>"), so a name that
+        is just the id (personas built from data) is omitted. Ages are bands (`age_band`), never exact ages;
+        measured facts (`facets`, including TALP values outside their enum) go on the "Measured:" line.
+        Every trait and facet is rendered unless `max_traits` / `max_facets` is set (then a warning names the cut;
+        the old silent caps 12/10 dropped Big Five columns from from_table personas)."""
         i = self.identity
-        head = [f"{i.name or i.persona_id}", i.age_band and f"age {i.age_band}", i.gender]
-        lines = [", ".join(x for x in head if x)]
+        name = i.name if i.name and i.name != i.persona_id else None
+        head = ", ".join(x for x in (name, i.age_band and f"age {i.age_band}", i.gender) if x)
+        lines = [head] if head else []
         if self.traits:
-            lines.append("; ".join(f"{t.label}: {t.value}" for t in self.traits[:12]))
+            lines.append("; ".join(f"{t.label}: {t.value}" for t in _capped(self.traits, max_traits, "traits", self.pid)))
         a = self.authored
         cut = (lambda s: s) if clip is None else (lambda s: s[:clip])
         for x, clipped in ((a.persona, True), (a.buying_context, True), (a.consumer_profile, False),
@@ -309,8 +327,9 @@ class Persona(_DictMixin):
             if x:
                 lines.append(cut(x) if clipped else x)
         f = self.facets
-        if f and max_facets:
-            lines.append("Measured: " + "; ".join(f"{k}={v}" for k, v in list(f.items())[:max_facets]))
+        if f and max_facets != 0:
+            items = _capped(list(f.items()), max_facets, "facets", self.pid)
+            lines.append("Measured: " + "; ".join(f"{k}={v}" for k, v in items))
         return "\n".join(lines)
 
     def card(self) -> dict:
