@@ -36,6 +36,7 @@ signal.
 | `effect_forecast`, `effect_frame`, `memorisation_check`, `EffectForecast` | `effect.py` | No personas. Asks for every condition's effect against control in one JSON object per arm × framing × sample (independent draws via `sample=k`), averages per condition, and returns a condition × arm table: hidden arm always, named arm (study named) with `named=`, plus named − hidden as a memorisation probe and refused / unparsed / failed / invalid counts. Import from `simengine.sim.effect`. See "Direct effect forecasts" below. |
 | `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means, one set per `segments=` scheme, and `survey`-style refused / unparsed accounting with ids. `person_distribution_frame` gives persona × question rows. |
 | `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`, numeric `filled_llm_dist`; `scheme=` picks a `persona_distribution` segment scheme), and the normalised ordinal W1 used for the makro numbers. |
+| `robustness`, `robustness_frame` | `robustness.py` | Retest / framing / option-order robustness of `segment_distribution`, scaled by the group signal (W1 between each group and the population). Per condition: mean W1 against the base run, signed order shift, ratio to the signal with question-clustered CIs; summary ratio = worst condition; a card row (`tur="robustness"`). Import from `simengine.sim.robustness`. See "Robustness" below. |
 | `predict_people`, `prediction_frame` | `prediction.py` | Per-person prediction. L0 is a no-persona population prior over `l0_samples` samples. L1 uses the person's own survey answers. L2 is L1 plus the person's past behaviour in the same items. SSR asks for one first-person sentence per item. It takes independent `samples` (passed as `sample=j`) and re-asks with "JSON only" when parsing fails. |
 | `PredictionSpec`, `AMAZON`, `prompt_l0/l1/l2/ssr`, `profile_text`, `history_text` | `prediction.py` | All prompt wording. `PredictionSpec()` is neutral. `AMAZON` reproduces the measured talp73 prompts exactly (checked string-for-string against `talp73/kod/llm/istem.py` and `ssr.py`). |
 | `batch_calibrate` | `prediction.py` | Label-free batch calibration: `logit(p) − mean_item logit(p) + logit(prior_rate)`, clipped at 1e-3. It matches `talp73/kod/llm/kalibre.py` to 0.0 max abs difference on a random check. |
@@ -503,6 +504,38 @@ Deviations from replicant, all deliberate:
   default-cap run was partly None-corrupted; `experiments/07_who_to_punish/results/2026-06-11_15-08-37_baseline/ANALYSIS.md`), so it is stored on every result and row.
 - **Partial values are kept** in `values` with `completed=False`. replicant discarded the whole page.
 
+## Robustness (`robustness.py`)
+Port of the G7 rehearsal's hand-written scoring (makro C1 protocol: retest, other framings, reversed options,
+"axis W1 / signal" table). It answers one question before a subgroup comparison is reported: does the answer move
+more when the prompt is repeated, reworded or reordered than the groups differ from the population?
+
+```python
+from simengine.sim.robustness import robustness, robustness_frame
+rb = robustness(llm, segs, qs, axes=("retest", "framing", "order"), population="US adults")
+rb["conditions"]   # axis, condition, w1 [lo, hi], ratio [ratio_lo, ratio_hi], shift (order), n_cells, invalid
+rb["ratio"], rb["worst"], rb["verdict"]
+kart_rows.append(rb["card"])                   # evidence.kart row, tur "robustness"
+robustness_frame(rb)                           # segment x question x condition, with the cell's signal
+```
+
+- **Conditions.** `base` = the first framing (`FRAMINGS_HIDDEN["h1"]`, or `FRAMINGS_NAMED["v1"]` with `source=`).
+  `retest:<i>` (`retests=1`) asks the base prompt again with `sample=<base + i>` passed through `ask_kw` to
+  `llm.complete`: Claude keys its disk cache on `sample`, so a retest is a new draw, not the stored reply (the
+  base run passes no `sample`, so it shares the plain call's cache entry). `framing:<v>` runs each other framing
+  in `framings` on its own (no averaging). `order` reverses the options in the prompt and maps the reply vector
+  back to the original order before scoring (cells too; `runs["order"]["reversed"]`).
+- **Numbers.** Per segment × question × condition: `w1_ordinal(base, condition)`; for `order` also the signed
+  shift E[pos | base] − E[pos | reversed] with positions scaled to [0, 1] (negative = pulled toward the option
+  listed first). Signal per segment × question: W1(group, population). `signal="population"` (default) asks the
+  population description once as its own segment; `"mean"` uses the mean of the segments' base vectors (no extra
+  calls); a mapping `{"population": {qid: vec}, "segments": {...}}` uses real data. Condition ratio = mean
+  condition W1 / mean signal W1 over questions; questions are the bootstrap clusters (`n_boot=1000`, `seed=0`).
+  The summary `ratio` is the worst condition. Above `threshold=0.5` the verdict says single-prompt subgroup
+  comparisons are not reliable (the G7 reading). `nominal=True` uses TVD and drops the order shift.
+- **Calls.** (1 + retests + extra framings + order) × segments × questions, plus one per question for
+  `signal="population"`. With a backend that ignores `sample` (FakeLLM) the retest distance is 0 by construction.
+- No measured number is quoted here: the module has only been run offline (FakeLLM) in this repository.
+
 ## Design notes and deviations from the research code
 - **English field names.** The panel field names (`score`, `choice`, `reason`, `intent`, `remark`,
   `<f>_answer`) and runner prompt wording are English translations of the Turkish sahne prompts. The
@@ -535,7 +568,7 @@ Deviations from replicant, all deliberate:
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
 profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
 `test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
-`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check) (123 tests, offline, FakeLLM, under 1 s):
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, ratio and card row) (123 tests, offline, FakeLLM, under 1 s):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
