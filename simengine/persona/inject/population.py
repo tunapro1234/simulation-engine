@@ -264,7 +264,15 @@ def parse_distribution(text: Any, question: dict) -> dict[str, float] | None:
         return None
     low = {str(k).strip().lower(): v for k, v in obj.items()}
     if "distribution" in low:
-        v = normalize_probs(low["distribution"], len(opts), opts)
+        raw = low["distribution"]
+        if isinstance(raw, dict):
+            # keyed by option text first: normalize_probs tries "1".."k" before labels, which shifts or
+            # reverses numeric-coded options such as ["0", "1", "2"] or ["5", ..., "1"]
+            byk = {re.sub(r"\s+", " ", str(k)).strip().lower(): x for k, x in raw.items()}
+            txt = [re.sub(r"\s+", " ", o).strip().lower() for o in opts]
+            if all(t in byk for t in txt):
+                raw = [byk[t] for t in txt]
+        v = normalize_probs(raw, len(opts), opts)
         return None if v is None else dict(zip(opts, map(float, v)))
     if isinstance(low.get("samples"), list):
         norm = {o.strip().lower(): o for o in opts}
