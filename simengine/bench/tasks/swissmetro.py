@@ -138,14 +138,22 @@ def respondent_split(df: pd.DataFrame, test_frac: float = 0.2, seed: int = 0) ->
     """Boolean test mask: round(test_frac * n_respondents) respondents drawn by default_rng(seed) from the sorted ids."""
     ids = np.unique(df["respondent"].to_numpy())
     k = int(round(test_frac * len(ids)))
+    if not 0 < k < len(ids):
+        raise ValueError(f"test_frac={test_frac} leaves {k} of {len(ids)} respondents in test; need 1 .. n-1")
     test_ids = np.random.default_rng(seed).choice(ids, k, replace=False)
     return df["respondent"].isin(test_ids).to_numpy()
 
 
 def situation_split(df: pd.DataFrame, n_test: int = 2) -> np.ndarray:
-    """Boolean test mask: each respondent's last n_test answered situations (by situation index)."""
+    """Boolean test mask: each respondent's last n_test answered situations (by situation index = row order in the
+    file; the file has no presentation-order column, and positions follow a fixed design order)."""
+    if n_test < 1:
+        raise ValueError("n_test must be >= 1")
     rank = df.groupby("respondent")["situation"].rank(ascending=False, method="first")
-    return (rank <= n_test).to_numpy()
+    te = (rank <= n_test).to_numpy()
+    if te.all():
+        raise ValueError(f"n_test={n_test} leaves no training situations")
+    return te
 
 
 # ---------------------------------------------------------------------- logit models
@@ -291,7 +299,8 @@ def fit_mnl(df: pd.DataFrame, terms: Sequence[Term] = B01) -> LogitFit:
 def fit_nested(df: pd.DataFrame, terms: Sequence[Term] = B01,
                nests: Mapping[str, Sequence[str]] = NESTS_B09) -> LogitFit:
     """Nested logit, every alternative in exactly one nest, mu_m >= 1 for nests with two or more alternatives
-    (L-BFGS-B, numerical gradient; standard errors from a numerical Hessian). Default = Biogeme b09."""
+    (L-BFGS-B, numerical gradient; standard errors from a numerical Hessian). Default = Biogeme b09 (which also caps
+    the nest parameter at 3; no upper bound here, the b09 optimum 2.05 is interior)."""
     seen = sorted(a for alts in nests.values() for a in alts)
     if seen != sorted(ALTS):
         raise ValueError(f"nests must partition {ALTS}, got {dict(nests)}")
@@ -354,8 +363,9 @@ def persona_text(row: Mapping) -> str:
 
 
 def situation_text(row: Mapping) -> str:
-    """The available alternatives of one stated choice situation, with time, cost (as seen by the respondent:
-    0 for train / Swissmetro with a GA) and headway."""
+    """The available alternatives of one stated choice situation, with time, cost and headway. Cost follows the
+    Biogeme coding (train and Swissmetro free with a GA); the codebook says SM_CO ignores the GA and TRAIN_CO holds the
+    annual ticket price for GA holders, so what GA holders were actually shown is not recorded."""
     ga = int(row["GA"]) == 1
     lines = []
     if float(row["av_train"]) > 0:
@@ -389,23 +399,48 @@ def prompts(df: pd.DataFrame, system: str = SYSTEM) -> list[tuple[str, str]]:
 _WORD = {"train": 0, "rail": 0, "swissmetro": 1, "sm": 1, "metro": 1, "car": 2}
 
 
+_PAIR = re.compile(r"\b(swissmetro|train|rail|metro|car|sm)\b\"?\s*[:=]\s*\"?\s*(\d+(?:\.\d*)?|\.\d+)\s*(%?)", re.I)
+
+
+def _num(x: Any) -> float | None:
+    """Finite non-negative number from a JSON value (0.2, "0.2", "20%"); None otherwise."""
+    try:
+        s = str(x).strip()
+        v = float(s[:-1]) if s.endswith("%") else float(s)
+    except (ValueError, TypeError):
+        return None
+    return v if np.isfinite(v) and v >= 0 else None
+
+
 def parse_choice(text: str) -> np.ndarray | None:
-    """Probability vector (train, sm, car) from a reply: a JSON object (keys train / sm / swissmetro / car), else the
-    first alternative word; None if nothing is recognised. Not renormalised (mask_probs does that)."""
-    m = re.search(r"\{.*?\}", text or "", re.S)
+    """Probability vector (train, sm, car) from a reply: a JSON object (keys train / sm / swissmetro / car; values may
+    be "20%" strings), else `key: number` pairs, else the first alternative word. A reply that has an object with
+    alternative keys but no usable positive value is None (not read as its first key); None if nothing is recognised.
+    Not renormalised (mask_probs does that)."""
+    text = text or ""
+    m = re.search(r"\{.*?\}", text, re.S)
     if m:
         try:
             obj = json.loads(m.group(0))
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict):
             v = np.zeros(len(ALTS))
             for k, x in obj.items():
-                j = _WORD.get(str(k).strip().lower())
-                if j is not None:
-                    v[j] += float(x)
+                j, f = _WORD.get(str(k).strip().lower()), _num(x)
+                if j is not None and f is not None:
+                    v[j] += f
             if v.sum() > 0:
                 return v
-        except (ValueError, TypeError):
-            pass
-    w = re.search(r"\b(swissmetro|train|rail|car|sm)\b", (text or "").lower())
+    pairs = _PAIR.findall(text)
+    if pairs:
+        v = np.zeros(len(ALTS))
+        for k, x, _ in pairs:
+            v[_WORD[k.lower()]] += float(x)
+        return v if v.sum() > 0 else None
+    if m and re.search(r"\b(swissmetro|train|rail|car|sm)\b", m.group(0).lower()):
+        return None                                                  # structured answer without usable numbers
+    w = re.search(r"\b(swissmetro|train|rail|car|sm)\b", text.lower())
     if w:
         v = np.zeros(len(ALTS))
         v[_WORD[w.group(1)]] = 1.0
@@ -417,12 +452,14 @@ def llm_method(llm: Any, *, system: str = SYSTEM, smooth: float = 0.05, max_toke
                parallel: int = 4) -> Callable[[TaskData], np.ndarray]:
     """Method for task.run: one prompt per data.test row through llm.map; replies parsed by parse_choice, mixed with
     `smooth` of the uniform-over-available vector (a one-hot answer would otherwise score log 1e-6 when wrong),
-    unparseable replies -> uniform. The method's `last_unparsed` attribute counts them after each call."""
+    unparseable replies and replies with no mass on an available alternative -> uniform. The method's
+    `last_unparsed` attribute counts them after each call."""
     def method(data: TaskData) -> np.ndarray:
         t = data.test
         av = availability(t)
         res = llm.map(prompts(t, system), max_tokens=max_tokens, parallel=parallel)
         parsed = [parse_choice(r.text) for r in res]
+        parsed = [None if v is None or (v * av[i]).sum() <= 0 else v for i, v in enumerate(parsed)]
         method.last_unparsed = sum(p is None for p in parsed)
         u = av / av.sum(1, keepdims=True)
         p = mask_probs(np.vstack([u[i] if v is None else v for i, v in enumerate(parsed)]), av)
@@ -543,8 +580,8 @@ class SwissmetroModeChoice(BenchTask):
             a = np.asarray(p, float)
             if a.shape != (n, len(ALTS)):
                 raise ValueError(f"{m}: predictions must have shape ({n}, {len(ALTS)}), got {a.shape}")
-            if np.isnan(a).any() or (a < 0).any():
-                raise ValueError(f"{m}: NaN or negative probabilities")
+            if not np.isfinite(a).all() or (a < 0).any():
+                raise ValueError(f"{m}: NaN, infinite or negative probabilities")
             base[as_pred_col(m)] = pd.Series(list(a), dtype=object)
         base["split"] = "test"
         return base
