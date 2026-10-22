@@ -74,13 +74,14 @@ ok/warning/error/skipped), `orneklem` (multiplier), `kanit_kart` (evidence card)
 
 ### Metrics (`metrik.py`; `metric_family`, `compute_metrics`, `hit_at_k`)
 The metric family is chosen per task:
-- **binary:** accuracy (0.5 earns half a point), balanced accuracy, kappa, AUC, macro-F1, Brier, log loss, ECE.
+- **binary:** accuracy (0.5 earns half a point), balanced accuracy, kappa, AUC, macro-F1, Brier, log loss, ECE,
+  `mean_bias` (mean prediction − base rate, signed).
 - **multiclass:** accuracy (ties shared), balanced accuracy, kappa, macro-F1, plus Brier, log loss and ECE
   when the predictions are probability vectors.
-- **distribution:** 1 − TVD, SimBench score 100·(1 − TVD/TVD_uniform), ordinal Wasserstein / (K−1),
-  Jensen-Shannon, KS, mode match.
-- **continuous:** 1 − MAE (when the truth lies in [0,1]), Pearson, Spearman, MAE, RMSE, R², and with
-  `item` also within-item correlation and de-meaned R².
+- **distribution:** 1 − TVD, SimBench score 100·(1 − TVD/TVD_uniform), ordinal Wasserstein on a 0-1 scale
+  (numeric option positions when given, else equal spacing / (K−1)), Jensen-Shannon, KS, mode match.
+- **continuous:** 1 − MAE (when the truth lies in [0,1]), Pearson, Spearman, MAE, RMSE, R², `mean_bias`, and
+  with `item` also within-item correlation and de-meaned R².
 - **ab:** winner top-1, pair-sign accuracy, within-test Spearman, effect correlation, scale error.
 
 Default primary metrics: accuracy, 1 − TVD, Pearson (1 − MAE on [0,1] data), pair sign. When the majority
@@ -138,7 +139,8 @@ Outputs are the reliability curve (10 bins), ECE, confidence AUROC, AURC and the
 ### Segments and spread (`analiz.py`)
 Per-segment metric with CI and bias, the worst three segments, the correlation of segment-mean differences,
 and the spread ratio (sd of prediction / sd of truth within item; < 0.8 = homogenisation, > 1.5 =
-over-dispersion). It also gives the entropy ratio and W1.
+over-dispersion). It also gives the entropy ratio and W1. Binary probability predictions use the Bernoulli sd
+instead, and distribution tasks add an entropy CI and a between-cell divergence ratio (see the G4/G7 section below).
 - *Measured:* Twin sd ratio 0.75 → homogenisation warning [kanit RAPOR §1b].
 
 ### Audits (`denetim.py`, `ezber.py`; `split_audit`, `memorization_audit`)
@@ -750,3 +752,40 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
   that were invalid and replaced by a uniform vector) give one audit row per arm with the mean share. Above 5 %
   (`cekirdek.DOLGU_ESIK`) the row warns and the card flags "dolgu payı yüksek". `report["dolgu"]["kollar"]` holds
   mean, max and cell counts per arm.
+
+## Calibration-in-the-large, option positions, binary spread, entropy ratio (G4 #8 #9, G7 #4 #8)
+
+- **`mean_bias`** (binary and continuous): mean prediction − mean truth per arm, i.e. predicted rate − base rate
+  on a binary task ("how many will buy"). It is a per-row metric, so every arm gets a cluster-bootstrap CI in the
+  metric table (`rep["sonuclar"][col]["metrikler"]["mean_bias"]`). It is signed (`yon=0`; "a better" = closer to
+  0) and a diagnostic, not a primary metric. Paired difference of two arms:
+  ```python
+  ev.paired_ci(frame, "ours", "raw", metric="mean_bias")     # diff = mean(pred_ours) - mean(pred_raw), with CI
+  ```
+  The continuous ratio form (`bias` = sum p / sum y − 1) stays as before.
+- **Wasserstein on option positions.** The distribution metric `wasserstein` (same name, no rename) uses numeric
+  option positions when the frame has them and falls back to equal spacing 0..K−1 otherwise. Sources, first
+  numeric one wins: a per-row `pos` / `positions` / `konum` column (list per row), a numeric `options` column,
+  numeric `classes=`. Positions are sorted and rescaled to 0-1 (min → 0, max → 1), so with bench positions that
+  span 0-1 the number equals bench `wd` (`bench.stats.wasserstein_ordinal`). Equally spaced numeric options
+  (1..5) give the old number exactly; text options keep equal spacing. `metrik.wasserstein_konumlu(a, b, pos)` is
+  the function; `wasserstein_ordinal` (equal spacing) is unchanged.
+  ```python
+  df["pos"] = [opt_pos[q] for q in df["item"]]                # per row, e.g. [0, .2, .5, 1]
+  rep = ev.evaluate(df, ours="llm", primary="wasserstein")
+  ```
+- **Binary spread.** With probability predictions (any value strictly between 0 and 1) the spread block no longer
+  compares sd(p) with the sd of the 0/1 truth (always small, it raised "collapse" on every AUC task). It reports
+  `sd_bernoulli` = sqrt(Σ var_item(p) / Σ p̄_item(1 − p̄_item)) with a CI (0 = constant prediction, 1 = certain
+  0/1) and leaves `sd_orani` empty (not applicable; the dashboard spread chart skips the arm). The collapse audit
+  "dağılım çöküşü (Bernoulli sd oranı)" warns only below 0.05 (near-constant prediction). Hard 0/1 predictions keep
+  the old sd ratio.
+- **Class imbalance audit.** `dengesizlik(veri, birincil=None)` warns (majority share > 70 %) only when an
+  accuracy-type metric (accuracy, macro-F1) is in play: with binary probability predictions, or a primary that is
+  not accuracy-type, it is a `tamam` note (AUC, Brier, log loss and ECE are not misled by the class share).
+  Multiclass and hard-label binary keep the warning.
+- **Distribution entropy ratio** = mean entropy(prediction) / mean entropy(truth) over cells (ratio of means,
+  `entropi_olcut="ortalamalarin_orani"`), with a cluster-bootstrap CI (`entropi_orani_alt/_ust`). The mean of
+  per-cell ratios is not used: it explodes on small groups whose truth entropy is ~0. `ayrisma_orani` is the
+  between-cell divergence ratio: within each item, sd across cells (groups) of E[position] for the prediction over
+  the same for the truth (pooled; < 1 = groups pulled together). The collapse audit row prints both with CIs.
