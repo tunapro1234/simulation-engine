@@ -590,8 +590,10 @@ def _merdiven(o: _Ozet) -> str:
         satirlar.append([f'{_e(r.get("etiket") or r.get("sutun"))} {_rozet(r.get("tur", ""))}',
                          _deger_ga(r), fark, _e(p_bicim(r.get("p"))), nzs])
     tablo = _tablo(["Basamak", "Değer", "Öncekine fark", "p", "Normalize"], satirlar, "sayisal")
+    bilgi = (" Ayar-B basamağı (hedef sorunun öbür hücrelerinin cevabını okur) rozete dayanak değildir; rozet aynı bilgi "
+             "düzeyindeki (ayar A) en güçlü tabana karşıdır." if any(r.get("bilgi") == "B" for r in md) else "")
     return _bolum("Baseline merdiveni", f'<div class="ikili">{svg}{tablo}</div>',
-                  f"{_e(_metrik_adi(birincil))} ({yon_not}). Nokta = değer, bıyık = %95 GA, kesikli çizgi = insan tavanı (test-retest).")
+                  f"{_e(_metrik_adi(birincil))} ({yon_not}). Nokta = değer, bıyık = %95 GA, kesikli çizgi = insan tavanı (test-retest).{_e(bilgi)}")
 
 
 # ------------------------------------------------------------------ 4. metrik tablosu
@@ -635,7 +637,7 @@ def _farklar(o: _Ozet) -> str:
         alt, ust = c.get("alt"), c.get("ust")
         anlamli = (not _bos(alt) and not _bos(ust) and (alt > 0 or ust < 0)) or (not _bos(c.get("p")) and c["p"] < 0.05)
         f = c.get("fark")
-        tek = c.get("tur") == "kayitli" and c.get("b") is None   # A'nın değeri 0'a karşı: yön yorumu yok
+        tek = c.get("tur") in ("kayitli", "posthoc") and c.get("b") is None   # A'nın değeri 0'a karşı: yön yorumu yok
         if not anlamli:
             rz = '<span class="drm d-atlandi">○ anlamlı değil</span>'
         elif tek:
@@ -645,8 +647,10 @@ def _farklar(o: _Ozet) -> str:
             rz = '<span class="drm d-tamam">▲ anlamlı · A iyi</span>'
         else:
             rz = '<span class="drm d-hata">▼ anlamlı · B iyi</span>'
-        if c.get("tur") in ("kayitli", "kor"):
-            et_ = ("kör kol · " if c["tur"] == "kor" else "kayıtlı · ") + (c.get("etiket") or "")
+        if c.get("tur") in ("kayitli", "kor", "posthoc"):
+            et_ = {"kor": "kör kol · ", "posthoc": "sonradan · "}.get(c["tur"], "kayıtlı · ") + (c.get("etiket") or "")
+            if c.get("zayif_taban"):
+                et_ += f" ⚠ b en güçlü taban değil: {c['zayif_taban'].get('en_guclu_etiket')} = {sayi(c['zayif_taban'].get('en_guclu_deger'))}"
             b_ = _e(o.etiket(c["b"])) if c.get("b") else "0"
             satirlar.append([_e(et_), b_, _e(_metrik_adi(c.get("metrik", ""))),
                              f'{_e(("+" if not _bos(f) and f > 0 else "") + sayi(f))} <span class="ga">{_e(ga(alt, ust))}</span>',

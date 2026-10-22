@@ -113,6 +113,8 @@ TAVAN_NOT = {"model": "tür: model/oracle (insan test-retest değil)",
              "orneklem_gurultusu": "tavan türü: örneklem gürültüsü (varyans bileşenleri, tüm gruplar)"}
 TAHMIN_NOT = {"tavan": "uygulanamaz: tahmin görevi, insan test-retest yok (not applicable: forecast task)",
               "bedel": "uygulanamaz: tahmin görevi, insan yanıtı yok, PPI++ atlandı (not applicable: forecast task)"}
+BILGI_NOT = ("ayar-A tabanı (hedef sorunun cevabını görmez); ayar-B tabanı {} hedef sorunun öbür hücrelerinin "
+             "cevabını okur: merdivende, rozete dayanak değil (setting-B baseline not used for the badge)")
 EZBER_EKI = "Uyarı: kazanç ezber/tanımadan gelebilir"
 EZBER_NEDEN = {"ezber_denetimi": "ezber denetimi uyarıda", "kor_kol": "kör kol kazancın çoğunu kaybediyor"}
 
@@ -169,6 +171,21 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
                   + ("; ci='basic' deneyin" if gu.get("yontem") == "percentile" else "; temel (basic) GA kullanıldı"))
     if (oz.get("tabanlar") or {}).get("yalniz_basit"):
         et.append("yalnız basit tabanlar (rastgele/marjinal)")
+    bd = oz.get("bilgi_duzeyi") or {}
+    if bd.get("B") and tb:   # dağılım: taban_marjinal hedef sorunun öbür hücrelerini okur (ayar B), rozete dayanak değil
+        S[0]["not"] = BILGI_NOT.format(", ".join(bd["B"]))
+    if bd.get("B_ustte"):
+        et.append(f"ayar-B tabanı ({', '.join(bd['B_ustte'])}) daha güçlü: rozet ayar-A tabanına karşı")
+    for sut, x in ((oz.get("dolgu") or {}).get("kollar") or {}).items():
+        if (_f(x.get("ortalama")) or 0) > (oz.get("dolgu") or {}).get("esik", 0.05):
+            et.append(f"dolgu payı yüksek: {sut} %{100 * x['ortalama']:.0f} (geçersiz → tekdüze)")
+    kl = oz.get("kayitli_karsilastirmalar") or []
+    ph = [k for k in kl if k.get("tur") == "posthoc"]
+    if ph:
+        et.append(f"sonradan karşılaştırma: {len(ph)} satır ön kayıtta yok (post hoc)")
+    zt = [k for k in kl if k.get("zayif_taban")]
+    if zt:
+        et.append(f"kayıtlı karşılaştırma zayıf tabana karşı (en güçlü: {zt[0]['zayif_taban'].get('en_guclu_etiket')})")
     ez = oz.get("ezber_uyarisi")
     if ez and r != "bekliyor" and kazanc_var(fark):
         neden = ", ".join(EZBER_NEDEN.get(n, n) for n in ez.get("nedenler") or [])

@@ -16,6 +16,8 @@ from .metrik import BIRINCIL, ISARETLI_METRIKLER, ORAN_METRIKLERI, aile, diziler
 from .sema import ON_EK, _normalle, _sinif_vektoru, _vektor, _vektor_mu, gercek_yok, hazirla
 
 SURUM = "0.1"
+BILGI_B_ETIKET = "ayar B: hedef sorunun öbür hücrelerinin cevabı (setting B)"
+DOLGU_ESIK = 0.05   # kol başına dolgu (geçersiz → tekdüze) payı bunu aşarsa denetim uyarısı
 
 
 def _diz(veri, sutun, kaynak: str | None = None):
@@ -114,6 +116,94 @@ def _model_tavan_asimi(nokta, tekrar, yontemler, M):
 
 def _f(x, b=3):
     return "—" if x is None or not np.isfinite(x) else f"{x:.{b}f}".replace(".", ",")
+
+
+def _anahtar(x):
+    """Tahmin hücresinin karşılaştırılabilir anahtarı (vektör → yuvarlanmış demet)."""
+    if isinstance(x, dict):
+        return tuple(sorted((str(k), _anahtar(v)) for k, v in x.items()))
+    if isinstance(x, (np.ndarray, list, tuple)):
+        return tuple(np.round(np.asarray(x, float).ravel(), 12).tolist())
+    if isinstance(x, (float, np.floating)):
+        return "nan" if not np.isfinite(x) else round(float(x), 12)
+    return str(x)
+
+
+def _madde_ici_sabit(veri, sutun: str) -> bool:
+    """Tahmin her maddede birimler arasında sabit mi (madde yoksa bütün tabloda). Sabitse karıştırma kontrolü
+    kişi bilgisini sınamaz (kontrol = bizim). En az 2 satırlı madde yoksa False (karıştırma zaten etkisiz)."""
+    d = veri.df
+    v = d[sutun].to_numpy(object)
+    gruplar = d.groupby("madde").indices.values() if "madde" in d else [np.arange(len(d))]
+    cok = False
+    for idx in gruplar:
+        if len(idx) < 2:
+            continue
+        cok = True
+        if len({_anahtar(v[i]) for i in idx}) > 1:
+            return False
+    return cok
+
+
+DOLGU_ON_EK = "filled_"   # sim.distribution_frame: filled_<yöntem> = hücrede tekdüze vektörle doldurulan yanıt payı
+
+
+def _dolgu_denetimi(veri, etiket: dict) -> tuple[list[dict], dict]:
+    """Kol başına dolgu (geçersiz yanıt → tekdüze vektör) payı denetimi: filled_<yöntem> sayısal sütunlarından.
+    Döner (denetim satırları, {tahmin sütunu: {"ortalama", "en_buyuk", "n_hucre", "n_dolgulu"}})."""
+    d = veri.df
+    den, ozet = [], {}
+    for y_ in veri.yontemler:
+        c = DOLGU_ON_EK + y_
+        if c not in d:
+            continue
+        x = pd.to_numeric(d[c], errors="coerce").to_numpy(float)
+        x = x[np.isfinite(x)]
+        if not len(x):
+            continue
+        ort = float(x.mean())
+        ozet[ON_EK + y_] = {"ortalama": ort, "en_buyuk": float(x.max()), "n_hucre": int(len(x)),
+                            "n_dolgulu": int((x > 0).sum())}
+        cok = ort > DOLGU_ESIK
+        den.append({"kontrol": f"dolgu payı (geçersiz → tekdüze): {etiket.get(ON_EK + y_, y_)}",
+                    "durum": "uyari" if cok else "tamam", "deger": ort, "sutun": ON_EK + y_,
+                    "ayrinti": f"{c}: hücre başına ortalama dolgu payı %{100 * ort:.1f} (en büyük %{100 * x.max():.0f}; "
+                               f"{int((x > 0).sum())}/{len(x)} hücrede dolgu)"
+                               + (f" · %{100 * DOLGU_ESIK:.0f} eşiğinin üstünde: farkın bir kısmı tekdüze dolgudan gelebilir "
+                                  "(filled share above threshold)" if cok else "")})
+    return den, ozet
+
+
+KIYAS_SONRADAN = "sonradan: ön kayıtta yok (post hoc, not in the pre-registration)"
+
+
+def _onkayit_metinleri(onkayit: list | None, metinler: list | None) -> tuple[list[str], list[str]]:
+    """(geçerli, geç): mühür açıklamaları + ön kayıt metinleri; zamanlı metin son mühürden sonraysa 'geç'."""
+    zamanlar = [z for z in (_muhur_zamani(r) for r in onkayit or [] if isinstance(r, dict)) if z is not None]
+    sinir = max(zamanlar) if zamanlar else None
+    gecerli, gec = [], []
+    for r in onkayit or []:
+        if isinstance(r, dict):
+            gecerli += [str(r[k]) for k in ("aciklama", "description") if r.get(k)][:1]
+    for t in metinler or []:
+        if isinstance(t, dict):
+            z = t.get("zaman")
+            (gec if sinir is not None and z is not None and int(z) > int(sinir) else gecerli).append(str(t.get("metin", "")))
+        else:
+            gecerli.append(str(t))
+    return gecerli, gec
+
+
+def _kiyas_kaydi(adlar: list[str], et_: str | None, metinler: list[str]) -> bool:
+    """Karşılaştırma ön kayıtta mı: aynı metinde a ve b adları (b yoksa yalnız a) ya da kullanıcı etiketi geçiyor.
+    İki ad birlikte arandığı için 2 harfli adlar ('L3', 'T3') ön eksiz de eşleşir; tek harfli adlar ön ek ister."""
+    import re as _re
+    kaliplar = [_re.compile(r"(?<![A-Za-z0-9_])(?:pred_|tahmin_)?" + _re.escape(a) + r"(?![A-Za-z0-9_])")
+                if len(a) == 2 else _ad_kalibi(a) for a in adlar if a]
+    et_k = (_re.compile(r"(?<![A-Za-z0-9_])" + _re.escape(et_.strip()) + r"(?![A-Za-z0-9_])")
+            if et_ and len(et_.strip()) >= 2 else None)
+    return any((kaliplar and all(k.search(t) for k in kaliplar)) or (et_k is not None and et_k.search(t))
+               for t in metinler)
 
 
 GURULTU_METRIK = ("spearman", "pearson", "r2")
@@ -352,7 +442,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     hesaplanır (None: alt örneklem yok).
     tavan_yarim: örneklem gürültüsü tavanı girdisi {"n", "s2": grup boyu / iç varyans, "A", "B": R × n yarı
     ortalamaları (split-half denetimi), "sutun": satır no sütunu, "R"}; api.evaluate(noise_ceiling=...) kurar. kor: kör (adsız) kol; bizim − kör eşleşik satırı.
-    kiyaslar: [(a, b | None, etiket)] kayıtlı eşleşik karşılaştırmalar (düşme koşulları). ezber_llm: bizim yöntem LLM
+    kiyaslar: [(a, b | None, etiket[, posthoc])] ya da {"a", "b", "label", "posthoc"} kayıtlı eşleşik karşılaştırmalar
+    (düşme koşulları). Ön kayıt metni (mühür açıklaması / onkayit_metin) varsa her satırın a/b adı (ya da etiketi)
+    orada aranır: bulunmayan satır tur="posthoc", kayit="sonradan"; b en güçlü tabandan zayıf bir tabansa satırda
+    zayif_taban + denetim uyarısı. Dağılım görevinde taban_marjinal ayar-B bilgisidir (hedef sorunun öbür
+    hücreleri): merdivende etiketli, rozet ayar-A tabanlarına karşı. filled_<yöntem> sütunları kol başına dolgu
+    denetimi olur. Madde içinde sabit tahminde karıştırma kontrolü atlanır. ezber_llm: bizim yöntem LLM
     kolu içeriyor mu (None: ezber sonucu verildiyse evet sayılır); ezber uyarısında rozet gerekçesine ek düşer.
     blok: blok bootstrap sütunu (ör. tahmin kökeni / hafta): küme yerine bu sütunun her değeri bir blok olarak
     yerine koymalı örneklenir (blok içindeki bütün satırlar/kümeler birlikte); sütun, merdiven, manşet ve eşleşik fark
@@ -405,6 +500,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 et = f"{et} (ileriye bakan / look-ahead)"
             turler[c], etiket[c] = "baseline", et
     taban_turu = {c: "otomatik" for c in turler}
+    # bilgi düzeyi: dağılımda taban_marjinal hedef sorunun ÖBÜR hücrelerinin gerçek cevabını okur (bench ayar B);
+    # ours bunu görmez (ayar A). Merdivende etiketle gösterilir, rozet yalnız ayar-A tabanlarına karşıdır.
+    bilgi_b = [c for c in turler if veri.gorev == "dagilim" and c == "taban_marjinal"]
+    for c in bilgi_b:
+        etiket[c] += f" · {BILGI_B_ETIKET}"
     for y_ in veri.yontemler:
         c = ON_EK + y_
         # etiketsiz_tabanlar: hedef etiketi görmeyen basit kurallar (ör. kalıcılık) taban sayılır;
@@ -432,10 +532,15 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 turler[c], etiket[c] = "kalibre", f"{etiketler.get(y_, y_)} + {ek}"
                 kalib_sutun.setdefault(ON_EK + y_, []).append(c)
     kontrol_sutun = {}
+    sabit_kontrol = []   # madde içinde sabit tahmin: karıştırma kişi bilgisini sınamaz, atlanır
     for y_ in ([] if tahmin_gorevi else dict.fromkeys([bizim] + ([ham] if ham else []))):
+        if _madde_ici_sabit(veri, ON_EK + y_):
+            sabit_kontrol.append(ON_EK + y_)
+            continue
         c = f"kontrol_karistir_{y_}"
         d[c] = merdiven.karistir(veri, ON_EK + y_, tohum + 1)
-        turler[c], etiket[c] = "kontrol", f"{etiketler.get(y_, y_)} · karıştırılmış"
+        turler[c], etiket[c] = "kontrol", f"{etiketler.get(y_, y_)} · " + (
+            "tahmin karıştırma (persona takası değil)" if veri.gorev == "cok_sinif" else "karıştırılmış")
         kontrol_sutun[ON_EK + y_] = c
     sutunlar = list(turler)
     girdiler = {c: _diz(veri, c) for c in sutunlar}
@@ -535,6 +640,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         a, u = gaa(tekrar[c][birincil], deg(c))
         r = {"sutun": c, "etiket": etiket[c], "tur": turler[c], "deger": deg(c), "alt": a, "ust": u,
              "fark_onceki": None, "fark_alt": None, "fark_ust": None, "p": None}
+        if c in bilgi_b:
+            r["bilgi"] = "B"
         if i:
             r["fark_onceki"], r["fark_alt"], r["fark_ust"], r["p"] = fark(c, adim[i - 1])
         merd.append(r)
@@ -542,7 +649,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     # ---- manşet
     bc = ON_EK + bizim
     tabanlar = [c for c in turler if turler[c] == "baseline" and np.isfinite(deg(c))]
-    en_iyi_b = max(tabanlar, key=lambda c: M.yon * deg(c)) if tabanlar else None
+    # rozet / manşet: bizimle aynı bilgi düzeyindeki (ayar A) en güçlü taban; ayar-B tabanı yalnız merdivende ve denetimde
+    tabanlar_a = [c for c in tabanlar if c not in bilgi_b] or tabanlar
+    en_iyi_b = max(tabanlar_a, key=lambda c: M.yon * deg(c)) if tabanlar_a else None
+    b_ustte = [c for c in tabanlar if c in bilgi_b and en_iyi_b and c != en_iyi_b
+               and M.yon * deg(c) > M.yon * deg(en_iyi_b)]
     bildirilen = [c for c in tabanlar if taban_turu.get(c) in ("etiketsiz", "oof")]
     # hiç taban bildirilmediyse ve en güçlüsü rastgele/marjinal ise rozet yalnız basit bir tabana karşıdır: açıkça yazılır
     yalniz_basit = bool(en_iyi_b) and not bildirilen and en_iyi_b in ("taban_rastgele", "taban_marjinal")
@@ -665,6 +776,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     madde_den = "taban_marjinal" in nokta and madde_var and veri.gorev != "ab"
     if madde_den:
         den.append(denetim.fark_denetimi("madde ortalamasını geçiyor mu", bc, "taban_marjinal", tekrar, nokta, M, "bizim − marjinal"))
+        if "taban_marjinal" in bilgi_b:
+            den[-1]["ayrinti"] += (" · ayar-B tabanı: hedef sorunun öbür grup/hücrelerinin cevabını okur (örtüşen segment "
+                                   "şemalarında dışarıda bırakılan hücrenin kişileri de içinde olabilir); rozete dayanak "
+                                   "değil (setting-B baseline, not used for the badge)")
+            den[-1]["bilgi"] = "B"
     if en_iyi_b and not (madde_den and en_iyi_b == "taban_marjinal"):
         den.append(denetim.fark_denetimi("en güçlü basit tabanı geçiyor mu", bc, en_iyi_b, tekrar, nokta, M, "bizim − taban"))
     if en_iyi_r:
@@ -672,9 +788,22 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         den.append({"kontrol": "en güçlü diğer yöntem", "durum": "uyari" if M.yon * f_ < 0 else "tamam", "deger": f_,
                     "ayrinti": f"{birincil}: bizim − {etiket[en_iyi_r]} = {_f(f_)} [{_f(a_)}, {_f(u_)}], p={_f(p_, 3)}"
                                + (" · başka bir yöntem bizden iyi" if M.yon * f_ < 0 else "")})
-    if bc in kontrol_sutun:
+    takas_ipucu = ('persona takası için takas kolunu compare=(ours, swap, "persona swap") ile verin '
+                   '(pass the swap arm via compare=(ours, swap, "persona swap"))')
+    if bc in kontrol_sutun and veri.gorev == "cok_sinif":
+        # N'li tanıma / çok sınıf: karıştırma seçilen etiketi başka birime taşır; persona takası değildir
+        den.append(denetim.fark_denetimi("tahmin karıştırma (persona takası değil)", bc, kontrol_sutun[bc],
+                                         tekrar, nokta, M, "bizim − karıştırılmış tahmin"))
+        den[-1]["ayrinti"] += f" · madde içinde tahmin etiketleri birimler arasında karıştırıldı; {takas_ipucu}"
+    elif bc in kontrol_sutun:
         den.append(denetim.fark_denetimi("persona karıştırma (birey bilgisi kullanılıyor mu)", bc, kontrol_sutun[bc],
                                          tekrar, nokta, M, "bizim − karıştırılmış"))
+    elif bc in sabit_kontrol:
+        den.append({"kontrol": "persona karıştırma (birey bilgisi kullanılıyor mu)", "durum": "atlandi", "deger": None,
+                    "uygulanamaz": True,
+                    "ayrinti": "atlandı: tahmin her maddede birimler arasında sabit (kişi bilgisi yok); karıştırma "
+                               "bizimle aynı sonucu verirdi (skipped: predictions constant within item, no person "
+                               f"information); {takas_ipucu}"})
     if "madde_ici_kor" in nokta.get(bc, {}) and bc in kontrol_sutun:
         # karıştırma kontrolü yoksa (tahmin görevi) bizim − bizim = 0 anlamsız satırı yazılmaz
         mm = {m.ad: m for m in metrikler}["madde_ici_kor"]
@@ -700,6 +829,14 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                     "ayrinti": f"bildirilmiş taban yok; en güçlü taban {etiket[en_iyi_b]} (otomatik rastgele/marjinal). "
                                "Rozet bu basit tabana karşı: gerçek tabanları unlabeled_baselines= (etiketsiz) ya da "
                                "baselines_oof= (etiketle eğitilmiş, çapraz uydurmalı) ile bildirin"})
+    if b_ustte:
+        den.append({"kontrol": "bilgi düzeyi (ayar A / ayar B)", "durum": "uyari", "deger": len(b_ustte), "bilgi": "B",
+                    "ayrinti": f"ayar-B tabanı {', '.join(etiket[c] for c in b_ustte)} ({_f(deg(b_ustte[0]))}) en güçlü "
+                               f"ayar-A tabanından ({etiket[en_iyi_b]} {_f(deg(en_iyi_b))}) iyi; hedef sorunun öbür "
+                               "hücrelerinin gerçek cevabını kullandığı için rozet ayar-A tabanına karşıdır "
+                               "(setting-B baseline beats the strongest setting-A one; badge is against setting A)"})
+    dolgu_den, dolgu = _dolgu_denetimi(veri, etiket)
+    den.extend(dolgu_den)
     den.append(denetim.cokus(yay, bc))
     dz = denetim.dengesizlik(veri)
     if dz:
@@ -796,10 +933,41 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         elif kor_ozet["korunan_pay"] is not None:
             den.append({"kontrol": "kör kol (tanıma kontrolü)", "durum": "tamam", "deger": kor_ozet["korunan_pay"],
                         "ayrinti": f"kör kol kazancın %{100 * kor_ozet['korunan_pay']:.0f}'ini koruyor"})
-    for a_, b_, et_ in kiyaslar or []:
+    # kayıtlı mı sonradan mı: ön kayıt metni (mühür açıklaması / prereg_texts) varsa a/b adları orada aranır;
+    # açık posthoc=True (4. öğe ya da dict anahtarı) her zaman "sonradan". Metin yoksa satır eskisi gibi "kayitli".
+    on_metin, _gec = _onkayit_metinleri(onkayit, onkayit_metin)
+    metin_var = bool(on_metin or _gec)
+    zayif = []
+    for k_ in kiyaslar or []:
+        if isinstance(k_, dict):
+            a_, b_, et_, ph_ = k_.get("a"), k_.get("b"), k_.get("label", k_.get("etiket")), k_.get("posthoc")
+        else:
+            a_, b_, et_, ph_ = (tuple(k_) + (None, None))[:4]
         ac, bc_ = _cozum(a_), _cozum(b_)
-        kayitli.append(_kiyas(ac, bc_, et_ or (f"{etiket.get(ac, ac)} − {etiket.get(bc_, bc_)}" if bc_ else
-                                               f"{etiket.get(ac, ac)} (0'a karşı)"), "kayitli"))
+        r_ = _kiyas(ac, bc_, et_ or (f"{etiket.get(ac, ac)} − {etiket.get(bc_, bc_)}" if bc_ else
+                                     f"{etiket.get(ac, ac)} (0'a karşı)"), "kayitli")
+        if ph_ is None and metin_var:
+            adlar_ = [str(x).removeprefix(ON_EK) for x in (a_, b_) if x is not None]
+            ph_ = not _kiyas_kaydi(adlar_, et_, on_metin)
+        if ph_ is not None:
+            r_["kayit"] = "sonradan" if ph_ else "kayitli"
+        if ph_:
+            r_["tur"] = "posthoc"
+            r_["etiket"] = f"{r_['etiket']} ({KIYAS_SONRADAN})"
+        # b bir taban ama en güçlü (aynı bilgi düzeyindeki) taban değil: kayıtlı fark zayıf tabana karşı
+        if (bc_ and en_iyi_b and bc_ != en_iyi_b and turler.get(bc_) == "baseline" and bc_ not in bilgi_b
+                and M.yon * deg(bc_) < M.yon * deg(en_iyi_b)):
+            r_["zayif_taban"] = {"b": bc_, "b_deger": deg(bc_), "en_guclu": en_iyi_b,
+                                 "en_guclu_etiket": etiket[en_iyi_b], "en_guclu_deger": deg(en_iyi_b)}
+            zayif.append(r_)
+        kayitli.append(r_)
+    if zayif:
+        den.append({"kontrol": "kayıtlı karşılaştırma zayıf tabana karşı", "durum": "uyari", "deger": len(zayif),
+                    "ayrinti": "; ".join(f"{r_['etiket']}: b = {etiket.get(r_['b'], r_['b'])} {_f(r_['zayif_taban']['b_deger'])}"
+                                         for r_ in zayif)
+                               + f" · en güçlü bildirilen taban {etiket[en_iyi_b]} = {_f(deg(en_iyi_b))}; kazanç zayıf "
+                                 "tabana karşı ölçülüyor, en güçlü tek tabana karşı kaydedin (b is weaker than the "
+                                 "strongest reported baseline)"})
     ezber_d = next((x for x in den if str(x.get("kontrol", "")).startswith("ezber testi")), None)
     ezber_uyari = None
     nedenler = []
@@ -917,6 +1085,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         ozet["gurultu_tavani"] = gurultu
     if kayitli:
         ozet["kayitli_karsilastirmalar"] = kayitli
+    if bilgi_b:
+        ozet["bilgi_duzeyi"] = {"B": bilgi_b, "B_ustte": b_ustte, "rozet_tabani": en_iyi_b, "etiket": BILGI_B_ETIKET}
+    if dolgu:
+        ozet["dolgu"] = {"esik": DOLGU_ESIK, "kollar": dolgu}
     if kor_ozet is not None:
         ozet["kor_kol"] = kor_ozet
     if ezber_uyari is not None:
@@ -950,18 +1122,7 @@ def _onkayit_kaniti(bizim: str, onkayit: list | None, metinler: list | None, adl
     (ours:/primary:/bizim:/birincil: <ad>) belirsizdir.
     Dönüş: (kod, açıklama), kod ∈ {"adlandirildi", "bulunamadi", "sonra", "belirsiz"}."""
     import re as _re
-    zamanlar = [z for z in (_muhur_zamani(r) for r in onkayit or [] if isinstance(r, dict)) if z is not None]
-    sinir = max(zamanlar) if zamanlar else None
-    gecerli, gec = [], []
-    for r in onkayit or []:
-        if isinstance(r, dict):
-            gecerli += [str(r[k]) for k in ("aciklama", "description") if r.get(k)][:1]
-    for t in metinler or []:
-        if isinstance(t, dict):
-            z = t.get("zaman")
-            (gec if sinir is not None and z is not None and int(z) > int(sinir) else gecerli).append(str(t.get("metin", "")))
-        else:
-            gecerli.append(str(t))
+    gecerli, gec = _onkayit_metinleri(onkayit, metinler)
     kalip = _ad_kalibi(bizim)
     eslesen = [g for g in gecerli if kalip.search(g)]
     if not eslesen:
