@@ -35,6 +35,8 @@ Each term is min-max scaled to [0, 1]. A term that is constant across all memori
 
 The paper resets recency each time a memory is retrieved. This module does not, because `render` must stay pure.
 
+`memory_stream` and `memory_reflect` treat the target as asked after every known answer: "now" is the latest known position, so answers that come after the target in the questionnaire count as the most recent memories. `memory_session(prior_only=True)` is the arm that keeps strictly earlier questions only.
+
 **Reflection.** `reflect()` follows section 4.2 of the paper:
 
 1. From the 100 most recent records, it asks for the "3 most salient high-level questions" about the person.
@@ -46,7 +48,7 @@ Any insight without a valid citation is dropped. Each reflection stores:
 - `sources`: the qids it cites.
 - `seen`: every qid the LLM was shown.
 
-`memory_reflect` drops any reflection whose `seen` list contains the target or one of its `exclude` ids. It records the number dropped in `meta["reflections_dropped"]`. A reflection without a `seen` list raises an error.
+`memory_reflect` drops any reflection whose `seen` list contains the target or one of its `exclude` ids. It records the number dropped in `meta["reflections_dropped"]`. A reflection without `text` or without a `seen` list (a list, tuple or set of qids; a bare string is refused) raises an error.
 
 To evaluate on held-out questions, call `reflect(..., hide=test_qids)` once per person. A strict leave-one-out run would need one `reflect` call per target.
 
@@ -54,21 +56,21 @@ The paper triggers reflection when the summed importance of recent events passes
 
 **Session.** `memory_session` presents the stream in raw chronological order, which corresponds to the paper's observation log without retrieval. With `as_history=False`, it renders the same turns as `- question: answer` lines in the system prompt. `compare_injectors` flattens the history unless the LLM sets `supports_history`.
 
-Every `render` is deterministic: it has no random component, and ties break by later time, then by id. Long parameter values, such as question lists and maps, appear in arm labels as a 6-character hash, so labels stay short and stable.
+Every `render` is deterministic: it has no random component, and ties break by later time, then by id. Long parameter values, such as question lists and maps, appear in arm labels as a 6-character hash, so labels stay short and stable. Callables appear by `__name__`, so two arms that differ only by two lambdas get the same label and `compare_injectors` refuses them as duplicates; use named functions.
 
 ## Published effect sizes
 
-The paper measured believability in an agent sandbox, not survey prediction. Participants ranked the conditions, and the scores are TrueSkill μ from the paper's controlled evaluation (100 participants):
+The paper measured believability in an agent sandbox, not survey prediction. Participants ranked the conditions, and the scores are TrueSkill μ (σ) from the paper's controlled evaluation (100 participants; checked against arXiv:2304.03442v2):
 
-| condition | μ |
+| condition | μ (σ) |
 |---|---|
-| full architecture | 29.89 |
-| no reflection | 26.88 |
-| no reflection, no planning | 25.64 |
-| human crowdworker | 22.95 |
-| no memory, no reflection, no planning | 21.21 |
+| full architecture | 29.89 (0.72) |
+| no reflection | 26.88 (0.69) |
+| no reflection, no planning | 25.64 (0.68) |
+| human crowdworker | 22.95 (0.69) |
+| no observation, no reflection, no planning | 21.21 (0.70) |
 
-The paper reports d = 8.16 for the full architecture against the fully ablated baseline. These are believability rankings and do not transfer to answer accuracy.
+The paper reports Cohen's d = 8.16 for the full architecture against the fully ablated ("prior work") condition. These are believability rankings and do not transfer to answer accuracy.
 
 **In simengine:** not yet measured. No real LLM run has been made, only FakeLLM tests (`tests/test_persona_inject_memory.py`).
 
