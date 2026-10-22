@@ -36,11 +36,14 @@ Keys inside the score dicts are case-insensitive, and `_` or a space counts as `
 Errors:
 - A missing field raises `MissingPersonField`, and the message lists the arm's `needs`. A score dict whose
   values are all `None` raises it too.
-- An unknown key, a non-number (including bool or NaN), or a score outside `scale` raises `ValueError` naming
-  the person and the field.
+- An unknown key, a key given twice (`purity` and `sanctity`, or `power` and `POWER`), a non-number (bool,
+  NaN or infinity), or a score outside `scale` raises `ValueError` naming the person and the field. numpy and
+  pandas scalars count as numbers.
 
 Leakage: none of these injectors shows the person's answers. Each reads only the fields above, so
-`known_answers` is not needed.
+`known_answers` is not needed. The scores themselves can leak, though: a Schwartz or MFQ score computed from
+survey items that include the target question (a PVQ item predicted from PVQ means, an MFQ item from MFQ
+relevance scores) carries the answer. Compute the scores without the target item and its `exclude` ids.
 
 Determinism: ties in a ranking, `order="shuffle"` and `variant="random"` use a hash of (`seed`, person id), so a
 rerun renders the same text.
@@ -61,14 +64,20 @@ What the paper did: Kang et al.'s prompt baselines (LLaMA_Short / LLaMA_Long / C
 asked the model to roleplay a person described by a score on each of the ten Schwartz values on the PVQ 1-6
 scale. The Long variant adds each value's definition. Their main method, VIM, fine-tunes LLaMA on argument
 generation and question answering. The fine-tuning is not part of this injector; see the `finetune` family.
+The targets were group profiles, not individuals: 100 K-means cluster means and 28 country means of the PVQ
+value scores of 54,763 ESS respondents.
 
-What this injector renders: the system prompt is "Let's roleplay..." with the scale, optional definitions
-(`definitions=False` gives the Short variant), "- Value: score" lines, and "As this person, please answer". The
-user turn is the question block. `order="rank"` or `"shuffle"` changes the order of the score lines, which is
-an order-sensitivity check.
+What this injector renders: the paper's prompt as printed, in the system turn. The default is the Long prompt
+(Table 23): "Let's roleplay.", the scale sentence, "Value Definition:" lines, "Value Score:" lines, then "As
+this person, please answer the following question." and "You just have to choose the answer, you don't have
+to explain it." `definitions=False` gives the Short prompt (Table 22), which has no scale sentence and no
+definitions. "Please choose only one option, even if you're not sure." is added only when the question has
+options. Only the scale bounds change with `scale`; the paper's wording ("who have", "him") is kept. The user
+turn is the question block. `order="rank"` or `"shuffle"` changes the order of the score lines, which is an
+order-sensitivity check.
 
 Published effect: these prompt baselines are the paper's comparison arms, not its method. Value survey (PVQ),
-average NMSE over 128 target profiles, where lower is better: LLaMA_Short 0.196, LLaMA_Long 0.189, ChatGPT_Long
+average NMSE over the 128 target profiles, where lower is better: LLaMA_Short 0.196, LLaMA_Long 0.189, ChatGPT_Long
 0.146, against fine-tuned ViLLaMA 0.034 (Table 2). ESS opinion prediction, average NMSE: LLaMA_Long 0.137,
 ChatGPT_Long 0.169, ViLLaMA 0.099 (Table 4). ChatGPT_Long refused about 18% of ESS questions (Table 11), so its
 ESS score is not comparable. Source: arXiv:2310.17857.
@@ -88,15 +97,19 @@ one value per persona.
 
 Published effect: the paper measured value structure, not individual prediction. As the sum of squared
 differences between the LLM's and the humans' MDS value circle, where lower is better, Value Anchor scored
-0.10-0.23 against 0.42-0.92 for the basic prompt. It was best in 11 of 12 model x temperature rows (GPT-4,
-Gemini Pro, Llama 3.1 8B/70B, Gemma 2 9B/27B; Table 1). No confidence intervals were reported. Source:
+0.10-0.23 against 0.42-0.92 for the basic prompt (one basic cell is NA). Over the 12 model x temperature rows
+(GPT-4, Gemini Pro, Llama 3.1 8B/70B, Gemma 2 9B/27B at temperature 0 and 0.7; Table 1) it was lowest in 10,
+tied with the Persona prompt in one (GPT-4 at 0.7, 0.22) and beaten by the Demographic prompt in one (Gemma 2
+27B at 0.7, 0.15 against 0.17). No confidence intervals were reported. Source:
 arXiv:2407.12878.
 
 ### `moral_foundations`
 
 What the paper did: Abdulhai et al. searched for prompts that maximize each MFQ foundation in GPT-3 DaVinci2
-and reported the winning sentence per foundation (Table 2). The paper has no liberty sentence. Its sanctity
-sentence reads like hierarchy, and the paper itself calls this counterintuitive.
+and reported the winning sentence per foundation (Table 2). The sentences steer the model's own MFQ profile;
+using them to stand for a person's strongest foundation is simengine's use, not the paper's. The paper has no
+liberty sentence. Its purity sentence reads like hierarchy; the paper notes that it "could be seen as a prompt
+speaking to respect for Authority" yet gave the highest Purity score.
 
 What this injector renders:
 - `style="statements"` (default): the paper's sentence, verbatim, for the person's top-`k` foundations.
@@ -106,8 +119,9 @@ What this injector renders:
   This is a simengine adaptation; neither paper ran it.
 
 Published effect: in the paper's downstream donation task (GPT-3, 20 runs per prompt), the mean donation was
-92.66 with no prompt. It was 144.87 with the loyalty sentence, 112.45 with sanctity, 108.07 with fairness, 97.71
-with authority and 88.09 with care (Table 2). This shows the sentences move behaviour. It is not a measure of
+92.66 ± 15.17 with no prompt. It was 144.87 ± 6.35 with the loyalty sentence, 112.45 ± 14.91 with purity,
+108.07 ± 17.15 with fairness, 97.71 ± 35.91 with authority and 88.09 ± 34.64 with care (Table 2). Only loyalty
+moves clearly outside the no-prompt spread. This shows the sentences can move behaviour. It is not a measure of
 how well they predict a person. Source: arXiv:2310.15337.
 
 ### `hofstede_country`
@@ -124,9 +138,11 @@ extension: the paper names the country only.
 
 Published effect: the correlation between a country's Hofstede score and the share of advice favouring that
 side was 0.39 (individualism), 0.19 (masculinity) and 0.39 (uncertainty avoidance) with GPT-4 personas. For
-power distance it was negative (-0.49), and for long-term orientation it was near zero. Personas gave a
+power distance it was negative (-0.49), and for long-term orientation it was -0.03. Personas gave a
 significant positive correlation in 17 of 25 model x dimension cells, against 4 of 25 for language-only
-prompting (Table 2). The paper's conclusion is that models know the values but often do not act on them. Source:
+prompting (Table 2; counted from the table). The paper's text says instead that only one combination was
+significant (GPT-4o, individualism, high-resource languages, language-only, r = 0.71), which matches no
+Table 2 cell; the table is quoted here. The paper's conclusion is that models know the values but often do not act on them. Source:
 arXiv:2406.14805.
 
 ### `cultural_prompting`
@@ -137,12 +153,14 @@ living in [country] responding to the following survey question." and tested ten
 country's position.
 
 What this injector renders: the same sentence. `variant` picks the descriptor; `"random"` picks one per person
-from the seed. `birth_country`, when given, fills the "born in" slot. `map=True` adds the caller's
-Inglehart-Welzel coordinates and a one-paragraph explanation of the two axes, and then also needs `ivs_map`.
-This is a simengine extension: the paper used the map only to score replies, never in the prompt.
+from the seed (the paper averaged each country over all ten). `birth_country`, when given, fills the "born in"
+slot; this is a simengine extension, as the paper always used the same country in both slots. `map=True` adds
+the caller's Inglehart-Welzel coordinates and a one-paragraph explanation of the two axes, and then also needs
+`ivs_map`. This is a simengine extension: the paper used the map only to score replies, never in the prompt.
 
-Published effect: for GPT-4, GPT-4-turbo and GPT-4o, cultural prompting improved cultural alignment for 71-81%
-of countries and territories (abstract). Source: arXiv:2311.14096.
+Published effect: cultural prompting improved cultural alignment for 71.0% of countries and territories with
+GPT-4o, 81.3% with GPT-4-turbo and 77.6% with GPT-4. For GPT-4o the mean distance to the country's IVS position
+fell from 2.42 to 1.57. These are country-level results. Source: arXiv:2311.14096.
 
 ## Measured in simengine
 
@@ -152,9 +170,9 @@ They are not an effect size.
 
 ## Caveats
 
-- **Group-level papers:** Rozen, Abdulhai, Kharchenko and Tao measure group-level structure or shift, not
-  individual prediction. Only Kang et al. score individual-profile prediction, and their best numbers come from
-  fine-tuning, not from the prompt this family renders.
+- **Group-level papers:** none of the five papers scores how well a prompt predicts one person. Kang et al.
+  score group profiles (cluster and country means), and their best numbers come from fine-tuning, not from the
+  prompt this family renders. Rozen, Abdulhai, Kharchenko and Tao measure group-level structure or shift.
 - **Score sources:** Hofstede and IVS country scores are not shipped. Check the licence of the table you use,
   and cite it in your run notes.
 - **Scales:** `schwartz_scores` checks against `scale`. Centred PVQ scores (negative) need
