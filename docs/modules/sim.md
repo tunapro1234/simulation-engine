@@ -29,8 +29,10 @@ signal.
 | `paars_decision` | `ab.py` | Forced-choice decision from per-persona A/B scores, with a confidence threshold (0.65). |
 | `ab_many` | `ab.py` | Many pairwise tests per call, with all readers in one prompt. The prompt is verbatim from the Upworthy rehearsal. Returns `p_a` with Laplace smoothing. |
 | `roundtable`, `roundtable_frame` | `roundtable.py` | Multi-round discussion. Round 0 is independent. In later rounds each persona sees its own previous answer and a summary of its segment (or of the whole table). `CONFIRMATION_BIAS` and `KEEP_VIEW` are the measured stance instructions. |
+| `roundtable_strategy` (alias `roundtable_conditions`), `roundtable_strategy_frame`, `hide_persona_fields` | `roundtable.py` | Strategy comparison at an interacting table: one `roundtable` per condition on the same panel (`{id: text}` or a list; `hide_fields=("condition",)` keeps the RCT arm out of the prompt). Output: condition × round × segment means (`table`), paired effect vs the `control` table per round (`effects`), last round − round 0 per persona with bootstrap CI and the change of the effect (`shift`), and `ranking` in round 0 and the last round. The frame helper reuses `roundtable_frame` (unit `<condition>|<unit>`); `effect=True` gives condition − control predictions to score against observed effects. CIs resample personas and ignore the within-table dependence of later rounds. |
 | `strategy`, `strategy_frame` | `strategy.py` | Two or more scenarios × segments. Each persona gives a 0-100 intent and a reason per scenario. Output: ranking, win probability, sign test on the top two, and the segment whose profile diverges most. |
 | `segment_distribution`, `distribution_prompt`, `FRAMINGS_NAMED`, `FRAMINGS_HIDDEN` | `distribution.py` | No personas. Makes one call per segment × question × framing ("estimate the percentage of these respondents who would choose each option"), then averages the 3 framings. An invalid reply becomes a uniform vector (or is skipped with `fallback="skip"`). |
+| `effect_forecast`, `effect_frame`, `memorisation_check`, `EffectForecast` | `effect.py` | No personas. Asks for every condition's effect against control in one JSON object per arm × framing × sample (independent draws via `sample=k`), averages per condition, and returns a condition × arm table: hidden arm always, named arm (study named) with `named=`, plus named − hidden as a memorisation probe and refused / unparsed / failed / invalid counts. Import from `simengine.sim.effect`. See "Direct effect forecasts" below. |
 | `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means. |
 | `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`), and the normalised ordinal W1 used for the makro numbers. |
 | `predict_people`, `prediction_frame` | `prediction.py` | Per-person prediction. L0 is a no-persona population prior over `l0_samples` samples. L1 uses the person's own survey answers. L2 is L1 plus the person's past behaviour in the same items. SSR asks for one first-person sentence per item. It takes independent `samples` (passed as `sample=j`) and re-asks with "JSON only" when parsing fails. |
@@ -39,6 +41,7 @@ signal.
 | `retest_stats` | `prediction.py` | Test-retest of repeated samples: within-cell sd, share of identical cells, pairwise r, per-item signal vs noise, Spearman-Brown. |
 | `ask_panel`, `build_prompts`, `Usage` | `panel.py` | Batched persona questioning: one JSON object per persona id. It accepts an array, a single object, an `{id: {...}}` mapping or a wrapper. It remaps ids by position only when no id matched and the counts are equal. Missing answers are counted, not invented. Soft refusals are detected, kept out of the disk cache and re-asked once with `REFRAME_NOTE`. Every call carries a ledger `tag`. |
 | `looks_like_refusal`, `REFRAME_NOTE` | `panel.py` | Refusal check used by `ask_panel`: `simengine.llm.looks_like_refusal`, or a small local regex if that import fails. It is only applied to replies that have no usable JSON answer. `REFRAME_NOTE` is the research-forecast wording used for the re-ask. |
+| `print_events`, `Emitter` | `_stats.py` | Every runner takes `on_event=`. `print_events` is a ready callback that prints one flushed line per event (`HH:MM:SS [runner] stage …` / `row <pid> <segment> <value>: …` / `done …`), so a background run (`python run.py > log`) shows progress. Other prints need `python -u` or `PYTHONUNBUFFERED=1`. |
 | `schema_responder` | `panel.py` | Deterministic `FakeLLM` responder for every prompt in this module (dry runs and tests). It is never a measurement. |
 | `as_personas`, `PersonaView`, `control_personas`, `control_plan` | `personas.py` | Duck-typed persona adapter for TALP-schema dicts, objects with `to_dict()`, flat dicts and strings. Control arms: `no_persona` gets a neutral "typical adult consumer" text. `persona_swap` applies a cyclic shift: each persona keeps its own id, name and tagline and takes the next persona's content. `control_plan` keeps the control arms within the main arm's call count. |
 | `FieldSpec`, `validate_answers`, `ask_constrained`, `ConstrainedResult`, `completion_summary` | `constrained.py` | Schema-constrained JSON answers (int / float / choice / text, bounds, choices by value or display text). A failed check re-prompts with the error text, up to 8 calls; 4+ fields are asked one at a time with the earlier answers in the prompt. A field that never validates stays missing and is logged. `completion_summary` gives n_planned, n_completed and per-field failure counts per condition. |
@@ -309,6 +312,39 @@ primary measure).
   every seed (1b(c) −0.028 / −0.025 / −0.041) and far below the history model (−0.102..−0.125). Free-text sentences
   carry some person-specific signal, but less than the numeric prompt. Cost: 1,043 calls, $0.678.
 
+## Direct effect forecasts (`effect.py`)
+
+The model's own judgment of each condition's effect, with no simulated respondents (G1 rehearsal, the direct arm
+L1; it was hand-written there as a `complete_json` loop). `segment_distribution` gives answer distributions;
+this gives one number per treatment condition: treatment mean − control mean, in outcome units.
+
+```python
+from simengine.sim.effect import effect_forecast, effect_frame, memorisation_check
+
+conds = {"Control": "No message.", "norms": "Most people in your country support ...", "fear": "..."}
+res = effect_forecast(llm, conds, "support for climate policy (0-100)", scale=(0, 100),
+                      framings=3, samples=2, named="<study or dataset name>", context="Online panel.")
+res.table        # condition, hidden, sd_hidden, n_hidden (+ named, sd_named, n_named, named_minus_hidden)
+res.probe        # named - hidden: mean, mean |diff|, largest gap, Spearman between the arms
+res.refused, res.unparsed, res.failed, res.invalid, res.planned, res.calls
+effect_frame(res, truth)            # EvalFrame: truth, pred_effect_hidden (+ pred_effect_named)
+memorisation_check(res, truth)      # Spearman per arm vs measured effects, named - hidden, paired bootstrap CI
+```
+
+- One call per arm × framing × sample returns all conditions at once (`{"effects": {id: number}}`), so the model
+  compares them side by side. `correlation_audit` asks per key, which did not fit this arm.
+- Three built-in framings (`FRAMINGS`), or pass your own templates with `{study}` and `{context}` slots. Samples
+  are passed as `sample=k` (k ≥ 1) for backends that key their cache on it; `sample_kw=None` puts
+  "(Forecast k of n.)" in the prompt instead.
+- The hidden arm is the forecast to use. The named arm only shows whether naming the study moves the numbers.
+  `memorisation_check` warns when the named arm's Spearman is ≥ hidden + 0.2 (the G1 pre-registration rule) or the
+  bootstrap CI of the gap lies above 0; under 4 conditions with truth it says `too_few`.
+- A refusal is re-asked once with the research-forecast note; a reply with no JSON is re-asked once with "Return only
+  valid JSON". What still fails is counted, never imputed. With numeric `scale=(lo, hi)`, an effect larger than
+  hi − lo is invalid.
+- Simulated respondents instead of a direct question: `simengine.research.hypotheses.forecast_experiment` (Hewitt
+  et al. 2024 protocol: profiles × prompt bank per condition, effect = condition mean − control mean).
+
 ## Schema-constrained answers (`constrained.py`)
 
 Ported from replicant's oTree bot (`src/replicant/otree/bot.py`, pyreplicant 0.3.0, MIT; credit to the replicant
@@ -391,6 +427,13 @@ Deviations from replicant, all deliberate:
   measured in this English form.
 - **SSR is off unless you pass it in.** Pass `ssr=SSR()` (or `True`) to turn it on, so a run never downloads
   a model by surprise.
+- **SSR on long texts and offline.** `SSR(max_chars=2000)` (the default; `None` = no cut, the old behaviour;
+  `embed(texts, max_chars=...)` overrides per call) cuts each text before encoding: bge-base reads at most 512
+  tokens anyway. `cache_dir=` stores one `.npy` per text keyed by sha256(model name + text), written atomically,
+  so reruns and other processes skip texts already embedded. `progress=True` prints one stderr line per
+  `progress_every` new texts with texts/s; a callable gets `(done, total, texts_per_s)`. No CPU throughput figure
+  is given here because none was measured with this code. A model missing from the local cache raises an
+  `OSError` naming `SIMENGINE_HF_CACHE`, `cache_folder`, `HF_HOME` and `offline=False`.
 - **Retries.** `predict_people` re-asks with a "(Attempt n: reply with the JSON object only.)" suffix, so a
   cached backend does not return the same bad answer. talp73 retried inside its backend.
 - **Generalised prompts.** `persona_distribution` takes `setting=` in place of the fixed "public opinion survey
@@ -408,7 +451,7 @@ Deviations from replicant, all deliberate:
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
 profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
 `test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
-`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column) (123 tests, offline, FakeLLM, under 1 s):
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check) (123 tests, offline, FakeLLM, under 1 s):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
