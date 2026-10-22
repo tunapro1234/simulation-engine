@@ -111,10 +111,11 @@ class TestSpendTSV(unittest.TestCase):
             c.complete("s", "u", tag="t")
         self.assertEqual(tsv_rows(d / "s.log")[0][1], "ag")
 
-    def test_ledger_instance_plus_spend_log_is_an_error(self):
+    def test_ledger_instance_plus_conflicting_spend_log_is_an_error(self):
+        # a ledger without a TSV takes spend_log= (test_llm_recete.py); only a different explicit TSV raises
         d = tmpdir(self)
         with self.assertRaises(ValueError):
-            make(FakeClient(), ledger=CostLedger(None), spend_log=d / "x.log")
+            make(FakeClient(), ledger=CostLedger(None, tsv_path=d / "a.log"), spend_log=d / "x.log")
 
     def test_claude_code_rows(self):
         d = tmpdir(self)

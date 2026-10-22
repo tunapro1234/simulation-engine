@@ -82,6 +82,11 @@ def tsv_line(row: dict, agent: str, tag_prefix: str = "") -> str:
     return "\t".join(_tsv_field(vals[c]) for c in TSV_COLUMNS) + "\n"
 
 
+def _tsv(tsv_path) -> Path | None:
+    """tsv_path argument -> Path (with ~ expanded) or None (None / False / "" = no TSV)."""
+    return Path(os.path.expanduser(str(tsv_path))) if tsv_path not in (None, False, "") else None
+
+
 def _append_locked(path: Path, line: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -105,14 +110,20 @@ class CostLedger:
     warns once and never fails the call (the spend is already in the JSONL ledger).
     tag_prefix (None = env SIMENGINE_SPEND_TAG_PREFIX, else "") is prepended to the TSV tag column and stored as
     the JSONL field `tag_prefix` when not empty; tag_prefix="" ignores the env var.
+
+    `attach(tsv_path=, agent=, tag_prefix=)` fills settings that were not given explicitly here (env/default values
+    are replaced) and raises ValueError only when an explicit value differs; backends call it for
+    `Claude(ledger=CostLedger(...), spend_log=..., agent=..., tag_prefix=...)`.
     """
 
     def __init__(self, path: str | os.PathLike | None = None, *, tsv_path: str | os.PathLike | bool | None = None,
                  agent: str | None = None, tag_prefix: str | None = None):
         self.path = Path(path) if path is not None else None
+        # which settings came from an argument (not env/default): attach() may only replace the others
+        self._explicit = {"tsv_path": tsv_path is not None, "agent": bool(agent), "tag_prefix": tag_prefix is not None}
         if tsv_path is None:
             tsv_path = os.environ.get(SPEND_LOG_ENV, "").strip() or None
-        self.tsv_path = Path(os.path.expanduser(str(tsv_path))) if tsv_path not in (None, False, "") else None
+        self.tsv_path = _tsv(tsv_path)
         self.agent = agent if agent else (os.environ.get(AGENT_ENV, "").strip() or DEFAULT_AGENT)
         if tag_prefix is None:
             tag_prefix = os.environ.get(TAG_PREFIX_ENV, "").strip()
@@ -122,6 +133,32 @@ class CostLedger:
         self._mem: list[dict] = []
         self._offset = 0          # bytes of the file already summed
         self._total = 0.0
+
+    def attach(self, *, tsv_path: str | os.PathLike | bool | None = None, agent: str | None = None,
+               tag_prefix: str | None = None) -> "CostLedger":
+        """Set tsv_path / agent / tag_prefix (None = leave as is). A setting this ledger got explicitly must match
+        (same TSV path, agent, prefix), else ValueError naming the conflict; nothing changes on an error.
+        Settings from env vars or defaults are replaced. Attached values count as explicit afterwards, so two
+        backends sharing one ledger cannot silently disagree."""
+        new = {}
+        if tsv_path is not None:
+            new["tsv_path"] = _tsv(tsv_path)
+        if agent:
+            new["agent"] = str(agent)
+        if tag_prefix is not None:
+            new["tag_prefix"] = str(tag_prefix)
+        names = {"tsv_path": "spend_log", "agent": "agent", "tag_prefix": "tag_prefix"}
+        clash = [k for k, v in new.items() if self._explicit[k] and getattr(self, k) != v]
+        if clash:
+            have = ", ".join(f"{k}={getattr(self, k)!s:.80}" for k in clash)
+            got = ", ".join(f"{names[k]}={new[k]!s:.80}" for k in clash)
+            raise ValueError(f"ledger=CostLedger(...) already has {have}; the backend got {got}. Set it once, e.g. "
+                             f"Claude(..., ledger=CostLedger(path, tsv_path=..., agent=..., tag_prefix=...)) or "
+                             f"Claude(..., ledger=path, spend_log=..., agent=..., tag_prefix=...)")
+        for k, v in new.items():
+            setattr(self, k, v)
+            self._explicit[k] = True
+        return self
 
     # ------------------------------------------------------------ write
     def record(self, model: str, input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0.0,

@@ -146,9 +146,10 @@ class Claude(CachedBackend):
         Sonnet 5.5 -> between_tools; Opus 5.5 / Fable cannot disable -> ValueError) or a raw dict.
     cache_dir : local disk cache + default ledger at <cache_dir>/ledger.jsonl. None = no cache.
     ledger : CostLedger or path; overrides the default ledger location.
-    spend_log, agent : shared TSV spend log for the default ledger (CostLedger tsv_path/agent; env
-        SIMENGINE_SPEND_LOG / SIMENGINE_AGENT are read when not given).
-    tag, tag_prefix : the instance tag and the default ledger's tag prefix (env SIMENGINE_SPEND_TAG_PREFIX when
+    spend_log, agent : shared TSV spend log of the ledger (CostLedger tsv_path/agent; env
+        SIMENGINE_SPEND_LOG / SIMENGINE_AGENT are read when not given). With ledger=CostLedger(...) they fill
+        what that instance was not given (`CostLedger.attach`; ValueError only on a different explicit value).
+    tag, tag_prefix : the instance tag and the ledger's tag prefix (env SIMENGINE_SPEND_TAG_PREFIX when
         not given). A per-call tag= combines with them: TSV tag = "<tag_prefix><tag>:<call tag>"
         (`simengine.llm.compose_tag`; no instance tag -> the call tag alone, as before). The JSONL row keeps
         `tag` without the prefix plus a `tag_prefix` field.

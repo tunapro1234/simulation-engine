@@ -106,9 +106,11 @@ class TestBackendTags(unittest.TestCase):
         self.assertEqual(tsv_tags(d / "s.log"), ["envrun/a", "b", "arg/c"])
         self.assertEqual(jsonl_rows(d / "c" / "ledger.jsonl")[0]["tag_prefix"], "envrun/")
 
-    def test_tag_prefix_with_ledger_instance_is_an_error(self):
+    def test_tag_prefix_with_ledger_instance(self):
+        # attached to an instance without a prefix (test_llm_recete.py); a different explicit prefix is an error
+        self.assertEqual(make(FakeClient(), ledger=CostLedger(None), tag_prefix="x/").tag_prefix, "x/")
         with self.assertRaises(ValueError):
-            make(FakeClient(), ledger=CostLedger(None), tag_prefix="x/")
+            make(FakeClient(), ledger=CostLedger(None, tag_prefix="own/"), tag_prefix="x/")
         # the instance's own prefix is used
         d = tmpdir(self)
         c = make(FakeClient(), ledger=CostLedger(None, tsv_path=d / "s.log", tag_prefix="own/"), tag="t")

@@ -14,6 +14,13 @@ from .ledger import CostLedger, compose_tag
 from .parallel import parallel_map
 
 
+class Stats(dict):
+    """The `stats` snapshot: a plain dict that can also be called, so `llm.stats` and `llm.stats()` both work."""
+
+    def __call__(self) -> dict:
+        return dict(self)
+
+
 class CachedBackend:
     """Base class. Subclasses implement `complete`. Not used by FakeLLM (kept dependency-free)."""
 
@@ -25,10 +32,8 @@ class CachedBackend:
                  tag_prefix: str | None = None):
         self.cache = DiskCache(cache_dir) if cache_dir is not None else None
         if isinstance(ledger, CostLedger):
-            if spend_log is not None or agent is not None or tag_prefix is not None:
-                raise ValueError("spend_log/agent/tag_prefix configure the default ledger; with ledger=CostLedger(...) "
-                                 "pass tsv_path=/agent=/tag_prefix= to that CostLedger instead")
-            self.ledger = ledger
+            # spend_log/agent/tag_prefix fill what the instance was not given; ValueError only on a real conflict
+            self.ledger = ledger.attach(tsv_path=spend_log, agent=agent, tag_prefix=tag_prefix)
         else:
             path = ledger if ledger is not None else (Path(cache_dir) / "ledger.jsonl" if cache_dir is not None else None)
             self.ledger = CostLedger(path, tsv_path=spend_log, agent=agent, tag_prefix=tag_prefix)
@@ -45,13 +50,21 @@ class CachedBackend:
                 self._stats[k] = self._stats.get(k, 0) + v
 
     @property
-    def stats(self) -> dict:
-        """This instance's counters: real calls, cache hits, retries, errors, USD spent."""
+    def stats(self) -> "Stats":
+        """This instance's counters: real calls, cache hits, retries, errors, USD spent (`cost_usd`), plus the
+        whole ledger's total (`ledger_total_usd`). A snapshot dict; `llm.stats()` works too and returns a copy."""
         with self._stats_lock:
-            d = dict(self._stats)
+            d = Stats(self._stats)
         d["cost_usd"] = round(d["cost_usd"], 6)
         d["ledger_total_usd"] = round(self.ledger.total(), 6)
         return d
+
+    @property
+    def spent_usd(self) -> float:
+        """USD this backend instance spent on real calls (= stats["cost_usd"]; cache hits cost 0, `claude -p`
+        subscription calls cost 0). Other processes/backends on the same ledger: stats["ledger_total_usd"]."""
+        with self._stats_lock:
+            return round(self._stats["cost_usd"], 6)
 
     def check_budget(self) -> None:
         """Raise BudgetExceeded when the ledger total is already >= budget_usd."""
