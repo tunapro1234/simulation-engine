@@ -32,14 +32,14 @@ signal.
 | `roundtable`, `roundtable_frame` | `roundtable.py` | Multi-round discussion. Round 0 is independent. In later rounds each persona sees its own previous answer and a summary of its segment (or of the whole table). `CONFIRMATION_BIAS` and `KEEP_VIEW` are the measured stance instructions. |
 | `roundtable_strategy` (alias `roundtable_conditions`), `roundtable_strategy_frame`, `hide_persona_fields` | `roundtable.py` | Strategy comparison at an interacting table: one `roundtable` per condition on the same panel (`{id: text}` or a list; `hide_fields=("condition",)` keeps the RCT arm out of the prompt). Output: condition × round × segment means (`table`), paired effect vs the `control` table per round (`effects`), last round − round 0 per persona with bootstrap CI and the change of the effect (`shift`), and `ranking` in round 0 and the last round. The frame helper reuses `roundtable_frame` (unit `<condition>|<unit>`); `effect=True` gives condition − control predictions to score against observed effects. CIs resample personas and ignore the within-table dependence of later rounds. |
 | `strategy`, `strategy_frame` | `strategy.py` | Two or more scenarios × segments. Each persona gives a 0-100 intent and a reason per scenario. Output: ranking, win probability, sign test on the top two, and the segment whose profile diverges most. |
-| `segment_distribution`, `distribution_prompt`, `FRAMINGS_NAMED`, `FRAMINGS_HIDDEN` | `distribution.py` | No personas. Makes one call per segment × question × framing ("estimate the percentage of these respondents who would choose each option"), then averages the 3 framings. An invalid reply becomes a uniform vector (or is skipped with `fallback="skip"`). |
+| `segment_distribution`, `distribution_prompt`, `FRAMINGS_NAMED`, `FRAMINGS_HIDDEN` | `distribution.py` | No personas. Makes one call per segment × question × framing ("estimate the percentage of these respondents who would choose each option"), then averages the 3 framings. An invalid reply becomes a uniform vector (or is skipped with `fallback="skip"`); the filled share is recorded per cell. `repeats=k` passes `sample=0..k-1` (independent draws, per-sample dists kept). See "Distribution runners" below. |
 | `effect_forecast`, `effect_frame`, `memorisation_check`, `EffectForecast` | `effect.py` | No personas. Asks for every condition's effect against control in one JSON object per arm × framing × sample (independent draws via `sample=k`), averages per condition, and returns a condition × arm table: hidden arm always, named arm (study named) with `named=`, plus named − hidden as a memorisation probe and refused / unparsed / failed / invalid counts. Import from `simengine.sim.effect`. See "Direct effect forecasts" below. |
-| `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means. |
-| `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`), and the normalised ordinal W1 used for the makro numbers. |
+| `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means, one set per `segments=` scheme, and `survey`-style refused / unparsed accounting with ids. `person_distribution_frame` gives persona × question rows. |
+| `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`, numeric `filled_llm_dist`; `scheme=` picks a `persona_distribution` segment scheme), and the normalised ordinal W1 used for the makro numbers. |
 | `predict_people`, `prediction_frame` | `prediction.py` | Per-person prediction. L0 is a no-persona population prior over `l0_samples` samples. L1 uses the person's own survey answers. L2 is L1 plus the person's past behaviour in the same items. SSR asks for one first-person sentence per item. It takes independent `samples` (passed as `sample=j`) and re-asks with "JSON only" when parsing fails. |
 | `PredictionSpec`, `AMAZON`, `prompt_l0/l1/l2/ssr`, `profile_text`, `history_text` | `prediction.py` | All prompt wording. `PredictionSpec()` is neutral. `AMAZON` reproduces the measured talp73 prompts exactly (checked string-for-string against `talp73/kod/llm/istem.py` and `ssr.py`). |
 | `batch_calibrate` | `prediction.py` | Label-free batch calibration: `logit(p) − mean_item logit(p) + logit(prior_rate)`, clipped at 1e-3. It matches `talp73/kod/llm/kalibre.py` to 0.0 max abs difference on a random check. |
-| `retest_stats` | `prediction.py` | Test-retest of repeated samples: within-cell sd, share of identical cells, pairwise r, per-item signal vs noise, Spearman-Brown. |
+| `retest_stats` | `prediction.py` | Test-retest of repeated samples: within-cell sd, share of identical cells, pairwise r, per-item signal vs noise, Spearman-Brown. `kind="distribution"` reduces each vector to E[position] first and adds the within-cell W1. |
 | `ask_panel`, `build_prompts`, `Usage` | `panel.py` | Batched persona questioning: one JSON object per persona id. It accepts an array, a single object, an `{id: {...}}` mapping or a wrapper. It remaps ids by position only when no id matched and the counts are equal. Missing answers are counted, not invented. Soft refusals are detected, kept out of the disk cache and re-asked once with `REFRAME_NOTE`. Every call carries a ledger `tag`. |
 | `looks_like_refusal`, `REFRAME_NOTE` | `panel.py` | Refusal check used by `ask_panel`: `simengine.llm.looks_like_refusal`, or a small local regex if that import fails. It is only applied to replies that have no usable JSON answer. `REFRAME_NOTE` is the research-forecast wording used for the re-ask. |
 | `print_events`, `Emitter` | `_stats.py` | Every runner takes `on_event=`. `print_events` is a ready callback that prints one flushed line per event (`HH:MM:SS [runner] stage …` / `row <pid> <segment> <value>: …` / `done …`), so a background run (`python run.py > log`) shows progress. Other prints need `python -u` or `PYTHONUNBUFFERED=1`. |
@@ -203,6 +203,42 @@ res["usage"]["refused_calls"], res["usage"]["empty_calls"], res["invalid"]
 statuses = []
 replies = sim.ask_many(llm, prompts, max_tokens=300, statuses=statuses)   # None where refused/empty/failed
 ```
+
+**Distribution runners: repeats, filled cells, refusal accounting** (G5 / G7 recipe rehearsals).
+
+```python
+d = sim.segment_distribution(llm, segs, qs, repeats=3)       # sample=0, 1, 2 passed to llm.complete
+d["dist"]                     # averaged over framings and repeats, as before
+d["sample_dist"], d["samples"]  # one dist per repeat; long rows (unit = segment) for retest_stats
+sim.retest_stats(d, kind="distribution")                     # E[position] per vector + within-cell W1
+frame = sim.distribution_frame(d, truth=real, method="c3")    # adds filled_c3
+p = sim.persona_distribution(llm, personas, qs, segments={"age": "age_band", "income": lambda x: x["inc"]})
+p["refused"], p["unparsed"], p["refusal_rate"], p["refused_ids"], p["unparsed_ids"], p["invalid_ids"]
+sim.distribution_frame(p, truth=real_by_age, scheme="age")
+from simengine.sim.distribution import person_distribution_frame
+person_distribution_frame(p)  # pid x item: p, status, segment, one column per scheme, E_pos
+```
+
+- **Repeats.** `repeats=k` asks every prompt k times with `sample=i` (offset by `ask_kw["sample"]`). Claude keys
+  its disk cache on `sample`, so repeat i is a new draw, not the stored reply; `repeats=1` passes no `sample` and
+  keeps the old cache entry. Calls = framings × segments × questions × k. FakeLLM ignores `sample`, so offline
+  repeats are identical.
+- **Filled cells.** An invalid answer replaced by a uniform vector (`fallback="uniform"`) is marked in `cells`
+  (`filled=True`) and counted: `filled` {segment: {question: share of the cell's answers}} and `filled_share`.
+  `distribution_frame` writes it as the numeric `filled_<method>` column (NaN for a result without it), so an
+  accuracy gap can be checked against the share that is filler. `fallback="skip"` fills nothing.
+- **Persona accounting** follows `survey`: `refused` (batch still refused after the reframed re-ask), `unparsed`
+  (any other unusable answer), `refused + unparsed == invalid` (old key kept), id lists in persona order,
+  `refusal_rate` (batches refused at the first ask / batches), `status` per persona, and `filled` per cell.
+- **Segment schemes.** `segments={scheme: column | callable}` re-aggregates the same persona vectors in each scheme
+  (no extra calls): `dist_by`, `filled_by`, `segments_by`. A column is looked up as in `survey(stimulus_col=)`; a
+  callable gets the original persona item; a missing value is labelled `"NA"`. `dist` / `segments` stay the
+  persona segment.
+- **Retest of distributions.** `retest_stats(samples, kind="distribution", pos=None)` reduces each vector to
+  E[position] (`pos`: None = option index 0..K-1, a sequence, or {item: positions}) and then runs the usual
+  statistics; it adds `within_cell_w1` / `within_cell_w1_max` (mean pairwise W1 between a cell's samples, divided
+  by the position range: `w1_ordinal` for equally spaced options). A missing vector becomes NaN. The default
+  `kind="probability"` is unchanged.
 
 **Cost per arm.** `ask_panel` passes `tag=` to `llm.map`. `survey` uses `survey:persona`,
 `survey:no_persona` and `survey:persona_swap`. `survey(..., tag="dev")` makes them `dev:survey:<arm>`, so the
