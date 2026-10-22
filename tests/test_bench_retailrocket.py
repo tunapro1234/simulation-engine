@@ -32,6 +32,13 @@ def _hand():
     return pd.DataFrame(rows, columns=["timestamp", "visitorid", "event", "itemid"])
 
 
+def _train_hand():
+    """visitor 7 in the train window: two views of item 999 (seen by nobody else), then a purchase."""
+    t = rr._ms(pd.Timestamp("2015-07-10 12:00"))
+    return pd.DataFrame([(t, 7, "view", 999), (t + MIN, 7, "view", 999), (t + 2 * MIN, 7, "transaction", 999)],
+                        columns=["timestamp", "visitorid", "event", "itemid"])
+
+
 def _filler(n_vis=900, seed=0):
     rng = np.random.default_rng(seed)
     t0, t1 = rr._ms(pd.Timestamp("2015-07-01")), rr._ms(pd.Timestamp("2015-09-17"))
@@ -112,7 +119,7 @@ class TestTasks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        _write(cls.tmp.name, pd.concat([_hand(), _filler()], ignore_index=True))
+        _write(cls.tmp.name, pd.concat([_hand(), _train_hand(), _filler()], ignore_index=True))
 
     @classmethod
     def tearDownClass(cls):
@@ -159,6 +166,15 @@ class TestTasks(unittest.TestCase):
         tab = task.score_all(fr, ["constant", "counts_logistic"], B=20)
         self.assertEqual(len(tab), 6)
 
+    def test_train_item_features_are_out_of_fold(self):
+        task = RetailRocketPurchase(lgbm=False)
+        d = task.load(self.tmp.name)
+        xtr, _ = task.features(d)
+        i = int(np.flatnonzero(d.train["session_id"].to_numpy() == "7_0")[0])
+        self.assertEqual(d.train["y"].iloc[i], 1)
+        # item 999 only occurs in this visitor's own session -> unseen out of fold, not "sold"
+        self.assertEqual((xtr.loc[i, "item_sold_n"], xtr.loc[i, "item_new_n"]), (0.0, 2.0))
+
     def test_average_precision_matches_sklearn(self):
         from sklearn.metrics import average_precision_score
         rng = np.random.default_rng(3)
@@ -189,6 +205,20 @@ class TestTasks(unittest.TestCase):
         self.assertTrue(rep.any())
         with self.assertRaises(ValueError):
             task.frame(d, {"short": oracle[:-1]})
+
+    def test_next_metric_hand_ranks(self):
+        task = RetailRocketNext(k=3)
+        fr = pd.DataFrame({"truth": [5, 5, 5, 5, 5], "group": [1, 2, 3, 4, 5], "segment": "new", "split": "test",
+                           "pred_m": pd.Series([np.array([5, 1, 2]), np.array([1, 2, 5]), np.array([1, 2, 3, 5]),
+                                                np.array([1, 1, 1, 2, 5]), np.array([-1, 1, -1, 5])], dtype=object)})
+        hit, rr_ = rr._hits(fr, "pred_m", 3)
+        # duplicates count once and -1 is padding (source metric: unique ids per session, then rank)
+        np.testing.assert_allclose(hit, [1, 1, 0, 1, 1])
+        np.testing.assert_allclose(rr_, [1, 1 / 3, 0, 1 / 3, 1 / 2])
+        r = task.score(fr, "m", "mrr@3", B=20)
+        self.assertAlmostEqual(r["value"], (1 + 1 / 3 + 1 / 3 + 1 / 2) / 5)
+        with self.assertRaises(ValueError):
+            RetailRocketNext(k=0)
 
     def test_next_hand_session_in_test(self):
         d = RetailRocketNext().load(self.tmp.name)
