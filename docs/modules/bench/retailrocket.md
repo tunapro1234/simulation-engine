@@ -117,7 +117,63 @@ rows out of 33,858 sessions.
 
 ## Measured numbers
 
-See the next revision of this file (runs on the local copy).
+These come from runs on the local RetailRocket copy (22 Oct 2026, `nice -n 19`, `OMP_NUM_THREADS=4`, numpy 2.5.4,
+pandas 2.3.3, scikit-learn 1.9.1, lightgbm 4.7.0). Every value is shown as `value [95% CI]` (visitor bootstrap).
+Command, run from the repository root with `PYTHONPATH=.`:
+
+```python
+from simengine.bench.tasks.retailrocket import RetailRocketPurchase, RetailRocketNext
+for task in (RetailRocketPurchase(split="test"), RetailRocketNext(split="test")):   # also split="valid", history="all"
+    data = task.load("<catalogue>")
+    print(task.score_all(task.run(data=data)))
+```
+
+**`retailrocket_next`, test** (23,517 rows, 20,724 visitors; `new` rows 19,880; about 12 s end to end, 1.3 GB peak
+RSS):
+
+| baseline | recall@20 | MRR@20 | recall@20 on new targets |
+|---|---|---|---|
+| popularity | 0.0075 [0.0064, 0.0088] | 0.0016 [0.0012, 0.0021] | 0.0059 [0.0047, 0.0072] |
+| last_viewed | 0.1592 [0.1549, 0.1645] | 0.1353 [0.1313, 0.1399] | 0.0058 [0.0046, 0.0071] |
+| cooc | **0.2973** [0.2906, 0.3038] | **0.1367** [0.1328, 0.1408] | **0.2881** [0.2810, 0.2951] |
+| transition | 0.2923 [0.2861, 0.2991] | 0.1307 [0.1269, 0.1345] | 0.2830 [0.2762, 0.2898] |
+
+Valid split (22,663 rows): popularity 0.0096, last_viewed 0.1657, cooc 0.3315 [0.3245, 0.3379] (MRR 0.1538),
+transition 0.3261 (MRR 0.1455).
+
+With `history="all"` on test (item tables built from every event before 2015-09-04): cooc 0.3343 [0.3274, 0.3413]
+(MRR 0.1551), transition 0.3279, last_viewed 0.1601, popularity 0.0086. The extra two weeks of history raise
+co-occurrence recall by 3.7 points, so compare methods only under the same `history` setting.
+
+**`retailrocket_purchase`, test** (34,223 sessions, 30,179 visitors, 1,013 positives; about 4.3 min end to end, of
+which 33 s are loading and baselines and the rest is the 1000-draw bootstrap of 18 metric cells; 1.35 GB peak RSS;
+LightGBM refit with 426 rounds):
+
+| baseline | PR-AUC | AUC | log loss |
+|---|---|---|---|
+| constant | 0.0296 [0.0263, 0.0328] | 0.5000 | 0.1334 [0.1219, 0.1443] |
+| has_addtocart | 0.2639 [0.2376, 0.2881] | 0.9336 [0.9254, 0.9411] | 0.0717 [0.0668, 0.0766] |
+| last_item_conversion | 0.0563 [0.0485, 0.0649] | 0.6272 [0.6089, 0.6454] | 0.1464 [0.1309, 0.1611] |
+| counts_logistic | 0.3697 [0.3002, 0.4405] | 0.9448 [0.9354, 0.9529] | 0.0815 [0.0764, 0.0870] |
+| lgbm | **0.5727** [0.4936, 0.6402] | **0.9699** [0.9644, 0.9747] | **0.0605** [0.0569, 0.0643] |
+| lgbm_no_end_position | 0.5090 [0.4234, 0.5816] | 0.9658 [0.9599, 0.9707] | 0.0642 [0.0606, 0.0682] |
+
+Valid split (33,858 sessions, positive rate 0.0320; PR-AUC / AUC): has_addtocart 0.2642 / 0.9306, counts_logistic
+0.3838 [0.3101, 0.4527] / 0.9354, lgbm 0.5656 [0.4900, 0.6323] / 0.9674, lgbm_no_end_position 0.5248 / 0.9632. The
+split is the same as test's train side, so the LightGBM round count (426) is the same.
+
+Each task's test split was run twice, at about 20:35 and 21:30 on 22 Oct. The first runs were on a loaded machine
+(18 min for purchase, 5 min for next item). Both runs gave identical numbers to 6 decimals, so the pipeline is
+deterministic on this machine. The PR-AUC intervals are wide (about ±0.07 for lgbm) because there are only 1,013
+positives. Compare methods with a paired test (`se.evaluate`), not by overlapping intervals.
+
+Both tasks reproduce the source branch's tables (`BASELINE_RR.md`, 20 Oct 2026; the same definitions run by its own
+scripts). Next item matches to 4 decimals on test and valid. For purchase, `has_addtocart` and `counts_logistic`
+match on test PR-AUC (0.2639,
+0.3698) and on valid PR-AUC (0.2642, 0.3838). The source lgbm had PR-AUC 0.5715 on test and 0.5674 on valid (375
+rounds), and 0.5101 / 0.5280 without end-position features. The split, counts and the non-GBDT baselines are identical, so the small LightGBM
+differences most likely come from the early-stopping round count (426 refit rounds here vs 375 there); this was not
+isolated.
 
 ## Provenance
 
