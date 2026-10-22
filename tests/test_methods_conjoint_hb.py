@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from simengine.methods.conjoint import MNL
-from simengine.methods.conjoint_hb import HBMNL, MixedLogit
+from simengine.methods.conjoint_hb import HBMNL, MixedLogit, tune_prior_scale
 
 try:
     import xlogit  # noqa: F401
@@ -85,6 +85,19 @@ class TestHBMNL(unittest.TestCase):
         small = self.tr[self.tr["birey_id"] < 20]
         with self.assertWarnsRegex(UserWarning, "price"):
             HBMNL(["price", "quality"], draws=5, burn=5).fit(small)
+
+    def test_prior_scale_and_tuning(self):
+        small = self.tr[self.tr["birey_id"] < 30]
+        kw = dict(attrs=["price", "quality"], scale={"price": 100}, asc=False, draws=40, burn=60)
+        wide, tight = HBMNL(**kw).fit(small), HBMNL(prior_scale=0.01, **kw).fit(small)
+        self.assertLess(np.trace(tight.sigma_.to_numpy()), np.trace(wide.sigma_.to_numpy()))
+        best, scores = tune_prior_scale(small, grid=(1.0, 0.1), **kw)
+        self.assertEqual(list(scores.index), [1.0, 0.1])
+        self.assertEqual(best, float(scores.idxmax()))
+        self.assertTrue(np.isfinite(scores).all())
+        one = small[small["gorev_id"].isin(small.groupby("birey_id")["gorev_id"].min())]
+        with self.assertRaises(ValueError):
+            tune_prior_scale(one, **kw)
 
     def test_unavailable_rows_and_validation(self):
         small = self.tr[self.tr["birey_id"] < 20].copy()

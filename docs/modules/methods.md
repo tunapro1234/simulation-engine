@@ -347,7 +347,7 @@ these sets.
 ### Hierarchical Bayes and mixed logit (`conjoint_hb.py`) [prova-d8]
 
 Same long rows as `MNL`, plus a required `person` column. Import from the module:
-`from simengine.methods.conjoint_hb import HBMNL, MixedLogit`.
+`from simengine.methods.conjoint_hb import HBMNL, MixedLogit, tune_prior_scale`.
 
 `HBMNL(attrs=, scale=, base_alt=, asc=True, draws=500, burn=500, thin=1, seed=0)` is the Allenby-Rossi sampler in
 numpy: Gibbs over individual betas, the population mean `mu` (normal, prior N(0, 100 I)) and a full covariance
@@ -361,6 +361,14 @@ error in simulation. Predictions moved little, but WTP from `draws_` would be fa
 person the prior also pulls `sigma_` up (true sd 0.6 came out near 0.78, and its 90% interval covered the
 truth in 26% of 50 simulated panels; 0.67 and 70% with 40 tasks); `mu_` 90% intervals covered 80-92%. Read
 `sigma_` as an upper-leaning estimate, not a calibrated interval.
+
+`prior_scale=` (default 1.0) scales the Sigma prior (IW scale nu * prior_scale * I); smaller values shrink persons
+toward `mu`. With few tasks per person and many dummy levels the default loses to pooled MNL: 8 tasks, 12 dummies
+and 300 simulated persons gave held-out LL per task -0.84 to -0.95 for HB against -0.78 to -0.84 for MNL when tastes
+barely varied. `tune_prior_scale(train_rows, grid=(1, 0.3, 0.1, 0.03), **hb_kw)` holds out one task per person
+inside the training rows, scores each value with `predict_person` and returns `(best, scores)`; refit on all rows
+with `best`. In the same simulation it brought HB to within 0.02 of MNL there, and ahead of the default HB where
+tastes varied widely. Report HB next to MNL either way.
 
 - `predict_person(df)`: known person, held-out task. Averages the probabilities over that person's own draws.
   Persons not seen in fit raise, or with `unknown="population"` are scored by `predict_new`.

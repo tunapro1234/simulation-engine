@@ -11,12 +11,13 @@ Two prediction targets, as in the conjoint brief:
 - **new person** (`predict_new`): the population mixture, beta ~ N(mu, Sigma) integrated over the posterior of
   (mu, Sigma). Close to a pooled MNL there (0.509 vs 0.519).
 
-    from simengine.methods.conjoint_hb import HBMNL, MixedLogit
+    from simengine.methods.conjoint_hb import HBMNL, MixedLogit, tune_prior_scale
     hb = HBMNL(["price", "quality"], scale={"price": 100}, draws=1000, burn=1000, seed=0).fit(train_rows)
     hb.predict_person(test_rows_known)        # P(row chosen), person posterior predictive
     hb.predict_new(test_rows_new)             # P(row chosen), population mixture
     hb.log_likelihood(test_rows_known)        # mean per task; new=True for the population mixture
     hb.draws_, hb.beta_, hb.mu_, hb.sigma_    # (draws, persons, K) betas; posterior means
+    best, scores = tune_prior_scale(train_rows, attrs=["price", "quality"], scale={"price": 100})  # few tasks
     mx = MixedLogit(["price", "quality"], randvars={"price": "n", "quality": "n"}).fit(train_rows)  # needs xlogit
     mx.predict_proba(test_rows_new)
 
@@ -117,7 +118,9 @@ class HBMNL:
 
     ``attrs``: attribute columns (None -> every numeric column other than task/alternative/chosen/available/person);
     ``scale``: {attr: divisor}; ``base_alt``: alternative without an ASC (default smallest id); ``asc``: include
-    ASCs (random like the attributes); ``draws``: kept draws after ``burn`` (every ``thin``-th); ``seed``.
+    ASCs (random like the attributes); ``draws``: kept draws after ``burn`` (every ``thin``-th); ``seed``;
+    ``prior_scale``: Sigma prior scale (IW scale nu * prior_scale * I; smaller shrinks persons toward ``mu``),
+    choose it with `tune_prior_scale` when persons have few tasks.
 
     Fitted: ``names_`` (parameter names, attributes then ``ASC_<alt>``), ``persons_`` (person ids, row order of
     the draws), ``draws_`` (n_draws, n_persons, K) individual betas, ``mu_draws_`` (n_draws, K),
@@ -127,10 +130,12 @@ class HBMNL:
 
     def __init__(self, attrs: Sequence[str] | None = None, scale: Mapping[str, float] | None = None,
                  base_alt=None, asc: bool = True, draws: int = 500, burn: int = 500, thin: int = 1, seed: int = 0,
-                 prior_var: float = 100.0, nu: float | None = None, target_accept: float = 0.3):
+                 prior_var: float = 100.0, nu: float | None = None, prior_scale: float = 1.0,
+                 target_accept: float = 0.3):
         self.attrs, self.scale, self.base_alt, self.asc = attrs, dict(scale or {}), base_alt, asc
         self.draws, self.burn, self.thin, self.seed = int(draws), int(burn), max(1, int(thin)), seed
         self.prior_var, self.nu, self.target_accept = prior_var, nu, target_accept
+        self.prior_scale = float(prior_scale)
 
     def _design(self, df: pd.DataFrame) -> np.ndarray:
         X = [df[a].astype(float).fillna(0).to_numpy() / self.scale.get(a, 1.0) for a in self.attrs_]
@@ -158,7 +163,7 @@ class HBMNL:
         N, K = len(persons), X.shape[1]
         rng = np.random.default_rng(self.seed)
         nu = self.nu if self.nu is not None else K + 3
-        V0, A, I = nu * np.eye(K), 1.0 / self.prior_var, np.eye(K)
+        V0, A, I = nu * self.prior_scale * np.eye(K), 1.0 / self.prior_var, np.eye(K)
 
         def ll_person(B):
             return np.bincount(pid, weights=_logp((X * B[pid]).sum(1), g, av) * y, minlength=N)
@@ -259,6 +264,31 @@ class HBMNL:
     def accuracy(self, df: pd.DataFrame, new: bool = False) -> float:
         p = self.predict_new(df) if new else self.predict_person(df)
         return _task_scores(_prep(df).reset_index(drop=True), p)[1]
+
+
+
+def tune_prior_scale(df: pd.DataFrame, grid: Sequence[float] = (1.0, 0.3, 0.1, 0.03), seed: int = 0,
+                     **hb_kw) -> tuple[float, pd.Series]:
+    """Pick ``prior_scale`` inside the training rows: hold out one random task of every person with 2+ tasks,
+    fit `HBMNL` on the rest for each value in ``grid``, score the held-out tasks with `predict_person` (mean
+    log-likelihood per task). Returns (best scale, Series scale -> score); refit on all rows with the best one.
+    ``hb_kw`` goes to `HBMNL` (attrs, scale, draws, burn, ...). With few tasks per person and many dummy levels
+    the default 1.0 can lose to a pooled MNL; compare against `MNL` on the same split too.
+
+        best, scores = tune_prior_scale(train_rows, attrs=ATTRS, draws=500, burn=1000)
+        hb = HBMNL(ATTRS, prior_scale=best, draws=1000, burn=1000).fit(train_rows)
+    """
+    d = _check(_prep(df).reset_index(drop=True), "tune_prior_scale")
+    tasks = d.groupby("task", sort=False)["person"].first()
+    rng = np.random.default_rng(seed)
+    held = [rng.choice(t.index.to_numpy()) for _, t in tasks.groupby(tasks) if len(t) >= 2]
+    if not held:
+        raise ValueError("tune_prior_scale: no person has 2+ tasks to hold one out")
+    va = d["task"].isin(held)
+    out = pd.Series({float(s): HBMNL(prior_scale=s, seed=seed, **hb_kw).fit(d[~va]).log_likelihood(d[va])
+                     for s in grid}, name="loglik_per_task")
+    out.index.name = "prior_scale"
+    return float(out.idxmax()), out
 
 
 def _require_xlogit():
