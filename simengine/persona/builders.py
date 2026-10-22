@@ -90,11 +90,18 @@ _GENDER = {"f": "female", "female": "female", "woman": "female", "w": "female",
            "m": "male", "male": "male", "man": "male", "other": "other", "non-binary": "other", "nonbinary": "other"}
 
 
+_GENDER_OTHER = ("non-binary", "nonbinary", "non binary", "third gender", "genderqueer", "gender non-conforming")
+
+
 def gender_value(v) -> str | None:
-    """Common gender spellings -> TALP Gender; unknown -> None."""
+    """Common gender spellings -> TALP Gender; codebook wordings such as "Non-binary / third gender" -> "other";
+    unknown (e.g. "Prefer not to say") -> None."""
     if _is_empty(v):
         return None
-    return _GENDER.get(str(v).strip().lower())
+    s = str(v).strip().lower()
+    if s in _GENDER:
+        return _GENDER[s]
+    return "other" if any(w in s for w in _GENDER_OTHER) else None
 
 
 def _age_value(v):
@@ -584,7 +591,9 @@ def pool_select(df: pd.DataFrame, K: int, *, method: str = "random", features=No
     random      K rows uniformly; for one seed a smaller pool is a subset of a larger one (nested curves).
     stratified  proportional to the `strata` column(s) (largest remainder), random rows within each stratum.
     kmeans      k-means (K clusters, k-means++ starts, `n_init`) on standardised `features` (text columns
-                one-hot, NaN = mean); the row nearest each centroid, all distinct.
+                one-hot, NaN = mean); the row nearest each centroid, all distinct. Each member stands for a
+                cluster of a different size, so an unweighted k-means pool over-represents sparse regions (tails)
+                and is not a sample of the table.
     K >= len(df) returns every row. `df.index` must be unique."""
     if method not in POOL_METHODS:
         raise ValueError(f"method must be one of {POOL_METHODS}, got {method!r}")
