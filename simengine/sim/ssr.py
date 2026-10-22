@@ -16,14 +16,19 @@ Turkish answers the runners also ask for a one-sentence English paraphrase and S
     E = s.embed(texts, max_chars=800)                 # per-call override of the cut
 
 The embedding model loads offline by default (HF_HUB_OFFLINE=1 unless already set); point SIMENGINE_HF_CACHE at
-a local Hugging Face cache, or pass `cache_folder`. A model missing from the cache raises an OSError that names
-SIMENGINE_HF_CACHE, `cache_folder`, HF_HOME and `offline=False`.
+a local Hugging Face cache, or pass `cache_folder`. Either the HF_HOME folder or its `hub/` subfolder works (a
+folder whose `hub/` holds the models is read through `hub/`). A model missing from the cache raises an OSError
+that names SIMENGINE_HF_CACHE, `cache_folder`, HF_HOME and `offline=False`.
 
 Long texts: each text is cut to `max_chars` characters (default 2000; None = no cut, the old behaviour) before
 encoding. bge-base reads at most 512 tokens (all-MiniLM-L6-v2: 256) and English runs at roughly 4 characters per
-token, so the cut sits near what bge-base reads anyway and skips tokenising the rest. `cache_dir=` keeps one .npy per text,
+token, so the default cut sits near what bge-base reads anyway: it loses little and gains little. Speed comes from
+a lower cut, since encoding cost grows with tokens up to the model's limit. One run (22 Oct, bge-base, CPU, 4
+threads, nice 19 on a shared, loaded machine, 96 synthetic English texts of ~10k characters): no cut 2.3 texts/s,
+2000 chars 3.0, 1000 chars 6.4, 500 chars 13.7. `cache_dir=` keeps one .npy per text,
 keyed by sha256(model name + text) and written atomically, so a rerun or a second process re-uses embeddings
-(with `encoder=` the key is the encoder's qualified name, or `cache_key=`). `progress=True` prints one stderr line
+(with `encoder=` the key is the encoder's qualified name, or `cache_key=`; a lambda or nested function needs
+`cache_key=`, since two of them would share a name). `progress=True` prints one stderr line
 per `progress_every` new texts with texts/s; a callable gets (done, total, texts_per_s) instead. Each text is
 still embedded once per SSR object (in-memory cache).
 
@@ -96,6 +101,17 @@ def _sentence_transformer(name: str, **kw):
     return SentenceTransformer(name, **kw)
 
 
+def _hub_folder(folder: str) -> str:
+    """HF_HOME-style folder (models under `hub/`) -> its `hub/`; a hub folder itself is returned unchanged."""
+    hub = os.path.join(folder, "hub")
+    try:
+        if os.path.isdir(hub) and not any(n.startswith("models--") for n in os.listdir(folder)):
+            return hub
+    except OSError:
+        pass
+    return folder
+
+
 def _missing_model_error(model: str, cache_folder: str | None, offline: bool, err: Exception) -> OSError:
     where = f"cache_folder={cache_folder!r}" if cache_folder else "no cache_folder (SIMENGINE_HF_CACHE unset)"
     return OSError(
@@ -135,6 +151,9 @@ class SSR:
         self.progress_every = max(1, int(progress_every))
         self.batch_size = batch_size
         self.cache_key = cache_key
+        if cache_dir and encoder is not None and not cache_key and "<" in self._model_key():
+            raise ValueError("SSR: cache_dir with a lambda or nested encoder needs cache_key= (its qualified name "
+                             f"{self._model_key()!r} is shared by every such function, so their embeddings would mix)")
         self._m = None
         self._lock = threading.Lock()
         self.cache: dict[str, np.ndarray] = {}
@@ -143,14 +162,15 @@ class SSR:
         if self.offline:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
         kw = {"device": self.device}
-        if self.cache_folder:
-            kw["cache_folder"] = self.cache_folder
+        cf = _hub_folder(self.cache_folder) if self.cache_folder else None
+        if cf:
+            kw["cache_folder"] = cf
         try:
             return _sentence_transformer(self.model_name, **kw)
         except ImportError:
             raise
         except (OSError, ValueError) as e:  # HF raises OSError / LocalEntryNotFoundError on an offline miss
-            raise _missing_model_error(self.model_name, self.cache_folder, self.offline, e) from e
+            raise _missing_model_error(self.model_name, cf, self.offline, e) from e
 
     def _encode(self, texts: list[str]) -> np.ndarray:
         if self.encoder is not None:
@@ -178,7 +198,7 @@ class SSR:
     def _disk_get(self, text: str) -> np.ndarray | None:
         try:
             return np.load(self._disk_path(text))
-        except (OSError, ValueError):
+        except (OSError, ValueError, EOFError):  # EOFError: an empty file
             return None
 
     def _disk_put(self, text: str, v: np.ndarray) -> None:

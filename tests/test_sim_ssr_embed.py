@@ -88,11 +88,12 @@ class TestDiskCache(unittest.TestCase):
 
     def test_cache_key_separates_encoders(self):
         with tempfile.TemporaryDirectory() as d:
-            a = SSR(encoder=lambda t: np.ones((len(t), 2)), cache_dir=d)
-            b = SSR(encoder=lambda t: np.ones((len(t), 2)), cache_dir=d)
+            with self.assertRaisesRegex(ValueError, "cache_key"):  # two lambdas would share one key
+                SSR(encoder=lambda t: np.ones((len(t), 2)), cache_dir=d)
+            a = SSR(encoder=lambda t: np.ones((len(t), 2)), cache_dir=d, cache_key="enc-v1")
             c = SSR(encoder=lambda t: np.ones((len(t), 2)), cache_dir=d, cache_key="enc-v2")
-            self.assertEqual(a._disk_path("t"), b._disk_path("t"))  # same qualified name: same key
             self.assertNotEqual(a._disk_path("t"), c._disk_path("t"))
+            SSR(encoder=lambda t: np.ones((len(t), 2)))  # no disk cache: no key needed
 
     def test_corrupt_file_is_a_miss(self):
         with tempfile.TemporaryDirectory() as d:
@@ -104,6 +105,16 @@ class TestDiskCache(unittest.TestCase):
                 f.write(b"not npy")
             s.embed(["bad"])
             self.assertEqual(enc.seen, ["bad"])
+
+    def test_empty_file_is_a_miss(self):
+        with tempfile.TemporaryDirectory() as d:
+            enc = CountingEncoder()
+            s = SSR(encoder=enc, cache_dir=d)
+            p = s._disk_path("empty")
+            os.makedirs(os.path.dirname(p))
+            open(p, "wb").close()
+            s.embed(["empty"])
+            self.assertEqual(enc.seen, ["empty"])
 
 
 class TestProgress(unittest.TestCase):
@@ -160,6 +171,25 @@ class TestMissingModel(unittest.TestCase):
                 SSR(model="m", cache_folder="hf-cache-dir").embed(["x"])
         self.assertEqual(seen["cache_folder"], "hf-cache-dir")
         self.assertIn("cache_folder='hf-cache-dir'", str(cm.exception))
+
+    def test_hf_home_folder_resolves_to_hub(self):
+        seen = {}
+
+        def boom(name, **kw):
+            seen.update(kw)
+            raise OSError("miss")
+
+        with tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(home, "hub", "models--org--m"))
+            with mock.patch.object(ssr_mod, "_sentence_transformer", boom):
+                with self.assertRaises(OSError) as cm:
+                    SSR(model="org/m", cache_folder=home).embed(["x"])
+                self.assertEqual(seen["cache_folder"], os.path.join(home, "hub"))
+                self.assertIn(os.path.join(home, "hub"), str(cm.exception))
+                hub = os.path.join(home, "hub")
+                with self.assertRaises(OSError):
+                    SSR(model="org/m", cache_folder=hub).embed(["x"])
+                self.assertEqual(seen["cache_folder"], hub)  # a hub folder is used as given
 
     def test_loader_used_once(self):
         class Model:
