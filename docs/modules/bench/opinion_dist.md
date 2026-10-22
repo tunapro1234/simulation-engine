@@ -13,7 +13,7 @@ Both follow the `BenchTask` conventions in `simengine/bench/base.py` (`layout`, 
 `metrics`). They are not in the package registry yet: import the module directly. Importing it registers both names.
 
 `opinionqa_groups` (`opinionqa.py`) is the related wave-out task on the larger OpinionQA pool with `position` and
-TF-IDF `knn` baselines. This module adds the SubPOP metric exactly as SubPOP computes it, GlobalOpinionQA, a
+TF-IDF `knn` baselines. This module adds the SubPOP metric as SubPOP computes it, GlobalOpinionQA, a
 group-held-out setting and the `nearest_group` baseline. It reads only SubPOP's `opinionqa.csv`, not the OpinionQA
 pool files.
 
@@ -27,7 +27,7 @@ data = task.load("<catalogue>")             # or $SIMENGINE_DATA; the directory 
 frame = task.run(data=data)                 # EvalFrame with uniform, overall, nearest_group (+ methods={...})
 task.score(frame, "nearest_group")          # {'metric': 'wd', 'value', 'lo', 'hi', 'n': questions}
 task.score_all(frame)
-task.others(data, item, group)              # the rows a setting-B method may read for (item, group)
+task.others(data, item, group, attribute)   # the rows a setting-B method may read for (item, group)
 
 g = sp.GlobalOpinionQA()                    # metrics tvd (primary), js_sim; directory globalopinionqa/
 ```
@@ -38,13 +38,15 @@ g = sp.GlobalOpinionQA()                    # metrics tvd (primary), js_sim; dir
 | `setting` | `"A"` \| `"B"` (`"B"`) | both |
 | `test_share` | float in (0, 1) (0.5) | both |
 | `min_shared` | int (5): shared train questions needed before a group can be someone's nearest group | both |
+| `peers` | `"blocks"` \| `"all"` (`"blocks"`): which other groups setting B may read (see below) | both |
 | `groups` | `"22"` \| `"61"` (`"22"`) | subpop_opinionqa |
 
 An unknown option key raises `ValueError`, as in every bench task.
 
 Other public names: `ordinal_wd`, `tvd`, `js_distance`, `pairwise` (distance matrix among the groups of one question),
 `load_subpop_opinionqa`, `load_global_opinionqa`, `split_items`, `group_distances`, `loo_marginal`, `nearest_group`,
-`OpinionDistTask` (shared base), and the metrics `WD`, `TVD` and `JS_SIM`.
+`OpinionDistTask` (shared base), the metrics `WD`, `TVD` and `JS_SIM`, and `COLUMNS` (the long table, with a
+`block` column: the attribute for SubPOP, the country without "(Non-national sample)" for GlobalOpinionQA).
 
 ### Files
 
@@ -79,10 +81,17 @@ another salt, so dev never reads a test question.
 - **Setting A:** a method may use the train questions (all groups) and the target question's text and options.
   `overall` is `None`, and the only baseline is `uniform`. This is the SubPOP evaluation setting.
 - **Setting B (default, group held out):** for target (q, g), a method may also read q's population marginal
-  (`data.test["overall"]`) and the other groups' rows on q (`task.others(data, q, g)`), but never g's own row.
-  `data.test` holds the truth column `dist`, so this rule is a contract, as in `opinionqa_groups`. The marginal is
-  Pew's weighted Overall row for SubPOP (it includes g's respondents). For GlobalOpinionQA it is the unweighted mean
-  of the other countries on q, since the file has no world row.
+  (`data.test["overall"]`) and the rows on q of the groups outside g's block (`task.others(data, q, g, attribute)`),
+  never g's own row nor its block mates. `data.test` holds the truth column `dist`, so this rule is a contract, as in
+  `opinionqa_groups`. The marginal is Pew's weighted Overall row for SubPOP (it includes g's respondents). For
+  GlobalOpinionQA it is the unweighted mean of the other blocks' rows on q, since the file has no world row.
+- **Why blocks:** Pew's Overall row is the weighted sum of the groups of any complete attribute (the weights can be
+  fitted on train questions), so with g's block mates readable, g follows by subtraction. A "complement" method
+  (non-negative least-squares weights per attribute on train, then (Overall − Σ mates·w)/w_g) measured on the test
+  split under the old all-groups view: CREGION wd 0.0042 vs `nearest_group` 0.0284, AGE 0.0152 vs 0.0402, EDUCATION
+  0.0158 vs 0.0369 with `groups="61"`; CREGION 0.0231 vs 0.0318 even with the 2 of 4 regions in the 22 groups. In
+  GlobalOpinionQA, 26 countries also have a "(Non-national sample)" row, both on up to 91 questions, so a country was
+  predicted from its own second sample. `peers="all"` restores the all-groups view for comparison.
 
 ### Metrics
 
@@ -91,8 +100,11 @@ another salt, so dev never reads a test question.
   allowed, e.g. `[1, 2, 1.5]`), divided by max - min. Options with a negative ordinal are dropped and the rest
   renormalised. If all ordinals are equal the value is NaN and the row is skipped. Rows are averaged over all
   (question, group) pairs, as in SubPOP Table 1 ("averaging over all questions and subpopulations"). The tests check
-  the function against the two examples in the `ordinal_emd` docstring. In example 2 the code renormalises, which
-  gives 0.1/0.7, not the docstring's 0.1; this module follows the code.
+  the function against the two examples in the `ordinal_emd` docstring and against a line-by-line port of its code
+  on random cases with tied and negative ordinals. In example 2 the code renormalises, which gives 0.1/0.7, not the
+  docstring's 0.1; this module follows the code. One deviation: a prediction with no mass on the ordered options (or
+  a NaN) is scored as uniform here. SubPOP's code raises inside `list_normalize`, catches it and returns NaN, which
+  would drop the row; that would let a method skip hard rows. A prediction of the wrong length raises `ValueError`.
 - **`tvd`** (GlobalOpinionQA primary, lower is better): total variation distance 0.5·Σ|p − q|.
 - **`js_sim`** (higher is better): 1 − Jensen-Shannon distance, the similarity used by Durmus et al. 2023 (sec. 2.3).
   The paper does not state the log base. Base 2 is used here, so the value lies in [0, 1]. The tests check it against
