@@ -485,8 +485,8 @@ def isolation_prompt(agent: EpiAgent, health: str | None = None, news_pct: float
     return system, user
 
 
-_RESP = re.compile(r"Response\s*[:\-]\s*\**\s*(yes|no)\b", re.I)
-_REASON = re.compile(r"Reasoning\s*:\s*(.*?)(?:\n\s*\**\s*Response\s*:|$)", re.I | re.S)
+_RESP = re.compile(r"Response\s*\**\s*[:\-]\s*[*\[\s]*(yes|no)\b", re.I)      # also "**Response**: [Yes]"
+_REASON = re.compile(r"\**Reasoning\**\s*:\s*(.*?)(?:\n\s*\**\s*Response\s*\**\s*:|$)", re.I | re.S)
 
 
 def parse_isolation(text: str) -> tuple[bool | None, str]:
