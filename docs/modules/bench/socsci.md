@@ -43,7 +43,7 @@ ss.write_hist("<catalogue>/socsci210", "<catalogue>/socsci210/hist.parquet")   #
 |---|---|---|
 | `split` | `"study"` \| `"condition"` \| `"outcome"` (`"study"`) | the paper's split (below) |
 | `max_levels` | int (101) | drop cells whose scale has more levels (e.g. 0-1200 dollars) |
-| `min_n` | int (1) | drop cells with fewer answers on the scale |
+| `min_n` | int (1) | drop cells with fewer answers on the scale; a cell with none is always dropped |
 | `min_in_scale` | float (0.9) | drop cells where a smaller share of answers lies on the stated scale |
 | `k` | int (10) | `tfidf_knn` neighbours |
 | `per_item` | int (1 for `split="study"`, else 0) | `tfidf_knn`: at most this many neighbour cells per train outcome, 0 = no cap |
@@ -128,7 +128,8 @@ All baselines are LLM-free, use train cells only, and never look at test answers
 - `tfidf_knn`: the mean distribution of the `k` train cells with the most similar stimulus. Similarity is cosine on
   TF-IDF of 1-2 grams, and only cells with the same number of levels count. With `per_item` = 1, one cell per train
   outcome is used. Without that cap on the study split, the 10 slots fill with near-identical conditions of a single
-  study (see the numbers below).
+  study (see the numbers below). The per-split default (1 on `study`, 0 elsewhere) was picked after seeing the
+  test-split scores of both settings, so `tfidf_knn` is a test-tuned baseline; both settings are reported below.
 - `pooled`: for `condition` and `outcome` only. It is the mean of the same study's train cells for the same outcome,
   that is, the other conditions, which amounts to "the treatment does nothing". Without those, it uses the same study
   and level count, and without that, `scale_marginal`.
@@ -137,7 +138,8 @@ All baselines are LLM-free, use train cells only, and never look at test answers
 
 These come from one run on the local copy of all 17 shards (22 Oct 2026, `nice -n 19`). The shards were first
 aggregated with `write_hist`. Each value is `value [95% CI]`, and n counts studies. All three splits together took
-about 5 s after the aggregation. Command (Python, from the repository root):
+about 5 s after the aggregation. A review pass rebuilt `hist.parquet` from the shards (37 s, 1.05 GB peak RSS; same
+cells, counts and split shares) and re-ran every number below: all reproduced to the printed digits. Command (Python, from the repository root):
 
 ```python
 from simengine.bench.tasks import socsci210 as ss
@@ -203,9 +205,11 @@ For the condition and outcome splits, Table 3 reports LLaMA3-8B results only:
 - **Uniform Guess matches the paper only roughly.** Our W1 to U(0, 1) gives 0.174 on the condition split and 0.162
   on the outcome split, against the paper's 0.180 and 0.165. On unseen studies the gap is larger: 0.181 against
   0.203. The cell sets differ, since we have 39 of the 40 test studies, filter off-scale cells and exclude scales
-  above 101 levels. So the paper numbers are a guide here, not a replication.
+  above 101 levels. Dropping both filters (`min_in_scale=0`, `max_levels` unbounded; 758 study-split cells) moves
+  the study-split figure only to 0.179, so the filters do not explain the gap (review re-run, 22 Oct 2026). So the
+  paper numbers are a guide here, not a replication.
 - **Empirical Best does not match.** Our implementation of the paper's description gives 0.013-0.016. The paper
-  reports 0.125 / 0.090 / 0.086. With n of about 240 answers per cell (the median), a resample of the answers is
+  reports 0.125 / 0.090 / 0.086. With a median of 249 answers per kept cell, a resample of the answers is
   necessarily that close to the full sample. The paper's figure must therefore come from something else that its text
   does not state, such as a resample of the model's sample size or of individual-level predictions. Also, the
   paper's own SFT models beat its Empirical Best on the condition split (0.063 < 0.090). Treat
@@ -244,6 +248,11 @@ For the condition and outcome splits, Table 3 reports LLaMA3-8B results only:
   shard 0, 63 of 302 cells have several variants with randomised details, such as a name or a word in the story. The
   parsed scale was the same within every one of these cells. But `tfidf_knn`, and any method that reads
   `data.test.stimuli`, sees only the first variant.
+- A review pass compared each outcome's parsed scale with the answers seen across its conditions: in 19 of 1,140
+  kept outcomes the answers cover less than 60% of the stated scale. Some are genuine (a 1-5 item answered only
+  with 3), some look like a mis-stated scale in the source (a "1 (Support strongly) to 5" item answered only 1 or
+  2). These cells stay in, because their answers lie on the stated scale. In 12 outcomes the stated scale differs
+  between conditions (e.g. 0-7 vs 0-8 counts, or a 1-5 vs a 1-7 wording); each cell is scored on its own text.
 - Wide scales (0-100) are scored on 101 levels. Their W1 rewards getting the mean right more than the shape.
 - Empirical Best does not reproduce the paper's value (see above), and the published numbers are on a slightly
   different cell set.
