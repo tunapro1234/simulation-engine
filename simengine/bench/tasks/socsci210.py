@@ -368,7 +368,7 @@ class SocSci210(BenchTask):
     layout = """
     <root>/socsci210/hist.parquet   optional, one row per cell (raw answer counts), written by socsci210.write_hist;
         preferred if present (also <root>/socsci210/islenmis/hist.parquet)
-    <root>/socsci210/ham/data/train-000NN-of-00017.parquet   HF socratesft/SocSci210 shards (also <root>/socsci210/data/):
+    <root>/socsci210/ham/data/train-000NN-of-00017.parquet  HF socratesft/SocSci210 shards (or <root>/socsci210/data/):
         study_id, task_num, condition_num, sample_id, response, stimuli (other columns ignored); any subset of the
         17 shards loads, covering only the studies in it
     <root>/socsci210/ham/metadata/participant_mapping.json, condition_mapping.json, task_mapping.json   (HF metadata/)
