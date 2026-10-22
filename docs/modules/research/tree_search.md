@@ -19,7 +19,8 @@ Each evaluated payload is a `Node`. `finalize()` runs the winner and a reference
 bootstrap gives the difference with its CI. The result also reports `winner_test_minus_dev`, because the winner's dev
 score is a maximum over many noisy scores and so reads too good. It also reports `reference_test_minus_dev` (the
 same gap for the reference, i.e. the dev -> test shift: other rows, a refit, a later period) and
-`excess_test_minus_dev` = winner gap − reference gap, the part of the gap that selection on dev adds on top of the shift.
+`excess_test_minus_dev` = winner gap − reference gap, the part of the gap that selection on dev adds on top of the
+shift.
 
 ## API
 
@@ -176,8 +177,9 @@ shrinkage is what hurts on the shifted test period is our reading, not tested.
 Gap decomposition (computed from the same runs): the defaults go from dev 0.1085 to test 0.2430, a gap of +0.1344
 that is pure dev -> test shift. The winners' gaps are larger; the excess over the defaults' gap (mean, min-max over 3
 seeds) is AIDE +0.0213 (0.0179-0.0232), random +0.0164 (0.0144-0.0183), MCTS +0.0109 (0.0008-0.0180), Loop +0.0220.
-`finalize()` now reports this excess as `excess_test_minus_dev`. The search modules do what they claim; the result is a reminder that the
-dev-to-test gap (`winner_test_minus_dev`) and a test-once comparison against a simple baseline are what decide.
+`finalize()` now reports this excess as `excess_test_minus_dev`. The search modules do what they claim; the result
+is a reminder that the dev-to-test gap (`winner_test_minus_dev`) and a test-once comparison against a simple baseline
+are what decide.
 
 ## Limitations
 
