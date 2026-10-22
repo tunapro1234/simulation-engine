@@ -1,6 +1,7 @@
 """RCT condition effects (within-block difference vs control, averaged over blocks) and the cross-block transfer
 baseline, on synthetic many-labs data with known effects."""
 import unittest
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -128,6 +129,22 @@ class RctTransferTest(unittest.TestCase):
                          train_blocks=["b01", "b02"])
         with self.assertRaises(ValueError):
             rct_transfer(self.d, "condition", "Control", "y", block="country", test_blocks=[])
+        with self.assertRaisesRegex(KeyError, "label type"):          # a typo / str vs int label, not "no control"
+            rct_transfer(self.d, "condition", "Control", "y", block="country", test_blocks=["b01", "zz"])
+        with self.assertRaisesRegex(KeyError, "train_blocks"):
+            rct_transfer(self.d, "condition", "Control", "y", block="country", test_blocks=["b01"],
+                         train_blocks=[2])
+
+    def test_categorical_columns(self):
+        d = self.d.astype({"condition": "category", "seg": "category", "country": "category"})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            e = rct_effects(d, "condition", "Control", "y", block="country", by="seg")
+            t = rct_transfer(d, "condition", "Control", "y", block="country", test_blocks=self.test)
+        ref = rct_effects(self.d, "condition", "Control", "y", block="country", by="seg")
+        np.testing.assert_allclose(e.effect.to_numpy(), ref.effect.to_numpy())
+        np.testing.assert_allclose(e.se.to_numpy(), ref.se.to_numpy())
+        self.assertTrue(np.isfinite(t.attrs["spearman"]))
 
     def test_per_block_and_segments(self):
         t = rct_transfer(self.d, "condition", "Control", "y", block="country", test_blocks=self.test,

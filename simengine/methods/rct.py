@@ -109,7 +109,7 @@ def rct_effects(df: pd.DataFrame, cond: str, control, y: str, *, block: str | No
     W = out["w"].replace(0, np.nan)
     out["effect"] = out["wd"] / W
     out["se"] = np.sqrt(out["wv"]) / W
-    out.loc[m["wv"].isna().groupby([m[c] for c in arm]).any(), "se"] = np.nan   # sum() would skip a NaN variance
+    out.loc[m["wv"].isna().groupby([m[c] for c in arm], observed=True).any(), "se"] = np.nan   # sum() would skip a NaN variance
     out["ci_low"], out["ci_high"] = out["effect"] - Z95 * out["se"], out["effect"] + Z95 * out["se"]
     out["mean_cond"], out["mean_control"] = out["wm"] / W, out["wm0"] / W
     out = out.rename(columns={"n": "n_cond", "n0": "n_control"}).reset_index()
@@ -142,6 +142,12 @@ def rct_transfer(df: pd.DataFrame, cond: str, control, y: str, *, block: str, te
     test_blocks = list(test_blocks)
     if not test_blocks:
         raise ValueError("test_blocks is empty")
+    present = set(pd.unique(df[block].dropna()))
+    for name, blocks in (("test_blocks", test_blocks), ("train_blocks", train_blocks or [])):
+        unknown = [b for b in blocks if b not in present]
+        if unknown:     # typically str labels for an int block column (or the reverse)
+            raise KeyError(f"{name} not in df[{block!r}]: {sorted(map(repr, unknown))[:5]} (block labels look like "
+                           f"{sorted(map(repr, list(present)[:3]))}; check the label type)")
     if train_blocks is None:
         train_blocks = [b for b in pd.unique(df[block].dropna()) if b not in set(test_blocks)]
     else:
