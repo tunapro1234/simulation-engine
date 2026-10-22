@@ -98,11 +98,19 @@ source.
   `segment_distribution` only for the (question, group) cells in the test rows, with `samples` passed as `repeats`
   and `descriptions={(attr, group): text}` overriding the defaults. It returns one vector per test row in the bench
   row order, with the bench's option order, so the `pos` positions still apply. `task.last_llm` keeps the run
-  accounting: `calls`, `invalid`, `filled` per (qkey, attribute, group), `filled_share`, `usage` and the raw
-  results. The model sees no train rows, so the wave-out rule holds. This is not a baseline: `baselines()` makes no
-  LLM call.
+  accounting: `calls`, `invalid`, `filled` per (qkey, attribute, group) (share of the row's vector that is uniform
+  filler), `missing` (rows with no vector under `fallback="skip"`, given a uniform vector and counted as filled),
+  `filled_share` (row mean), `usage` and the raw results. The model sees no train rows, so the wave-out rule
+  holds. This is not a baseline: `baselines()` makes no LLM call.
+- **Cost:** one call per test row × framing × sample. The full test split is 10,687 rows, so the default three
+  hidden framings make about 32,000 calls. Subset `data.test` by question first, as the snippet does (the frame and
+  baselines follow the subset).
 
   ```python
+  import pandas as pd
+  from simengine.types import TaskData
+  keep = data.test["qkey"].isin(pd.Series(data.test["qkey"].unique()).sample(40, random_state=7))
+  data = TaskData(train=data.train, test=data.test[keep].reset_index(drop=True), meta=data.meta)
   preds = task.predict_with(data, "llm", llm=llm, framings={"h1": "In a large national survey of {population}, "
                                                                   "consider respondents who are {group}."})
   frame = task.frame(data, {"llm": preds, **task.baselines(data)})

@@ -91,6 +91,15 @@ class TestLLMArm(unittest.TestCase):
         for p in preds:
             np.testing.assert_allclose(p, np.ones(3) / 3)
 
+    def test_skip_fallback_counts_uniform_stand_in(self):
+        task, data = bench.get("opinionqa_groups"), tiny_data()
+        preds = task.predict_with(data, "llm", llm=FakeLLM(), fallback="skip", framings={"h2": "Consider {group}."})
+        self.assertEqual(task.last_llm["missing"], 5)
+        self.assertAlmostEqual(task.last_llm["filled_share"], 1.0)
+        self.assertEqual(task.last_llm["filled"][("T2_W2", "SEX", "Female")], 1.0)
+        for p in preds:
+            np.testing.assert_allclose(p, np.ones(3) / 3)
+
     def test_needs_llm(self):
         with self.assertRaises(TypeError):
             bench.get("opinionqa_groups").predict_with(tiny_data(), "llm")

@@ -338,8 +338,11 @@ class OpinionQAGroups(BenchTask):
                     ask_kw: dict | None = None) -> list:
         """One vector per data.test row from `sim.segment_distribution` (framings averaged, samples = repeats).
         Only the (question, group) cells present in the test rows are asked. A cell without a vector (all
-        answers invalid with fallback='skip') gets a uniform vector. Run accounting in `self.last_llm`: calls,
-        invalid, filled {(qkey, attribute, group): share}, filled_share, framings, usage, results (raw)."""
+        answers invalid with fallback='skip') gets a uniform vector, counted in `missing` and as filled 1.0. Run
+        accounting in `self.last_llm`: calls, invalid, filled {(qkey, attribute, group): share of the row's vector
+        that is uniform filler}, missing, filled_share (row mean), framings, usage, results (raw).
+        Cost: len(data.test) x framings x samples calls (full test split: 10,687 rows x 3 default framings);
+        subset data.test first for a smoke run."""
         if llm is None:
             raise TypeError("predict_with(data, 'llm') needs llm=")
         from ...sim.distribution import segment_distribution
@@ -367,17 +370,21 @@ class OpinionQAGroups(BenchTask):
             for s, d in r["filled"].items():
                 for qid, f in d.items():
                     filled[(qid, s)] = f
-        out = []
+        out, row_fill, missing = [], {}, 0
         for row in data.test.itertuples():
             k = segment_key(row.attribute, row.group)
             p = dist.get((str(row.qkey), k))
             m = len(row.pos)
-            out.append(p if p is not None and len(p) == m else np.ones(m) / m)
-        n_cells = sum(len(r["cells"]) for r in results)
+            if p is None or len(p) != m:   # no vector (fallback='skip', all invalid): the uniform stand-in is filler
+                p, missing = np.ones(m) / m, missing + 1
+                row_fill[(str(row.qkey), row.attribute, row.group)] = 1.0
+            else:
+                row_fill[(str(row.qkey), row.attribute, row.group)] = filled.get((str(row.qkey), k), 0.0)
+            out.append(p)
+        # every cell has framings x samples answers, so the row mean equals the answer share for fallback='uniform'
         self.last_llm = {"calls": sum(r["calls"] for r in results), "invalid": sum(r["invalid"] for r in results),
-                         "filled": {(q, *s.split(":", 1)): f for (q, s), f in filled.items()},
-                         "filled_share": (sum(r["filled_share"] * len(r["cells"]) for r in results) / n_cells
-                                          if n_cells else 0.0),
+                         "filled": row_fill, "missing": missing,
+                         "filled_share": float(np.mean(list(row_fill.values()))) if row_fill else 0.0,
                          "framings": results[0]["framings"] if results else [], "samples": samples,
                          "usage": [r["usage"] for r in results], "results": results}
         return out
