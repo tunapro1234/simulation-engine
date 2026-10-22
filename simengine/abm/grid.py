@@ -82,8 +82,9 @@ class Grid:
             raise ValueError(f"shape must be positive, got {self.shape}")
         if self.neighbourhood not in NEIGHBOURHOODS:
             raise ValueError(f"neighbourhood must be one of {NEIGHBOURHOODS}, got {self.neighbourhood!r}")
-        if self.radius < 1:
-            raise ValueError("radius must be >= 1")
+        if int(self.radius) != self.radius or self.radius < 1:
+            raise ValueError(f"radius must be an integer >= 1, got {self.radius!r}")
+        object.__setattr__(self, "radius", int(self.radius))
         if self.torus and min(h, w) < 2 * self.radius + 1:
             raise ValueError(f"torus needs each side >= 2*radius+1 = {2 * self.radius + 1} (else a cell would "
                              f"count the same neighbour twice), got {self.shape}")
@@ -110,13 +111,14 @@ class Grid:
     def neighbour_sum(self, values: np.ndarray) -> np.ndarray:
         """Sum of ``values`` over each cell's neighbours, over the last two axes ((..., H, W) -> same shape).
 
-        Bool input is counted as int32; outside cells contribute 0 when bounded.
+        Bool and ints narrower than 64 bit are summed in (at least) int32 (uint32 in int64) so k * max does not
+        wrap; 64-bit ints and floats keep their dtype. Outside cells contribute 0 when bounded.
         """
         a = np.asarray(values)
         if a.shape[-2:] != self.shape:
             raise ValueError(f"last two axes must be {self.shape}, got {a.shape}")
-        if a.dtype == bool:
-            a = a.astype(np.int32)
+        if a.dtype.kind in "biu" and a.dtype.itemsize < 8:      # not uint64: int32 + uint64 promotes to float64
+            a = a.astype(np.promote_types(a.dtype, np.int32), copy=False)
         out = np.zeros_like(a)
         if self.torus:
             for dr, dc in self.offsets:
@@ -205,7 +207,12 @@ class Agents:
         return cls(cell, flat[cell], dict(data))
 
     def lattice(self, grid: Grid) -> np.ndarray:
-        """(H, W) int lattice of agent types; raises if two agents share a cell."""
+        """(H, W) int lattice of agent types; raises if two agents share a cell, a cell is off the grid (e.g. a -1
+        from a bounded :meth:`Grid.neighbour_table`, which numpy would silently wrap to the last cell) or a kind < 0."""
+        if self.n and (self.cell.min() < 0 or self.cell.max() >= grid.size):
+            raise ValueError(f"agent cell outside 0..{grid.size - 1}")
+        if self.n and self.kind.min() < 0:
+            raise ValueError("agent kind must be >= 0 (EMPTY is reserved for free cells)")
         if np.unique(self.cell).size != self.n:
             raise ValueError("two agents share a cell")
         flat = np.full(grid.size, EMPTY, int)
@@ -233,13 +240,14 @@ def random_order_step(n: int, act: Callable[[int], Any], rng: np.random.Generato
 def synchronous_step(state: np.ndarray, rule: Callable[[np.ndarray, np.random.Generator], np.ndarray],
                      rng: np.random.Generator) -> np.ndarray:
     """Synchronous update: new = rule(old, rng) with ``old`` a read-only copy, so every cell / agent reacts to the
-    same previous state (a rule that writes into it raises)."""
+    same previous state (a rule that writes into it raises). The result is always a fresh writeable array, also
+    when the rule returns ``old`` or a view of it."""
     old = np.array(state, copy=True)
     old.flags.writeable = False
     new = np.asarray(rule(old, rng))
     if new.shape != old.shape:
         raise ValueError(f"rule returned shape {new.shape}, expected {old.shape}")
-    return new
+    return new.copy() if (not new.flags.writeable or np.may_share_memory(new, old)) else new
 
 
 @dataclass
@@ -295,7 +303,8 @@ def morans_i(values: np.ndarray, grid: Grid, mask: np.ndarray | None = None) -> 
         I = n / S0 * sum_ij w_ij z_i z_j / sum_i z_i^2,   z = x - mean(x),  S0 = sum_ij w_ij,
 
     over the cells in ``mask`` (default: finite values); weights only link included cells. E[I] = -1/(n-1) under
-    no spatial association; +1 clustered, -1 checkerboard. For a type lattice pass (lat == a) with mask lat >= 0.
+    no spatial association; near +1 clustered, -1 for a von Neumann checkerboard (0 with Moore: the diagonals share
+    the type). For a type lattice pass (lat == a) with mask lat >= 0.
     NaN if the included values are constant.
     """
     x, m, s0 = _moran_prep(values, grid, mask)
@@ -304,13 +313,25 @@ def morans_i(values: np.ndarray, grid: Grid, mask: np.ndarray | None = None) -> 
 
 
 def moran_permutation(values: np.ndarray, grid: Grid, mask: np.ndarray | None = None, n_perm: int = 999,
-                      seed: SeedLike = 0, chunk: int = 64) -> tuple[float, float]:
+                      seed: SeedLike = 0, chunk: int = 64, alternative: str = "directed") -> tuple[float, float]:
     """(I, pseudo p): values shuffled over the included cells n_perm times; p = (m + 1) / (n_perm + 1) with m the
-    number of permuted I at least as extreme as the observed one on the observed side (folded, as in PySAL esda's
-    p_sim). Batched in ``chunk`` permutations per vectorised call."""
+    number of permuted I at least as extreme as the observed one, as in PySAL esda's ``calculate_significance``:
+
+    * "directed" (default; esda's legacy ``p_sim``): m = min(#{sim >= I}, n_perm - #{sim >= I}), i.e. the tail the
+      observed I lies in, not doubled. esda notes this runs small; use "two-sided" for an unbiased test.
+    * "greater" (clustering) m = #{sim >= I}; "lesser" (dispersion) m = #{sim <= I};
+    * "two-sided": p = min(2 (min(#{sim >= I}, #{sim <= I}) + 1) / (n_perm + 1), 1).
+
+    Batched in ``chunk`` permutations per vectorised call (capped so a batch holds <= 2**22 cells, ~32 MB per
+    temporary). (nan, nan) when the included values are constant."""
+    if alternative not in ("directed", "greater", "lesser", "two-sided"):
+        raise ValueError(f"alternative must be directed / greater / lesser / two-sided, got {alternative!r}")
     x, m, s0 = _moran_prep(values, grid, mask)
     z = np.where(m, x - x[m].mean(), 0.0)
     obs = float(_moran_batch(z, grid, m, s0))
+    if not np.isfinite(obs):
+        return obs, float("nan")
+    chunk = max(1, min(chunk, 2 ** 22 // grid.size))
     rng, zi, idx = make_rng(seed), z[m], np.flatnonzero(m.ravel())
     sims = []
     for i in range(0, n_perm, chunk):
@@ -319,9 +340,11 @@ def moran_permutation(values: np.ndarray, grid: Grid, mask: np.ndarray | None = 
         zz[:, idx] = rng.permuted(np.broadcast_to(zi, (b, zi.size)), axis=1)
         sims.append(_moran_batch(zz.reshape(b, *grid.shape), grid, m, s0))
     sims = np.concatenate(sims) if sims else np.empty(0)
-    larger = int((sims >= obs).sum())
-    larger = min(larger, n_perm - larger)
-    return obs, (larger + 1) / (n_perm + 1)
+    ge, le = int((sims >= obs).sum()), int((sims <= obs).sum())
+    if alternative == "two-sided":
+        return obs, min(2 * (min(ge, le) + 1) / (n_perm + 1), 1.0)
+    m = {"directed": min(ge, n_perm - ge), "greater": ge, "lesser": le}[alternative]
+    return obs, (m + 1) / (n_perm + 1)
 
 
 def dissimilarity(lattice: np.ndarray, block: int | tuple[int, int], a: int = 0, b: int = 1) -> float:
@@ -330,6 +353,8 @@ def dissimilarity(lattice: np.ndarray, block: int | tuple[int, int], a: int = 0,
     (modifiable areal unit problem) and is > 0 for a random mix on small tiles."""
     lat = np.asarray(lattice)
     bh, bw = (block, block) if np.isscalar(block) else block
+    if lat.ndim != 2 or bh < 1 or bw < 1:
+        raise ValueError(f"need a 2-D lattice and block sides >= 1, got shape {lat.shape}, block {block}")
     h, w = lat.shape
     tile = (np.arange(h)[:, None] // bh) * (-(-w // bw)) + np.arange(w)[None, :] // bw
     n_t = int(tile.max()) + 1
@@ -341,9 +366,12 @@ def dissimilarity(lattice: np.ndarray, block: int | tuple[int, int], a: int = 0,
 
 
 def same_type_share(lattice: np.ndarray, grid: Grid, per_cell: bool = False):
-    """Schelling's segregation measure: for each agent, like neighbours / occupied neighbours; mean over agents
-    with >= 1 occupied neighbour. per_cell=True returns the (H, W) share (NaN for empty / isolated cells)."""
+    """Mean like-neighbour share (the quantity behind Schelling's happiness rule): for each agent, like neighbours /
+    occupied neighbours; mean of these per-agent ratios over agents with >= 1 occupied neighbour (not the pooled
+    ratio sum(like) / sum(occupied)). per_cell=True returns the (H, W) share (NaN for empty / isolated cells)."""
     lat = np.asarray(lattice)
+    if lat.size and lat.min() < EMPTY:                 # a -2 would index counts from the end (silent wrong share)
+        raise ValueError(f"lattice values must be EMPTY ({EMPTY}) or a type >= 0, got min {lat.min()}")
     occ = lat != EMPTY
     if not occ.any():
         return np.full(lat.shape, np.nan) if per_cell else float("nan")
