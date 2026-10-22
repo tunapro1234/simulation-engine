@@ -3,12 +3,24 @@
 Merges three research parsers: talp73/kod/llm/openrouter.py `parse_json` (```json fences, trailing
 commas), sahne/kod/sahne/kaynak.py `json_coz` (first {/[ via raw_decode, salvage complete objects
 from a truncated array) and makro/llmabm/kod/llm.py `sor_json` (re-ask once with "JSON only").
+
+    data = complete_json(llm, "Return JSON only.", prompt, max_tokens=600)
+    st = {}; data = complete_json(llm, sys, prompt, max_tokens=300, stats=st)   # st["truncated"], ...
+
+Truncation. A reply that stopped at the output budget (`raw["stop_reason"] == "max_tokens"`, or, when the backend
+reports no stop reason, a JSON value opened and never closed) is not a parse failure: `complete_json` asks the same
+prompt again once with `max_tokens` doubled (capped at `max_tokens_cap`), and an `EmptyResponseError` (thinking ate
+the budget) is retried the same way. A `max_tokens` under `JSON_WARN_BELOW` warns (`JsonBudgetWarning`): in the G9
+recipe rehearsal Haiku wrote prose despite "JSON only" and 7/48 replies were cut at 300 tokens.
 """
 from __future__ import annotations
 
 import json
 import re
+import warnings
 from typing import Any
+
+from .errors import EmptyResponseError
 
 _MISSING = object()
 _FENCE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.S)
@@ -82,20 +94,129 @@ def json_extract(text: str | None, default: Any = _MISSING) -> Any:
 
 
 JSON_RETRY_SUFFIX = "\n\nReturn only valid JSON, with no other text."
+JSON_WARN_BELOW = 400          # complete_json with max_tokens under this -> one JsonBudgetWarning
+MAX_TOKENS_CAP = 4096          # a truncation retry never asks for more than this by default
+TRUNCATED_STOP_REASONS = ("max_tokens", "length")
+DEFAULT_MAX_TOKENS = 256       # the LLM protocol default, used when neither the call nor the backend sets one
 
 
-def complete_json(llm, system: str, user: str, *, attempts: int = 2, **kw) -> Any:
+class JsonBudgetWarning(UserWarning):
+    """complete_json got a small max_tokens: a model that adds prose before the JSON gets cut off."""
+
+
+def json_unclosed(text: str | None) -> bool:
+    """True when the first '{' / '[' in `text` opens a JSON value that never closes (strings and escapes are
+    respected), i.e. the reply was most likely cut at the output budget. False for no JSON at all."""
+    if not text:
+        return False
+    starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+    if not starts:
+        return False
+    depth, in_str, esc = 0, False, False
+    for c in text[min(starts):]:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "{[":
+            depth += 1
+        elif c in "}]":
+            depth -= 1
+            if depth <= 0:
+                return False
+    return depth > 0
+
+
+def is_truncated(r) -> bool:
+    """Did this LLMResponse stop at max_tokens? Uses raw["stop_reason"] when the backend reports one, else
+    `json_unclosed(r.text)`."""
+    stop = (getattr(r, "raw", None) or {}).get("stop_reason")
+    if stop is not None:
+        return stop in TRUNCATED_STOP_REASONS
+    return json_unclosed(getattr(r, "text", ""))
+
+
+def _takes_max_tokens(llm) -> bool:
+    from .claude_code import ClaudeCode      # `claude -p` ignores max_tokens, so a bigger budget cannot help
+    return not isinstance(llm, ClaudeCode)
+
+
+def _count(llm, stats: dict | None, **kw: int) -> None:
+    if stats is not None:
+        for k, v in kw.items():
+            stats[k] = stats.get(k, 0) + v
+    bump = getattr(llm, "_bump", None)        # CachedBackend: shows up in llm.stats as json_<key>
+    if callable(bump):
+        bump(**{f"json_{k}": v for k, v in kw.items()})
+
+
+def complete_json(llm, system: str, user: str, *, attempts: int = 2, truncation_retries: int = 1,
+                  max_tokens_cap: int = MAX_TOKENS_CAP, stats: dict | None = None, **kw) -> Any:
     """Call any `LLM` and parse its JSON. On a parse failure re-ask once with a 'JSON only' suffix
-    (a different prompt, so a different cache key). Raises ValueError after `attempts`."""
+    (a different prompt, so a different cache key). Raises ValueError after `attempts`.
+
+    A truncated reply (`is_truncated`) or an `EmptyResponseError` is retried with the same prompt and
+    max_tokens x2 (capped at `max_tokens_cap`), up to `truncation_retries` times; these retries do not use up
+    `attempts`. When no larger budget is left, a truncated reply whose complete objects can be salvaged is
+    returned (with a RuntimeWarning), else it counts as a failed attempt; a final EmptyResponseError is re-raised.
+    `stats` (a dict) gets counts: calls, truncated, truncation_retries, parse_failures. Real backends also add
+    them to `llm.stats` as json_calls, json_truncated, ... A max_tokens (from the call, else the backend's
+    default) under JSON_WARN_BELOW warns once per message (JsonBudgetWarning)."""
+    kw = dict(kw)
+    sized = _takes_max_tokens(llm)
+    mt = kw.get("max_tokens")
+    if mt is None:
+        mt = getattr(llm, "max_tokens", None)
+    if sized and mt is not None and int(mt) < JSON_WARN_BELOW:
+        warnings.warn(f"complete_json on {getattr(llm, 'model', '?')} with max_tokens={mt} (< {JSON_WARN_BELOW}): "
+                      "models often write prose before the JSON despite 'JSON only' and get cut off (G9: 7/48 at 300). "
+                      "Pass max_tokens=600 or more.", JsonBudgetWarning, stacklevel=2)
+    budget = int(mt) if mt is not None else DEFAULT_MAX_TOKENS
     last: Exception | None = None
-    for k in range(max(1, attempts)):
+    k, t = 0, 0
+    while k < max(1, attempts):
         u = user if k == 0 else user + JSON_RETRY_SUFFIX
-        r = llm.complete(system, u, **kw)
+        _count(llm, stats, calls=1)
         try:
-            return json_extract(r.text)
+            r = llm.complete(system, u, **kw)
+        except EmptyResponseError:
+            _count(llm, stats, truncated=1)
+            if sized and t < truncation_retries and budget < max_tokens_cap:
+                t += 1
+                budget = min(max_tokens_cap, budget * 2)
+                kw["max_tokens"] = budget
+                _count(llm, stats, truncation_retries=1)
+                continue
+            raise
+        cut = sized and is_truncated(r)
+        try:
+            v = json_extract(r.text)
         except ValueError as e:
-            last = e
+            v, last = _MISSING, e
+        if cut:
+            _count(llm, stats, truncated=1)
+            if t < truncation_retries and budget < max_tokens_cap:
+                t += 1
+                budget = min(max_tokens_cap, budget * 2)
+                kw["max_tokens"] = budget
+                _count(llm, stats, truncation_retries=1)
+                continue
+            if v is not _MISSING:
+                warnings.warn(f"complete_json: reply still cut at max_tokens={budget}; returning the salvaged part",
+                              RuntimeWarning, stacklevel=2)
+                return v
+            last = ValueError(f"reply cut at max_tokens={budget} (truncated JSON)")
+        elif v is not _MISSING:
+            return v
+        _count(llm, stats, parse_failures=1)
+        k += 1
     raise ValueError(f"no JSON after {attempts} attempts: {last}")
 
 
-__all__ = ["json_extract", "complete_json", "JSON_RETRY_SUFFIX"]
+__all__ = ["json_extract", "complete_json", "json_unclosed", "is_truncated", "JSON_RETRY_SUFFIX", "JSON_WARN_BELOW",
+           "MAX_TOKENS_CAP", "JsonBudgetWarning"]

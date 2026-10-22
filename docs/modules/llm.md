@@ -12,7 +12,8 @@ The module has three backends that implement the `simengine.types.LLM` protocol
 | `CostLedger` | `ledger.py` | JSONL ledger with one line per real call, written under flock. `total()` reads incrementally. Optional shared TSV spend log (`tsv_path=`, `agent=`; `TSV_COLUMNS`). |
 | `looks_like_refusal` | `refusal.py` | Conservative regex detector for soft refusals in plain text (English and Turkish). |
 | `PRICES`, `cost_usd`, `usage_cost` | `pricing.py` | Price per model in $/MTok and the token-to-USD formula. |
-| `json_extract`, `complete_json` | `jsonx.py` | Robust JSON extraction from LLM text. `complete_json` re-asks once if parsing fails. |
+| `json_extract`, `complete_json` | `jsonx.py` | Robust JSON extraction from LLM text. `complete_json` re-asks once if parsing fails, and asks again with a doubled `max_tokens` when the reply was cut (`is_truncated`). |
+| `spend_summary` | `spend.py` | Reads the shared TSV spend log back: calls / tokens / USD per tag (or agent, model) for a tag prefix, plus the total. |
 | `parallel_map` | `parallel.py` | Thread pool that keeps input order. A `StopError` cancels the pending items. |
 | errors | `errors.py` | `LLMError` > `StopError` > `AuthError`, `SpendLimitError`, `BudgetExceeded`; plus `RefusalError`, `EmptyResponseError` (both `LLMError`) and the `ThinkingBudgetWarning` warning class. |
 
@@ -34,7 +35,7 @@ r = llm.complete("You are a survey respondent.", "Answer A or B and explain in o
 print(r.text, r.cost_usd, r.cached)
 
 rs = llm.map([("You are a survey respondent.", q) for q in questions], max_tokens=200, parallel=4)
-data = llm.complete_json("Return JSON only.", 'Give {"p": <probability>} for ...')
+data = llm.complete_json("Return JSON only.", 'Give {"p": <probability>} for ...', max_tokens=600)
 print(llm.stats)            # calls, cache_hits, retries, errors, cost_usd, ledger_total_usd (llm.stats() works too)
 print(llm.spent_usd)        # = llm.stats["cost_usd"]: this instance's real-call spend
 
@@ -185,6 +186,57 @@ llm = Claude(model="claude-haiku-5-5", ledger=led)
   rehearsal G1 (#7) lost a background run to it.
 - A TSV write failure warns once (`RuntimeWarning`) and never fails the call; the row is still in the JSONL ledger.
 
+### Reading it back: `spend_summary(log_path=None, prefix=None, by="tag")`
+
+```python
+from simengine.llm import spend_summary
+s = spend_summary("spend.log", prefix="recete-G2/")       # log_path=None -> env SIMENGINE_SPEND_LOG
+print(s)                    # tab-separated: one line per tag (most expensive first), then TOTAL
+s.usd, s.total              # {"calls", "input_tokens", "output_tokens", "usd"}
+s.groups["recete-G2/L1:survey:persona"]
+spend_summary("spend.log", by="agent")                    # any TSV column, a callable(row) -> key, or None
+```
+
+- Only lines whose tag starts with `prefix` are summed (`None` = all lines). The prefix is matched against the TSV
+  tag column, which already carries the ledger's `tag_prefix`.
+- Lines with fewer than the 7 columns or with numbers that do not parse are counted in `s.skipped`; nothing raises
+  on a malformed line. A missing file gives an all-zero summary. A tab inside the tag stays in the tag.
+- The recipe rehearsal G2 (`SIMENGINE-EKSIK.md` #7) had no per-tag total at the end of a run and summed column 6
+  with `awk` for its `recete-G2/` prefix; this is that sum, across every agent writing to the same log.
+- `s.to_dict()` gives the plain dict (path, prefix, by, groups, total, skipped) for a JSON report.
+
+## JSON replies: `complete_json(llm, system, user, attempts=2, truncation_retries=1, max_tokens_cap=4096, stats=None)`
+
+Works on any backend (`llm.complete_json(...)` on `Claude` / `ClaudeCode` calls the same function). Order:
+
+1. Call, then `json_extract` the reply. A parse failure re-asks with the "Return only valid JSON" suffix (a different
+   prompt, so a different cache key), up to `attempts` calls; then `ValueError`.
+2. **Cut replies.** A reply that stopped at the output budget is not treated as a parse failure. `is_truncated(r)`
+   uses `r.raw["stop_reason"]` (`"max_tokens"`) when the backend reports one, else `json_unclosed(r.text)` (a JSON
+   value opened and never closed, so `FakeLLM` replies work too). The same prompt is asked again with `max_tokens`
+   doubled (capped at `max_tokens_cap`), up to `truncation_retries` times; these calls do not use up `attempts`.
+   A stop reason of `max_tokens` wins over salvage: a cut array whose first objects parse is asked again before
+   the partial list is accepted. When no larger budget is left, a salvageable partial reply is returned with a
+   `RuntimeWarning`; otherwise the cut reply counts as a failed attempt.
+3. `EmptyResponseError` (thinking used the whole budget, see above) gets the same larger-budget retry; the last
+   one is re-raised.
+4. `max_tokens` under `JSON_WARN_BELOW` (400), from the call or else the backend's default (`Claude` is 256), warns
+   with `JsonBudgetWarning`. `FakeLLM` without an explicit `max_tokens` and `ClaudeCode` (the CLI takes no
+   `max_tokens`, so no budget retry either) do not warn.
+5. Counting: pass `stats={}` to get `calls`, `truncated`, `truncation_retries`, `parse_failures`. On `Claude` /
+   `ClaudeCode` the same counts land in `llm.stats` as `json_calls`, `json_truncated`, `json_truncation_retries`,
+   `json_parse_failures` (each key appears the first time it is counted).
+
+The cut reply is cached under its own `max_tokens`, so a rerun with the same call replays both from the cache.
+Why: in the recipe rehearsal G9 (`SIMENGINE-EKSIK.md` #6) Haiku wrote an explanation despite "JSON only" at
+`max_tokens=300`, 7/48 direct predictions were cut, and the run fell back to the median of the rest.
+
+```python
+st = {}
+data = llm.complete_json("Return JSON only.", prompt, max_tokens=600, stats=st)
+print(st)                   # {"calls": 2, "truncated": 1, "truncation_retries": 1}
+```
+
 ## Soft refusals: `looks_like_refusal(text)`
 
 Hard refusals (`stop_reason == "refusal"`) raise `RefusalError`. Soft ones come back as ordinary text with
@@ -260,8 +312,10 @@ res = se.sim.survey(personas, questions, llm=llm)              # res["unparsed"]
   (`numeric`, `likert5`, `choice`), `text`, `spec`, `arm` and `profile` (the text the prompt shows for that person).
   Numeric and Likert specs add `min`, `max` and `integer`; choice specs add `options` (texts) and `letters`. A number
   is clamped into `[min, max]` and rounded for int fields. A choice can be given as the option text, its letter or its
-  index; the text is tried first, so for options `[1, 2, 3, 4, 5]` the value `3` means "3", not the fourth option. A
-  value that cannot be used (an unknown option, a non-number) raises `ValueError`. `None` keeps the default.
+  index; the text is tried first, so for options `[1, 2, 3, 4, 5]` the value `3` means "3", not the fourth option,
+  and when every option is a number an index is not accepted (`0` raises instead of quietly meaning "1"). numpy
+  numbers read from a DataFrame work like Python ones. A value that cannot be used (an unknown option, a non-number,
+  NaN) raises `ValueError`. `None` keeps the default.
 - **Control arms.** They keep the real persona ids. The `no_persona` arm shows only a neutral adult, so it never calls
   value_fn and gets the hashed default; a pid-keyed value_fn cannot leak the person into that control.
   `persona_swap` shows the slot's id with the next persona's profile; key on `spec["profile"]` if that control should
