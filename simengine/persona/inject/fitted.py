@@ -17,7 +17,7 @@ Injectors (family "fitted"; all render `key: value` lines like plain_fields, so 
   (Fröhling et al. 2026, arXiv:2609.02526, "feature importance", k=5), summed over questions from each forest's top
   `per_model` (Rupprecht et al. 2025, arXiv:2511.21722, TOP-k), keep the top k.
 - fitted_stepwise: coordinate ascent over attribute inclusion with `simengine.research.Loop` (one flip per turn,
-  kept only if the paired bootstrap CI on train cells excludes 0; simpler ties kept).
+  kept only if the paired bootstrap CI over people, on their mean train accuracy, excludes 0; simpler ties kept).
 - fitted_grips: GrIPS edit search over attribute lines (delete / swap / add-back), m candidates per iteration,
   patience P, score = balanced accuracy + 10 x answer entropy (Prasad et al. 2022, arXiv:2203.07281).
 - fitted_opro: OPRO over the framing sentence above the attribute lines (`simengine.research.prompt_evolution.opro`;
@@ -162,6 +162,9 @@ class _Fitted(Injector):
         people = list(people)
         for p in people:
             self.check(p)
+        pids = [str(p["id"]) for p in people]
+        if len(set(pids)) != len(pids):
+            raise ValueError("person ids must be unique")
         qs = []
         for q in questions:
             if q.get("id") is None or "text" not in q:
@@ -396,8 +399,10 @@ def forest_importance(cells: Sequence[dict], attrs: Sequence[str], fields_of: Ca
 class FittedStepwise(_Fitted):
     """Coordinate ascent over attribute inclusion run by simengine.research.Loop: a binary Space (one key per
     attribute), GreedyCoordinateProposer flips one attribute per turn, a flip is kept only when the paired
-    bootstrap CI over train cells excludes 0 (or ties with fewer attributes). Stops when no unseen flip is left or
-    after max_turns. The kept path is re-ranked on the validation questions."""
+    bootstrap CI excludes 0 (or ties with fewer attributes). Loop units are PEOPLE (each person's mean accuracy
+    over their train cells), so the CI resamples people as compare_injectors does; cells of one person are not
+    independent. Stops when no unseen flip is left or after max_turns. The kept path is re-ranked on the
+    validation questions."""
     name = "fitted_stepwise"
     paper = ("stepwise / wrapper attribute selection (Efroymson 1960; Kohavi & John 1997; no arXiv id) with "
              "simengine.research.Loop acceptance; attribute-selection question: Fröhling et al. 2026, arXiv:2609.02526")
@@ -432,10 +437,12 @@ class FittedStepwise(_Fitted):
         def text(cfg):
             return self.text_of([slot[s] for s in slot if cfg.get(s)])
 
-        def runner(cfg):
+        def runner(cfg):                                          # one Loop unit per person (cluster bootstrap)
             r = ctx.ev.scores(text(cfg), split_map[cfg["split"]])
-            units = ctx.cells[split_map[cfg["split"]]]
-            return {"per_unit": {u["unit"]: s for u, s in zip(units, r["scores"])}}
+            by_p: dict[str, list[float]] = {}
+            for u, s in zip(ctx.cells[split_map[cfg["split"]]], r["scores"]):
+                by_p.setdefault(str(u["person"]["id"]), []).append(float(s))
+            return {"per_unit": {p: sum(v) / len(v) for p, v in by_p.items()}}
 
         loop = Loop(runner, space, GreedyCoordinateProposer(), start={s: on for s in slot}, primary="score",
                     higher_is_better=True, stop_after=None, max_turns=self._turns(len(slot)), alpha=self.alpha,
@@ -447,8 +454,8 @@ class FittedStepwise(_Fitted):
                 for t in kept]
         res = ctx.finish(hist, self.name, registry_dir, prereg,
                          meta={"stopped": out["stopped"], "turns": out["turns"], "kept": out["kept"]})
-        res.history = [{"text": text(t["cfg"]), "train": (t.get("metrics") or {}).get("score", {}).get("value"),
-                        "origin": t["status"], "step": t["n"]} for t in out["history"]]
+        res.history = [{"text": text(t["cfg"]), "train": ctx.train_mean(text(t["cfg"])) if t["status"] != "crash"
+                        else None, "origin": t["status"], "step": t["n"]} for t in out["history"]]
         return res
 
 
