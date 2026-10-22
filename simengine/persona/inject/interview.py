@@ -311,17 +311,18 @@ class InterviewExpertReflection(_InterviewBase):
         if not isinstance(raw, Mapping):
             raise TypeError(f"person {person.get('id')!r}: expert_reflections must be {{expert: [note, ...]}} "
                             f"(build with interview.reflect_experts or prepare), not {type(raw).__name__}")
-        refl = {_expert_name(k): v for k, v in raw.items()}
+        refl = {}
+        for k, v in raw.items():          # an expert with no usable notes counts as missing
+            notes = [str(n).strip() for n in ([v] if isinstance(v, str) else v or ())]
+            if any(notes):
+                refl[_expert_name(k)] = [n for n in notes if n]
         chosen = list(refl) if self.expert == "all" else [
             keyword_expert(question) if self.expert == "auto" else self.expert]
         fallback = not any(e in refl for e in chosen)
         if fallback:                      # no notes from the routed expert: use what the person has
             chosen = list(refl)
-        blocks = []
-        for e in [e for e in EXPERTS if e in chosen]:
-            notes = refl[e]
-            notes = [notes] if isinstance(notes, str) else list(notes)
-            blocks.append(f"Reflections of an expert {e}:\n" + "\n".join(f"- {str(n).strip()}" for n in notes))
+        blocks = [f"Reflections of an expert {e}:\n" + "\n".join(f"- {n}" for n in refl[e])
+                  for e in EXPERTS if e in chosen]
         parts = ([self.transcript(person)] if self.with_transcript else []) + blocks
         return self.prompt(_join(parts), question, experts=[e for e in EXPERTS if e in chosen],
                            expert_fallback=fallback)
