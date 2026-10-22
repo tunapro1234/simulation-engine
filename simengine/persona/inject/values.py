@@ -51,17 +51,14 @@ SCHWARTZ_10: dict[str, str] = {
                     "and for nature",
 }
 
-# simengine wording for the 10 basic values in Rozen et al.'s anchor template (their Appendix E covers only the
-# 19 refined values, see simengine.persona.methods.value_anchor.ANCHORS)
+# simengine wording, in Rozen et al.'s anchor template, for the 6 basic values that Appendix E splits into
+# refined ones; stimulation, hedonism, achievement and tradition keep the paper's own texts
+# (simengine.persona.methods.value_anchor.ANCHORS)
 BASIC_ANCHORS: dict[str, str] = {
     "self-direction": "thinking and acting independently, choosing your own goals",
-    "stimulation": "seeking excitement, novelty and challenge in life",
-    "hedonism": "seeking pleasure and enjoying life",
-    "achievement": "being ambitious and successful",
     "power": "seeking social status, prestige and control over people and resources",
     "security": "seeking safety, harmony and stability for society, your relationships and yourself",
     "conformity": "holding back from actions that could upset others or break social norms",
-    "tradition": "respecting the customs and ideas of your culture or religion",
     "benevolence": "caring for the welfare of the people close to you",
     "universalism": "seeking understanding, tolerance and protection for the welfare of all people and of nature",
 }
