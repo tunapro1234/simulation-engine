@@ -737,7 +737,8 @@ def _task_prompt(hist: str, task: str) -> str:
 
 def summarize_logs(llm, people: Sequence[dict], style: str = "paars", *, cutoff: Any = None,
                    hide_items: Iterable = (), hide_qids: Iterable = (), n: int = 50, n_items: int = 25,
-                   seed: int = 0, like_at: float = 3, task: str | None = None, max_tokens: int = 400, parallel: int = 4, dry_run: bool = False,
+                   seed: int = 0, like_at: float = 3, task: str | None = None, max_tokens: int = 400,
+                   parallel: int = 4, dry_run: bool = False,
                    **llm_kw: Any) -> list[dict] | dict:
     """Copies of `people` with person['log_summary'][style] = {text, ..., cutoff, items, qids, n_events, model}.
 
