@@ -896,6 +896,443 @@ def _f3(x) -> str:
     return f"{x:.3f}"
 
 
+# ------------------------------------------------------------------ English rendering (headline_en, card(lang="en"))
+# The research layer writes Turkish labels, flags, audit names and details. These tables translate the common ones
+# for the English views; anything not covered stays in its Turkish wording (never an error).
+KIND_TO_ENGLISH = {"baseline": "baseline", "yontem": "method", "kontrol": "control", "kalibre": "calibrated",
+                   "tavan": "ceiling"}
+AUTO_BASELINE_TO_ENGLISH = {"rastgele": "random", "marjinal": "marginal", "demografi": "demographic"}
+RECALIBRATION_TO_ENGLISH = {"izotonik": "isotonic", "sicaklik": "temperature", "dogrusal": "linear", "platt": "platt"}
+GAP_NA_NOTE = "n/a, ceiling ≈ baseline"
+CHECK_TO_ENGLISH = {
+    "grup-ayrık katlar (CV)": "group-disjoint folds (CV)",
+    "bölme bilgisi (eğitim/test)": "split information (train/test)",
+    "grup çakışması (eğitim ∩ test)": "group overlap (train ∩ test)",
+    "zaman sızıntısı (eğitim testten sonra mı)": "temporal leakage (train after test?)",
+    "birim tekrarı (testte)": "duplicated units (test)",
+    "tavanı aşan yöntem (sızıntı işareti)": "method above the ceiling (leakage sign)",
+    "model/oracle tavanını aşan yöntem": "method above the model/oracle ceiling",
+    "örneklem gürültüsü tavanını aşan yöntem (sızıntı işareti)": "method above the sampling-noise ceiling (leakage sign)",
+    "dağılım çöküşü (Bernoulli sd oranı)": "distribution collapse (Bernoulli sd ratio)",
+    "dağılım çöküşü (entropi oranı)": "distribution collapse (entropy ratio)",
+    "dağılım çöküşü (sd oranı)": "distribution collapse (sd ratio)",
+    "sınıf dengesizliği": "class imbalance",
+    "kontaminasyon (kesim öncesi/sonrası)": "contamination (before/after cutoff)",
+    "pozisyon takası": "position swap",
+    "ezber testi (LLM veriyi biliyor mu)": "memorization test (does the LLM know the data?)",
+    "en güçlü taban belirsiz mi (tabanlar arası seçim gürültüsü)": "strongest baseline uncertain? (selection noise among baselines)",
+    "madde ortalamasını geçiyor mu": "beats the item mean?",
+    "en güçlü basit tabanı geçiyor mu": "beats the strongest simple baseline?",
+    "en güçlü diğer yöntem": "strongest other method",
+    "tahmin karıştırma (persona takası değil)": "prediction shuffle (not a persona swap)",
+    "persona karıştırma (birey bilgisi kullanılıyor mu)": "persona shuffle (is individual information used?)",
+    "kişiye özgü sinyal (madde_ici_kor)": "person-specific signal (within_item_corr)",
+    "kişiye özgü sinyal (demeaned_r2 > 0)": "person-specific signal (demeaned_r2 > 0)",
+    "seri içi sinyal (demeaned_r2 > 0)": "within-series signal (demeaned_r2 > 0)",
+    "seçim yanlılığı": "selection bias",
+    "kör kol (tanıma kontrolü)": "blind arm (recognition check)",
+    "yalnız basit tabanlar": "only trivial baselines",
+    "tek tahmin kökeni (single origin)": "single forecast origin",
+    "mühür": "seal", "kontrol": "control", "gerçek": "truth",
+    "kayıtlı karşılaştırma zayıf tabana karşı": "registered comparison against a weak baseline",
+    "görev türü: tahmin": "task type: forecast",
+    "girdi notu": "input note",
+    "etkin örneklem çarpanı": "effective sample multiplier",
+    "döngüsel önsel (çarpan dışı)": "circular prior (excluded from the multiplier)",
+    "bölme beyanı (split=)": "declared split (split=)",
+    "bootstrap GA (nokta tahmini yüzdelik GA dışında)": "bootstrap CI (point estimate outside the percentile CI)",
+    "blok bootstrap": "block bootstrap",
+    "blok bootstrap blok sayısı": "block bootstrap: number of blocks",
+    "bilgi düzeyi (ayar A / ayar B)": "information level (setting A / setting B)",
+    "baskın blok (dominant block)": "dominant block",
+    "küme sayısı (bootstrap GA)": "number of clusters (bootstrap CI)",
+}
+CHECK_PATTERNS_EN = ((r"^pozisyon takası \((.+)\)$", r"position swap (\1)"),
+                     (r"^dolgu payı \(geçersiz → tekdüze\): (.+)$", r"fill share (invalid → uniform): \1"))
+# card row labels ("Method" column): the row name is already in the "Row" column
+ROW_LABEL_TO_ENGLISH = {
+    "En güçlü basit taban": "—", "Ham yöntem": "—", "Bizim yöntem": "—", "İnsan tekrar tavanı": "human test-retest",
+    "Model/oracle tavanı": "model/oracle", "Örneklem gürültüsü tavanı (varyans bileşenleri)": "variance components",
+    "Kapanan boşluk (bizim − taban)/(tavan − taban)": "(ours − baseline)/(ceiling − baseline)",
+    "Kaç insana bedel": "PPI++ multiplier",
+}
+ROW_LABEL_PREFIXES_EN = ((r"^En güçlü basit taban: ", ""), (r"^Ham: ", ""), (r"^Bizim: ", ""),
+                         (r"^Kaç insana bedel: (.*) \+ 100 gerçek yanıt$", r"\1 + 100 real answers"))
+
+# Ordered (pattern, replacement): whole sentences first, then fragments. Applied after dot decimals.
+_PHRASES_EN = [
+    # badge reasons (kart.rozet)
+    (r"Gerçek sonuç henüz yok ve tahmin mühürlenmemiş: gerçek açılmadan önce seal\(\) ile mühürleyin\.",
+     "No truth yet and the predictions are not sealed: seal them with seal() before the truth is opened."),
+    (r"Gerçek sonuç henüz yok: tahmin mühürlü, kart gerçek gelince dolar\.",
+     "No truth yet: the predictions are sealed; the card fills in when the truth arrives."),
+    (r"Bizim yöntem en güçlü basit tabanın altında: fark (\S+), GA \[(\S+); (\S+)\]\.",
+     r"Ours is below the strongest simple baseline: difference \1, CI [\2, \3]."),
+    (r"Tabana göre fark (\S+) anlamlı, ama ", r"The difference to the baseline (\1) is significant, but "),
+    (r"bizim yöntemin bedel alt sınırı (\S+)× < (\S+)×", r"the lower bound of ours' worth-N-humans multiplier is \1× < \2×"),
+    (r"bizim yöntemin bedel alt sınırı (\S+)× tabanınkini \((\S+)×\) geçmiyor",
+     r"the lower bound of ours' worth-N-humans multiplier (\1×) does not exceed the baseline's (\2×)"),
+    (r"Tabana göre fark (\S+), GA \[(\S+); (\S+)\] sıfırın üstünde\.",
+     r"Difference to the baseline \1, CI [\2, \3] above zero."),
+    (r"Fark anlamlı ama küçük \((\S+), GA \[(\S+); (\S+)\]\); en güçlü basit taban neredeyse aynı yerde\.",
+     r"Significant but small difference (\1, CI [\2, \3]); the strongest simple baseline is almost level."),
+    (r"Tabana göre fark (\S+), GA \[(\S+); (\S+)\] sıfırı içeriyor\.",
+     r"Difference to the baseline \1, CI [\2, \3] includes zero."),
+    (r"En güçlü basit tabana göre eşleşik farkın güven aralığı ölçülmedi\.",
+     "No paired CI against the strongest simple baseline was measured."),
+    (r"Tabana göre fark yok; ", "No difference to a baseline; "),
+    (r"Bizim yöntemin kaç insana bedel GA'sı (\S+)×'ten başlıyor \(≥ (\S+)×\)\.",
+     r"Ours' worth-N-humans CI starts at \1× (≥ \2×)."),
+    (r"Tabana göre farkın güven aralığı yok ve bizim yöntemin kendi bedeli ölçülmedi\.",
+     "No CI for the difference to a baseline, and ours' own multiplier was not measured."),
+    (r"\(Rozet eşit tabanların en kötüsüne karşı: (.*?); badge against the worst tied baseline\.\)",
+     r"(Badge against the worst tied baseline: \1.)"),
+    (r"Yalnız (\d+) küme/test: bootstrap GA anlamsız \(< (\d+)\); yüksek güven verilmez \([^()]*\)\.",
+     r"Only \1 clusters/tests: the bootstrap CI is not meaningful (< \2); no 'high confidence'."),
+    (r"; yalnız \d+ '\w+' kümesi, GA anlamsız\)", ")"),
+    (r"'gercek' \(truth\) sütunu yok: ", "no truth column: "),
+    (r"'gercek' \(truth\) sütununun tamamı eksik: ", "the truth column is all missing: "),
+    (r"kalibrasyon, taban merdiveni, bootstrap ve çarpan atlandı", "calibration, baseline ladder, bootstrap and multiplier skipped"),
+    (r"(\d+) mühür kaydı eklendi; son sha256 ", r"\1 seal record(s) attached; last sha256 "),
+    (r"mühür kaydı yok: tahmini gerçek açılmadan önce seal\(\) ile mühürleyin ve evaluate\(prereg=<dizin>\) verin",
+     "no seal record: seal the predictions with seal() before the truth is opened and pass evaluate(prereg=<dir>)"),
+    (r"'bizim' yöntem açıkça belirtilmedi \(son sütun alındı\); yöntemi önceden belirleyin",
+     "ours was not named (the last column was taken); name it in advance"),
+    (r"Uyarı: kazanç ezber/tanımadan gelebilir", "Caveat: gain may come from recognition/memorization"),
+    (r"ezber denetimi uyarıda", "memorization audit warning"),
+    (r"kör kol kazancın çoğunu kaybediyor", "the blind arm loses most of the gain"),
+    # flags (kart.kart)
+    (r"kanıtlanmadı: sızıntı/ezber", "not proven: leakage/memorization"),
+    (r"kanıtlanmadı: sızıntı \((.*) atlandı\)", lambda m: "not proven: leakage ("
+     + ", ".join(_check_en(x) for x in m.group(1).split(", ")) + " skipped)"),
+    (r"LLM kolu yok: ezber denetimi uygulanamaz \(no LLM arm: memorization audit not applicable\)",
+     "no LLM arm: memorization audit not applicable"),
+    (r"yüzdelik GA nokta tahminini dışarıda bırakıyor \((.*?), (\d+) sütun\)",
+     r"percentile CI excludes the point estimate (\1, \2 columns)"),
+    (r"; ci='basic' deneyin", "; try ci='basic'"),
+    (r"; temel \(basic\) GA kullanıldı", "; basic CI used"),
+    (r"yalnız basit tabanlar \(rastgele/marjinal\)", "only trivial baselines (random/marginal)"),
+    (r"en güçlü taban belirsiz \((\d+) taban GA içinde\): seçim gürültüsü",
+     r"strongest baseline uncertain (\1 baselines within CI): selection noise"),
+    (r"ayar-B tabanı \((.*?)\) daha güçlü: rozet ayar-A tabanına karşı",
+     r"setting-B baseline (\1) is stronger: the badge is against the setting-A baseline"),
+    (r"dolgu payı yüksek: (\S+) %(\d+) \(geçersiz → tekdüze\)", r"high fill share: \1 \2% (invalid → uniform)"),
+    (r"sonradan karşılaştırma: (\d+) satır ön kayıtta yok \(post hoc\)",
+     r"post hoc comparisons: \1 row(s) not in the pre-registration"),
+    (r"kayıtlı karşılaştırma zayıf tabana karşı \(en güçlü: (.*?)\)",
+     r"registered comparison against a weak baseline (strongest: \1)"),
+    (r"kazanç ezber/tanımadan olabilir", "gain may come from recognition/memorization"),
+    # card row notes (kart.kart)
+    (r"tavan yok \(test-tekrar ölçülmemiş\)", "no ceiling (no test-retest measured)"),
+    (r"tavan yok: hesaplanamaz", "no ceiling: not computable"),
+    (r"^taban yok$", "no baseline"), (r"^ham kol yok$", "no raw arm"),
+    (r"tür: model/oracle \(insan test-retest değil\)", "type: model/oracle (not a human test-retest)"),
+    (r"tavan türü: örneklem gürültüsü \(varyans bileşenleri, tüm gruplar\)",
+     "ceiling type: sampling noise (variance components, all groups)"),
+    (r"≈ (\S+) gerçek yanıt \(PPI\+\+, sonlu kitle\)", r"≈ \1 real answers (PPI++, finite population)"),
+    (r"bizim yöntemin kendi çarpanı yok \(aynı kitlenin etiketiyle eğitildi, döngüsel\); satır ham kolun",
+     "ours has no multiplier of its own (trained on the same population's labels, circular); the row is the raw arm's"),
+    (r"en yüksek çarpan (.*?) (\S+)× \(rozete dayanak değil\)", r"highest multiplier \1 \2× (not used for the badge)"),
+    (r"^ölçülmedi \(bizim ve ham kolun çarpanı yok; en yüksek çarpan (.*?) (\S+)×, dayanak değil\)",
+     r"not measured (no multiplier for ours or the raw arm; highest multiplier \1 \2×, not used)"),
+    (r"^ölçülmedi$", "not measured"),
+    (r"~(\d+) ek yanıt ≈ \$(\S+) \[hesap: yanıt başı \$(\S+)\]", r"~\1 extra answers ≈ $\2 [at $\3 per answer]"),
+    (r"belirsiz: (.*?) GA içinde \(strongest baseline uncertain\)", r"uncertain: \1 within CI"),
+    # baseline / control / ceiling labels (merdiven.baselineler, cekirdek)
+    (r"Rastgele \(başka maddenin gerçek değeri; madde başına tek satır\)", "Random (another item's truth; one row per item)"),
+    (r"Rastgele \(madde içi gerçek değer\)", "Random (within-item truth)"),
+    (r"Rastgele \(hep beraberlik\)", "Random (always a tie)"),
+    (r"Rastgele \(tekdüze\)", "Random (uniform)"), (r"Rastgele \(0\.5\)", "Random (0.5)"),
+    (r"Demografi ortalaması \(", "Demographic mean ("), (r"Demografi sınıf payları \(", "Demographic class shares ("),
+    (r"Demografi \(", "Demographic ("),
+    (r"Madde sınıf payları", "Item class shares"), (r"Genel sınıf payları", "Overall class shares"),
+    (r"Madde ortalaması", "Item mean"), (r"Madde medyanı", "Item median"), (r"Genel ortalama", "Overall mean"),
+    (r"Genel medyan", "Overall median"), (r"Genel oran", "Overall rate"), (r" \(madde başına tek satır\)", " (one row per item)"),
+    (r"Tekdüze dağılım", "Uniform distribution"), (r"Madde geneli \(birini dışarıda bırak\)", "Item overall (leave one out)"),
+    (r"Çoğunluk yönü \(kol ortalaması\)", "Majority direction (arm mean)"),
+    (r" \(ileriye bakan / look-ahead\)", " (look-ahead)"),
+    (r"ayar B: hedef sorunun öbür hücrelerinin cevabı \(setting B\)", "setting B: the target question's other cells"),
+    (r"İnsan tavanı \(test-retest\)", "Human ceiling (test-retest)"),
+    (r"Model/oracle tavanı \(", "Model/oracle ceiling ("),
+    (r"Örneklem gürültüsü tavanı \(varyans bileşenleri\)", "Sampling-noise ceiling (variance components)"),
+    (r" \+ izotonik\b", " + isotonic"), (r" \+ sicaklik\b", " + temperature"), (r" \+ dogrusal\b", " + linear"),
+    (r"\(kör kol: ad/başlık yok\)", "(blind arm: no names/titles)"),
+    # limits (cekirdek / api)
+    (r"Bootstrap birimi '(\w+)' \((\d+) küme", lambda m: "Bootstrap unit '" + {"grup": "group", "madde": "item",
+     "satir": "row"}.get(m.group(1), m.group(1)) + f"' ({m.group(2)} clusters"),
+    (r" × (\d+) '(.*?)' bloğu", r" × \1 '\2' blocks"),
+    (r"; toplu metriklerde (\d+)\)\. ", r"; \1 for aggregate metrics). "),
+    (r"Maddeler sabit kabul edilir: GA yeni kişilere genellemeyi ölçer, yeni sorulara değil\.",
+     "Items are taken as fixed: the CI measures generalisation to new people, not to new questions."),
+    (r"Blok × küme iki yönlü örneklenir \(aşağıda\)\.", "Blocks × clusters are resampled two-way (below)."),
+    (r"Seriler \(madde\) sabit kabul edilir: .*? backtest kullanın\.",
+     "Series (items) are taken as fixed: the CI measures generalisation to new clusters (series/groups) on the same "
+     "series; one forecast start (origin) does not measure generalisation in time, use a backtest over several."),
+    (r"Baseline'lar ve kalibrasyon çapraz uydurmalıdır \(aynı grubun satırı kendi eşlemesini görmez\)\.",
+     "Baselines and calibration are cross-fitted (a group's rows never see their own fit)."),
+    (r"Tahmin görevi: otomatik tabanlar .*? baselines=False kullanın\.",
+     "Forecast task: the automatic baselines (random / item median or mean) are cross-fitted from the truth of the test "
+     "window, so they look ahead of the forecast origin and are not a legitimate ladder rung. Pass baselines known at "
+     "the origin (persistence, last-k mean: methods.forecast) as pred_ columns, or use baselines=False."),
+    (r"Tavan örneklem gürültüsü tavanıdır .*? sızıntıya işaret eder\.",
+     "The ceiling is a sampling-noise ceiling (variance components): reliability = 1 − mean(within-group variance / "
+     "group size) / var(group means) over all scored groups; ceiling = √reliability (Spearman: (6/π)·asin(√reliability/2) "
+     "under normal theory; r2: reliability). Only the within-group sample separates a noisy group mean from the true "
+     "group value; clearly exceeding the ceiling points to leakage."),
+    (r"Tavan bir model/oracle tahminidir .*? sızıntı anlamına gelmez\.",
+     "The ceiling is a model/oracle prediction (not a human test-retest): a reference point, not an attainable upper "
+     "bound; the gap closed is relative to it, and exceeding it does not mean leakage."),
+    (r"Tavan, aynı birimin ikinci ölçümüyle uyumdur\. .*? önce sızıntıya bakılır\.",
+     "The ceiling is agreement with a second measurement of the same unit. A noise-free predictor can exceed it; if "
+     "the ratio to the ceiling passes 100%, check for leakage first."),
+    (r"Doğruluk sınıf payına duyarlıdır; kappa ve dengeli doğruluk birlikte okunmalı\.",
+     "Accuracy depends on the class shares; read it together with kappa and balanced accuracy."),
+    (r"Yalnız basit tabanlar \(rastgele/marjinal\): bildirilmiş güçlü bir taban olmadan rozet iyimserdir\.",
+     "Only trivial baselines (random/marginal): without a declared strong baseline the badge is optimistic."),
+    (r"Gerçek sonuç yok: bu kart yalnız mühür ve tahmin özetidir, başarı iddiası taşımaz\.",
+     "No truth yet: this card is only the seal and a prediction summary; it makes no performance claim."),
+    (r"(?s)Grup düzeyi değerlendirme \(aggregate_by=(.*?)\): (\d+) satır (\d+) grubun (toplamına|ortalamasına).*",
+     lambda m: f"Group-level evaluation (aggregate_by={m.group(1)}): {m.group(2)} rows reduced to the "
+     + ("sum" if m.group(4) == "toplamına" else "mean") + f" of {m.group(3)} groups; bootstrap over groups. Within-group "
+     "sampling noise stays in the means. Automatic baselines (overall mean, demography) are cross-fitted over group "
+     "rows and can score clearly below zero on rank metrics (Spearman) even when uninformative; declare a group-level "
+     "baseline with baselines_oof / unlabeled_baselines for a meaningful comparison."),
+    (r"(?s)Ofsetli değerlendirme \(offset_col=(.*?)\): .*?\(ortalama ofset (\S+)\).*",
+     r"Offset evaluation (offset_col=\1): the row offset (mean \2) was subtracted from the truth and every prediction "
+     r"before any aggregation; metrics are on (truth − offset)."),
+    (r"ön kayıt belgesi (\S+) kilidinden sonra değişmiş \(sha256 eşleşmiyor\); zamanı dosya zamanı "
+     r"\(pre-registration document changed after its lock\)",
+     r"pre-registration document \1 changed after its lock (sha256 mismatch); its file time is used"),
+    (r"^Baskın blok: ", "Dominant block: "),
+    (r"Bootstrap iki yönlü \(block_col=(.*?)\): (\d+) blok ve (\d+) '(\w+)' kümesi .*? kapsar\.",
+     r"Two-way bootstrap (block_col=\1): \2 blocks and \3 '\4' clusters are resampled independently with replacement in "
+     r"every replicate, row weight = block count × cluster count; the CIs cover variation between blocks (e.g. origins "
+     r"or weeks) and between series/clusters, including series dependence across blocks."),
+    (r"Yalnız (\d+) blok \(< (\d+)\): blok bileşeninin GA katkısı kaba", r"Only \1 blocks (< \2): the block part of the CI is coarse"),
+    (r"; (\d+) bloktan az olduğu için bloklar arası değişkenlik bu GA'larla tahmin edilemez \(GA güvenilir değil: CI not "
+     r"reliable across blocks\), daha çok köken/hafta ile backtest edin\.",
+     r"; with fewer than \1 blocks the variation between blocks cannot be estimated (CI not reliable across blocks): "
+     r"backtest over more origins/weeks."),
+    (r"; blok sayısını artırmak \(daha çok köken/hafta\) GA'yı sağlamlaştırır\.",
+     "; more blocks (more origins/weeks) make the CI sturdier."),
+    (r"block_col=(.*?) tek değerli: blok bootstrap uygulanmadı, varsayılan kümeler kullanıldı",
+     r"block_col=\1 has one value: block bootstrap not applied, the default clusters are used"),
+    (r"^'(.*?)' tek değerli \((.*?)\): ", r"'\1' has one value (\2): "),
+    (r"; block_col=(.*?) blokları köken değil, kökenler arası değişkenlik yine kapsanmaz",
+     r"; the block_col=\1 blocks are not origins, so variation between origins is still not covered"),
+    (r"talep/zaman serisi tahmini \(task=forecast\): .*? Metrikler WMAPE ve yanlılık içerir\.",
+     "demand / time-series forecast (task=forecast): the persona shuffle control, the human test-retest ceiling and "
+     "the PPI++ 'worth N humans' multiplier do not apply (no human answers or person information) and are skipped. "
+     "Metrics include WMAPE and bias."),
+    # audit details (denetim, cekirdek, api)
+    (r"^(\d+) ortak grup", r"\1 shared group(s)"), (r"\(ör\. ", "(e.g. "),
+    (r"'grup' sütunu yok: aynı kişinin satırları iki yana düşebilir", "no group column: one person's rows may fall on both sides"),
+    (r"girdide 'bolum' yok; tahminlerin hangi bölmeyle üretildiğini kaynak kod/protokol söylemeli",
+     "no split column in the input; the code or protocol must say which split produced the predictions"),
+    (r"(\d+) kat · (\d+) grup · (\d+) grup birden çok katta", r"\1 folds · \2 groups · \3 groups in more than one fold"),
+    (r"eğitim son (\S+) · test ilk (\S+) · testten sonraki eğitim payı %(\S+)",
+     r"last train \1 · first test \2 · share of train rows after the test start \3%"),
+    (r"^(\d+) tekrar eden birim$", r"\1 duplicated unit(s)"),
+    (r"^sütun yok$", "column missing"),
+    (r"^tekrar ölçümü yok$", "no retest measurement"),
+    (r"hiçbir yöntem test-retest tavanını anlamlı aşmıyor", "no method is significantly above the test-retest ceiling"),
+    (r"insan tekrar ölçümünü anlamlı aşan: (.*?)\. Gürültüsüz gerçek tahmini tavanı aşabilir ama önce sızıntıyı ele",
+     r"significantly above the human retest: \1. A noise-free estimate can exceed the ceiling, but rule out leakage first"),
+    (r": olasılık tahmini, ", ": probability forecast, "),
+    (r"; 0/1 gerçeğin sd'siyle kıyas uygulanamaz \(0 = sabit tahmin, 1 = kesin 0/1\); <(\S+) neredeyse sabit tahmin",
+     r"; not comparable with the sd of a 0/1 truth (0 = constant prediction, 1 = sharp 0/1); <\1 almost constant"),
+    (r": sd oranı ", ": sd ratio "), (r"<(\S+) homojenleşme, >(\S+) aşırı yayılım", r"<\1 homogenisation, >\2 over-dispersion"),
+    (r"entropi oranı \(ortalamaların oranı\)", "entropy ratio (ratio of means)"),
+    (r"entropi oranı (\S+) \(1 = insan kadar çeşitli\)", r"entropy ratio \1 (1 = as diverse as humans)"),
+    (r"gruplar arası ayrışma oranı", "between-group separation ratio"), (r"^hesaplanamadı$", "not computable"),
+    (r"en sık sınıf payı %(\S+?)(;|$)", r"majority class share \1%\2"),
+    (r"; birincil metrik (\S+) doğruluk türü değil", r"; primary metric \1 is not accuracy-type"),
+    (r"; olasılık tahmini: AUC / Brier / logloss / ECE sınıf payından yanıltılmaz",
+     "; probability forecast: AUC / Brier / logloss / ECE are not misled by the class share"),
+    (r"; tablodaki doğruluk ve F1 \(eşik 0\.5\) için kappa ve dengeli doğruluğa bak",
+     "; for accuracy and F1 in the table (threshold 0.5) read kappa and balanced accuracy"),
+    (r"; doğruluk yanıltıcı olabilir, kappa ve dengeli doğruluğa bak", "; accuracy can mislead, read kappa and balanced accuracy"),
+    (r"kesim tarihi \(cutoff=\) ve 'zaman' \(time\) sütunu yok", "no cutoff date (cutoff=) and no time column"),
+    (r"'zaman' \(time\) sütunu var ama LLM eğitim kesim tarihi verilmedi: (.*?) ile kesim öncesi/sonrası karşılaştırılır",
+     r"a time column exists but no LLM training cutoff was given: \1 compares before/after the cutoff"),
+    (r"^'zaman' \(time\) sütunu yok$", "no time column"),
+    (r"öncesi (\d+), sonrası (\d+) birim: az", r"\1 units before, \2 after the cutoff: too few"),
+    (r"^kesim (\S+) · ", r"cutoff \1 · "), (r": önce (\S+) / sonra (\S+), fark ", r": before \1 / after \2, difference "),
+    (r" · kesimden önceki birimlerde anlamlı daha iyi: ezber şüphesi",
+     " · significantly better on units before the cutoff: memorization suspected"),
+    (r"ezber testi sonucu verilmedi \(kanit\.ezber\)", "no memorization test result given (memorization=)"),
+    (r"^okunamadı: ", "unreadable: "), (r"sonuç dosyasında 'durum' yok", "no status in the result file"),
+    (r"sıra değişince aynı kalan %(\S+); tutarlı doğruluk %(\S+)",
+     r"unchanged when the order is swapped \1%; consistent accuracy \2%"),
+    (r"'ters_<yontem>' sütunu yok", "no reverse_<method> column"),
+    (r"en güçlü taban belirsiz: (.*?) GA içinde \(strongest baseline uncertain: .*? within CI\)",
+     r"strongest baseline uncertain: \1 within CI"),
+    (r" · bizim − eşitlerin en kötüsü (.*?) \(worst case ours − tied baselines, paired\)",
+     r" · worst case ours − tied baselines \1 (paired)"),
+    (r"; tek tek en düşük alt sınır: ", "; lowest single lower bound: "),
+    (r" · (\d+) taban arasından nokta tahminiyle en iyisini seçmek seçim gürültüsü taşır: rozet ve 'en güçlü taban' "
+     r"satırını eşitlerin hepsine karşı oku \((.*?)\)$", r" · \2"),
+    (r"en güçlü taban (.*?) ikinciden ayrışıyor \((.*?); strongest baseline separated from the runner-up\) · (\d+) taban",
+     r"strongest baseline \1 separated from the runner-up (\2) · \3 baselines"),
+    (r"bildirilmiş taban yok; en güçlü taban (.*?) \(otomatik rastgele/marjinal\)\. Rozet bu basit tabana karşı: gerçek "
+     r"tabanları unlabeled_baselines= \(etiketsiz\) ya da baselines_oof= \(etiketle eğitilmiş, çapraz uydurmalı\) ile "
+     r"bildirin", r"no declared baseline; the strongest baseline is \1 (automatic random/marginal). The badge is against "
+     r"this trivial baseline: declare real ones with unlabeled_baselines= (label-free) or baselines_oof= (trained on the "
+     r"labels, cross-fitted)"),
+    (r"doğrulanmadı: ön kayıt verilmedi \(prereg=\); 'bizim' \((.*?)\) adının önceden seçildiği kanıtlanamaz "
+     r"\(not verified: no pre-registration\)",
+     r"not verified: no pre-registration (prereg=); ours (\1) cannot be shown to have been named in advance"),
+    (r"^(\d+) yöntem; ", r"\1 methods; "),
+    (r"bolum sütunu: (\d+) test, (\d+) eğitim satırı; metrikler yalnız testte",
+     r"split column: \1 test, \2 train rows; metrics on test rows only"),
+    (r" · (?:seri içi|kişiye özgü) sapmalar (?:seri|madde) ortalamasından kötü ya da ayırt edilemiyor; genlik "
+     r"kalibrasyonu gerekebilir", " · deviations from the mean are worse or indistinguishable; amplitude calibration "
+     "may be needed"),
+    (r": değerlendirilen satırların %(\S+?)'i \((\d+) blok; eşik %(\d+)\)", r": \1% of the scored rows (\2 blocks; threshold \3%)"),
+    (r"; (\S+) bizim \((.*?)\) kişi ağırlıklı (\S+), blok eşit ağırlıklı (\S+) \((.*)\) \(dominant block: person-weighted "
+     r"vs block-equal-weighted\)", r"; \1 of ours (\2) person-weighted \3, block-equal-weighted \4 (\5)"),
+    (r"grup değeri blok içi ortalamaların eşit ağırlıklı ortalaması", "group value = equal-weighted mean of the block means"),
+    (r"satır ağırlığı 1/n_blok", "row weight 1/n_block"),
+    (r"blok içi değerlerin ortalaması; bloklar arası fark dışarıda, yeniden ağırlıklama değil",
+     "mean of within-block values; between-block differences left out, not a reweighting"),
+    (r"; aggregate='sum' ile blok eşit ağırlıklı değer hesaplanmaz \(dominant block\)",
+     "; no block-equal-weighted value with aggregate='sum'"),
+    # generic fragments (last)
+    (r"bizim − taban\b", "ours − baseline"), (r"\bkarıştırılmış tahmin\b", "shuffled prediction"),
+    (r"\bkarıştırılmış\b", "shuffled"), (r"− marjinal\b", "− marginal"), (r"'bizim'", "'ours'"), (r"\bbizim\b", "ours"),
+    (r" farkı ", " difference "),
+]
+_PHRASES_EN = [(re.compile(p), r) for p, r in _PHRASES_EN]
+_TR_LETTERS = re.compile(r"[çğıöşüÇĞİÖŞÜ]")
+_TAIL_EN = re.compile(r"^(.*\S)\s+\(([^()]*)\)\.?$", re.S)
+_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])(?:tahmin|taban|kontrol|kalib)_[^\s,;:()\[\]`'\"|]+")
+_METRIC_RE = re.compile(r"\b(" + "|".join(sorted((re.escape(k) for k, v in METRIC_TO_ENGLISH.items() if k != v),
+                                                  key=len, reverse=True)) + r")\b")
+
+
+def column_en(name):
+    """Internal column name -> the user's spelling: tahmin_x -> pred_x, taban_x -> 'baseline x' (automatic rungs;
+    declared baselines keep their pred_ column), kontrol_karistir_x -> 'control shuffled pred_x', kalib_x+k ->
+    'calibrated pred_x + k', tavan -> 'ceiling'. Anything else is returned unchanged."""
+    if not isinstance(name, str):
+        return name
+    if name == "tavan":
+        return "ceiling"
+    if name == "tavan_model":
+        return "ceiling (model)"
+    if name.startswith(ON_EK):
+        return PRED_PREFIX + name[len(ON_EK):]
+    if name.startswith("taban_"):
+        x = name[len("taban_"):]
+        return "baseline " + AUTO_BASELINE_TO_ENGLISH.get(x, x)
+    if name.startswith("kontrol_karistir_"):
+        return "control shuffled " + PRED_PREFIX + name[len("kontrol_karistir_"):]
+    if name.startswith("kontrol_"):
+        return "control " + name[len("kontrol_"):]
+    if name.startswith("kalib_"):
+        m, plus, how = name[len("kalib_"):].rpartition("+")
+        return (f"calibrated {PRED_PREFIX}{m} + {RECALIBRATION_TO_ENGLISH.get(how, how)}" if plus
+                else f"calibrated {PRED_PREFIX}{how}")
+    return name
+
+
+def _names_en(text: str) -> str:
+    def one(m):
+        s = m.group(0)
+        tail = len(s) - len(s.rstrip("."))
+        return column_en(s[:len(s) - tail]) + s[len(s) - tail:]
+    return _NAME_RE.sub(one, text)
+
+
+def _check_en(name) -> str:
+    """Audit check name -> English (unknown names stay as they are)."""
+    if not isinstance(name, str):
+        return name
+    if name in CHECK_TO_ENGLISH:
+        return CHECK_TO_ENGLISH[name]
+    for p, r in CHECK_PATTERNS_EN:
+        if re.match(p, name):
+            return re.sub(p, r, name)
+    return name
+
+
+def _en_text(s) -> str:
+    """Free research text (flag, note, audit detail, limit, badge reason) -> English where a table covers it.
+    Dot decimals and pred_ names always; a sentence written as "Turkish (English)" falls back to its English part;
+    anything else keeps the Turkish wording."""
+    if s is None:
+        return ""
+    t = re.sub(r"(?<=\d),(?=\d)", ".", str(s))
+    if t in CHECK_TO_ENGLISH:
+        return CHECK_TO_ENGLISH[t]
+    for p, r in _PHRASES_EN:
+        t = p.sub(r, t)
+    for p, r in CHECK_PATTERNS_EN:
+        t = re.sub(p, r, t)
+    for tr, en in sorted(CHECK_TO_ENGLISH.items(), key=lambda kv: -len(kv[0])):
+        if len(tr) > 12 and tr in t:
+            t = t.replace(tr, en)
+    m = _TAIL_EN.match(t)
+    if m and _TR_LETTERS.search(m.group(1)) and not _TR_LETTERS.search(m.group(2)) and len(m.group(2).split()) >= 3:
+        t = m.group(2)
+    t = re.sub(r"(?<![\w%])%(\d+(?:\.\d+)?)", r"\1%", t)
+    return _METRIC_RE.sub(lambda q: METRIC_TO_ENGLISH[q.group(1)], _names_en(t))
+
+
+def _label_en(label) -> str:
+    """Card row / ladder / calibration label -> English (method names are the user's and stay)."""
+    if label is None:
+        return ""
+    t = str(label)
+    if t in ROW_LABEL_TO_ENGLISH:
+        return ROW_LABEL_TO_ENGLISH[t]
+    for p, r in ROW_LABEL_PREFIXES_EN:
+        t = re.sub(p, r, t)
+    return _en_text(t)
+
+
+def _kind_en(kind) -> str:
+    return KIND_TO_ENGLISH.get(kind, kind) if isinstance(kind, str) else kind
+
+
+def _finite(x) -> float | None:
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _ceiling_near_baseline(m: dict) -> bool:
+    """ceiling − strongest baseline is about 0, or smaller than its CI width (approximated from the two CIs as
+    sqrt(w_ceiling² + w_baseline²), unpaired): the gap-closed ratio then divides by noise."""
+    c, b = m.get("tavan") or {}, m.get("en_iyi_baseline") or {}
+    cv, bv = _finite(c.get("deger")), _finite(b.get("deger"))
+    if cv is None or bv is None:
+        return False
+    gap = abs(cv - bv)
+    if gap <= 1e-9 * max(1.0, abs(cv), abs(bv)):
+        return True
+    w = [_finite(x.get("ust")) - _finite(x.get("alt")) for x in (c, b)
+         if _finite(x.get("alt")) is not None and _finite(x.get("ust")) is not None]
+    return bool(w) and gap < math.sqrt(sum(v * v for v in w))
+
+
+def _gap_closed(report: dict) -> dict | None:
+    """summary()['gap_closed']: {"value", "lo", "hi"} of (ours − baseline)/(ceiling − baseline); value None with
+    "note": GAP_NA_NOTE when the ceiling is about the baseline. The Turkish keys "deger" / "alt" / "ust" are kept as
+    deprecated aliases holding the raw research numbers (use value / lo / hi)."""
+    m = report.get("manset") or {}
+    g = m.get("bosluk_kapanan")
+    if not g:
+        return None
+    out = {"value": g.get("deger"), "lo": g.get("alt"), "hi": g.get("ust")}
+    if _ceiling_near_baseline(m):
+        out.update(value=None, lo=None, hi=None, note=GAP_NA_NOTE)
+    out.update(deger=g.get("deger"), alt=g.get("alt"), ust=g.get("ust"))
+    return out
+
+
 def _headline_en(s: dict) -> str | None:
     """English one-line headline built from the summary fields (dot decimals)."""
     o, b = s.get("ours"), s.get("best_baseline")
@@ -907,9 +1344,9 @@ def _headline_en(s: dict) -> str | None:
     if not o or o.get("value") is None:
         return None
     ci = lambda d: f" [{_f3(d.get('lo'))}, {_f3(d.get('hi'))}]" if d.get("lo") is not None and d.get("hi") is not None else ""
-    out = f"{s.get('primary_metric')}: ours ({o.get('column')}) {_f3(o['value'])}{ci(o)}"
+    out = f"{s.get('primary_metric')}: ours ({column_en(o.get('column'))}) {_f3(o['value'])}{ci(o)}"
     if b and b.get("value") is not None:
-        out += f" vs strongest simple baseline ({b.get('column')}) {_f3(b['value'])}{ci(b)}"
+        out += f" vs strongest simple baseline ({column_en(b.get('column'))}) {_f3(b['value'])}{ci(b)}"
     d = s.get("ours_minus_baseline") or {}
     if d.get("fark") is not None:
         out += f"; ours − baseline {d['fark']:+.3f}"
@@ -935,16 +1372,22 @@ def summary(report: dict) -> dict:
         "primary_metric_internal": report.get("birincil"),
         "ours": _box(m.get("bizim")), "raw": _box(m.get("ham")), "best_baseline": _box(m.get("en_iyi_baseline")),
         "best_other_method": _box(m.get("en_iyi_rakip")), "ceiling": _box(m.get("tavan")),
-        "gap_closed": m.get("bosluk_kapanan"), "ratio_to_ceiling": m.get("tavana_oran"),
+        "gap_closed": _gap_closed(report), "ratio_to_ceiling": m.get("tavana_oran"),
         "baseline_ratio_to_ceiling": m.get("taban_tavana_oran"),
         "worth_humans_at_100": None if not worth or worth.get("deger") is None else
         {"multiplier": worth["deger"], "lo": worth.get("alt"), "hi": worth.get("ust"), "note": worth.get("not")},
         "ours_minus_baseline": k.get("fark"),
         "badge": _badge_english(k), "badge_code": k.get("rozet"), "below_baseline": _below_baseline(k),
         "badge_reason": k.get("rozet_gerekce"),
+        "badge_reason_en": _en_text(k.get("rozet_gerekce")) if k.get("rozet_gerekce") else None,
         "flags": k.get("etiketler") or [],
-        "audits": [{"check": d.get("kontrol"), "status": STATUS_TO_ENGLISH.get(d.get("durum"), d.get("durum")),
-                    "detail": d.get("ayrinti"), "value": d.get("deger")} for d in report.get("denetim") or []],
+        "flags_en": [_en_text(e) for e in k.get("etiketler") or []],
+        # name / status / detail in English (untranslated details stay Turkish); "check" (Turkish name) and
+        # "detail_tr" keep the research wording ("check" is the older key, kept for compatibility)
+        "audits": [{"name": _check_en(d.get("kontrol")), "status": STATUS_TO_ENGLISH.get(d.get("durum"), d.get("durum")),
+                    "detail": _en_text(d.get("ayrinti")) if d.get("ayrinti") is not None else None,
+                    "check": d.get("kontrol"), "detail_tr": d.get("ayrinti"), "value": d.get("deger")}
+                   for d in report.get("denetim") or []],
         "ladder": [{"column": r.get("sutun"), "label": r.get("etiket"), "kind": r.get("tur"), "value": r.get("deger"),
                     "lo": r.get("alt"), "hi": r.get("ust"), "diff_prev": r.get("fark_onceki"), "p": r.get("p")}
                    for r in report.get("merdiven") or []],
@@ -1048,7 +1491,7 @@ def _dot(s, lang):
     return re.sub(r"(?<=\d),(?=\d)", ".", s) if lang == "en" else s
 
 
-def _rank_note(report: dict) -> str | None:
+def _rank_note(report: dict, lang: str = "mixed") -> str | None:
     chance = RANK_METRICS.get(report.get("birincil"))
     if chance is None:
         return None
@@ -1056,8 +1499,10 @@ def _rank_note(report: dict) -> str | None:
            and r.get("deger") is not None and r["deger"] < chance]
     if not low:
         return None
-    names = ", ".join(f"`{r['sutun']}`" for r in low)
-    return (f"Average baselines ({names}) score below chance ({chance:g}) on {report.get('birincil')}. This is "
+    en = lang == "en"
+    names = ", ".join(f"`{column_en(r['sutun']) if en else r['sutun']}`" for r in low)
+    metric = METRIC_TO_ENGLISH.get(report.get("birincil"), report.get("birincil")) if en else report.get("birincil")
+    return (f"Average baselines ({names}) score below chance ({chance:g}) on {metric}. This is "
             "expected, not a bug: they are cross-fitted (a row never sees its own label), so a leave-one-out "
             "mean or rate moves against the held-out truth. On ranking and correlation metrics, compare ours "
             "with the informative rungs (persistence, learners) rather than with these.")
@@ -1067,13 +1512,18 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     """Evidence card as Markdown: badge, the six card rows, the ladder, the audits and the seals.
 
     lang="mixed" (default) keeps the research card's Turkish labels next to the English ones;
-    lang="en" drops the Turkish badge reason and original headline and uses dot decimals in the audit details
-    (ladder and audit labels stay as computed)."""
+    lang="en" is English throughout: the badge reason (`summary()["badge_reason_en"]`), flags, row and ladder labels,
+    rung kinds (method / control / baseline / calibrated / ceiling), audit names and the common audit details and
+    limits are translated, internal columns print as the user's names (pred_x, "baseline random", "control shuffled
+    pred_x"), decimals use dots. Text without a translation keeps its Turkish wording."""
     k = report.get("kanit_kart") or _kart.kart(report)
     s = summary(report)
     en = lang == "en"
     out = [f"# Evidence card: {_md(report.get('baslik') or report.get('veri_adi') or '')}", ""]
-    reason = s.get("headline_en") if en else _md(k.get("rozet_gerekce"))
+    reason = _md(k.get("rozet_gerekce"))
+    if en:
+        reason = re.sub(r" ?Caveat: gain may come from recognition/memorization \([^()]*\)\.", "",
+                        _md(s.get("badge_reason_en")))
     badge = _badge_english(k)
     if s.get("below_baseline"):
         badge += " (ours − strongest baseline CI is entirely below 0; research rule: inconclusive)"
@@ -1081,10 +1531,10 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         badge += (" (only trivial baselines: random/marginal; declare real ones with unlabeled_baselines= or "
                   "baselines_oof=)")
     cav = s.get("badge_caveat")
-    out.append(f"**Badge: {badge}.** " + ("" if en else reason) + (f" Caveat: {cav}." if cav else ""))
+    out.append(f"**Badge: {badge}.** " + reason + (f" Caveat: {cav}." if cav else ""))
     if k.get("etiketler"):
         out.append("")
-        out.append("Flags: " + ", ".join(_dot(e, lang) for e in k["etiketler"]))
+        out.append("Flags: " + ", ".join(_md(_en_text(e)) if en else _dot(e, lang) for e in k["etiketler"]))
     meta = (f"Task: {s['task'] or '—'} · primary metric: {s['primary_metric'] or '—'}"
             + (f" (`{s['primary_metric_internal']}`)" if s['primary_metric_internal'] else "") + f" · clusters: {k.get('n')}")
     if k.get("kaynak"):
@@ -1100,11 +1550,11 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     if s.get("ceiling_kind"):
         meta += f" · ceiling: {s['ceiling_kind']}"
     if s.get("declared_baselines"):
-        meta += " · declared baselines: " + ", ".join(f"`{c}`" for c in s["declared_baselines"])
+        meta += " · declared baselines: " + ", ".join(f"`{column_en(c) if en else c}`" for c in s["declared_baselines"])
     out += ["", meta, ""]
     if s.get("single_origin"):
         so = s["single_origin"]
-        out += [f"Note: {so['note']} (`{so['column']}` = {_md(so['value'])}).", ""]
+        out += [f"Note: {_en_text(so['note']) if en else so['note']} (`{so['column']}` = {_md(so['value'])}).", ""]
     db = s.get("dominant_block")
     if db and db.get("dominant"):
         ours_v = (db.get("values") or {}).get(_method(((report.get("manset") or {}).get("bizim") or {}).get("sutun")) or "")
@@ -1122,8 +1572,13 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
             row = "Oracle/model ceiling"
         elif r["tur"] == "tavan" and s.get("ceiling_kind") == CEILING_KIND["orneklem_gurultusu"]:
             row = "Sampling-noise ceiling (variance components)"
-        out.append(f"| {row} | {_md(r.get('etiket'))} | "
-                   f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)} | {_dot(r.get('not'), lang)} |")
+        val = f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)}"
+        if r["tur"] == "bosluk" and (s.get("gap_closed") or {}).get("note") == GAP_NA_NOTE:
+            val = GAP_NA_NOTE
+        if en:
+            out.append(f"| {row} | {_md(_label_en(r.get('etiket')))} | {val} | {_md(_en_text(r.get('not')))} |")
+        else:
+            out.append(f"| {row} | {_md(r.get('etiket'))} | {val} | {_dot(r.get('not'), lang)} |")
     f = k.get("fark")
     if f and f.get("fark") is not None:
         out += ["", f"Ours − strongest baseline (paired, metric direction, positive = better): {f['fark']:+.3f}"
@@ -1153,7 +1608,9 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         out += ["", "| Calibration-in-the-large | Kind | Mean prediction − mean truth [95% CI] |", "|---|---|---|"]
         for c, v in cil:
             m = v["metrikler"]["mean_bias"]
-            out.append(f"| {_md(v.get('etiket'))} (`{c}`) | {v.get('tur')} | {_signed(m.get('deger'))}"
+            lab, col, kind = ((_label_en(v.get("etiket")), column_en(c), _kind_en(v.get("tur"))) if en
+                              else (v.get("etiket"), c, v.get("tur")))
+            out.append(f"| {_md(lab)} (`{col}`) | {kind} | {_signed(m.get('deger'))}"
                        + (f" [{m['alt']:+.3f}, {m['ust']:+.3f}]" if m.get("alt") is not None and m.get("ust") is not None
                           else "") + " |")
         out += ["", "Signed (0 = the mean is right; binary: + over-predicts the rate). Diagnostic, not a primary metric; "
@@ -1165,7 +1622,7 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
             ci_ = (f" [{c['lo']:+.3f}, {c['hi']:+.3f}]" if c.get("lo") is not None and c.get("hi") is not None else "")
             dv = "—" if c.get("diff") is None else f"{c['diff']:+.3f}{ci_}"
             p = "—" if c.get("p") is None else f"{c['p']:.3f}"
-            out.append(f"| {_md(c.get('label'))} | {c['kind']} | {c.get('metric')} | {dv} | {p} | {c.get('n')} | {c['verdict']} |")
+            out.append(f"| {_md(_en_text(c.get('label')) if en else c.get('label'))} | {c['kind']} | {c.get('metric')} | {dv} | {p} | {c.get('n')} | {c['verdict']} |")
         out += ["", "A − B on the same cluster-bootstrap resamples as the ladder (b empty: A's value against 0). "
                     "For lower-is-better metrics a negative difference favours A."]
     if s["ladder"]:
@@ -1174,20 +1631,25 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         for r in report.get("merdiven") or []:
             d = "—" if r.get("fark_onceki") is None else f"{r['fark_onceki']:+.3f}{_ci(r.get('fark_alt'), r.get('fark_ust'))}"
             p = "—" if r.get("p") is None else f"{r['p']:.3f}"
-            out.append(f"| {_md(r.get('etiket'))} (`{r.get('sutun')}`) | {r.get('tur')} | "
+            lab, col, kind = ((_label_en(r.get("etiket")), column_en(r.get("sutun")), _kind_en(r.get("tur"))) if en
+                              else (r.get("etiket"), r.get("sutun"), r.get("tur")))
+            out.append(f"| {_md(lab)} (`{col}`) | {kind} | "
                        f"{_num(r.get('deger'))}{_ci(r.get('alt'), r.get('ust'))} | {d} | {p} |")
     if s.get("predictions"):
         out += ["", "## Predictions (awaiting truth)", "", "| Column | n | missing | mean | sd | min | median | max | top labels |",
                 "|---|---|---|---|---|---|---|---|---|"]
         for c, p in s["predictions"].items():
             top = ", ".join(f"{_md(a)} {100 * b:.0f}%" for a, b in (p.get("en_sik") or {}).items())
-            out.append(f"| {_md(p.get('etiket'))} (`{c}`) | {p.get('n')} | {p.get('eksik')} | {_num(p.get('ortalama'))} | "
+            out.append(f"| {_md(p.get('etiket'))} (`{column_en(c) if en else c}`) | {p.get('n')} | {p.get('eksik')} | {_num(p.get('ortalama'))} | "
                        f"{_num(p.get('sd'))} | {_num(p.get('en_kucuk'))} | {_num(p.get('medyan'))} | "
                        f"{_num(p.get('en_buyuk'))} | {top or ('vector' if p.get('tur') == 'vektor' else '—')} |")
     if s["audits"]:
         out += ["", "## Audits", "", "| Check | Status | Detail |", "|---|---|---|"]
         for a in s["audits"]:
-            out.append(f"| {_md(a['check'])} | {a['status']} | {_dot(a['detail'], lang)} |")
+            if en:
+                out.append(f"| {_md(a['name'])} | {a['status']} | {_md(a['detail'])} |")
+            else:
+                out.append(f"| {_md(a['check'])} | {a['status']} | {_dot(a['detail_tr'], lang)} |")
     if s["seals"]:
         out += ["", "## Sealed predictions (pre-registration chain)", "",
                 "| # | SHA-256 (canonical CSV) | SHA-256 (file bytes) | Sealed at (UTC) | Rows | Description |",
@@ -1206,9 +1668,10 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     limits = list(k.get("yanilgi") or [])
     if db and db.get("dominant"):   # already shown as the dominant-block note above
         limits = [x for x in limits if not str(x).startswith("Baskın blok:")]
-    note = _rank_note(report)
+    note = _rank_note(report, lang)
     if limits or note:
-        out += ["", "## Limits", ""] + [f"- {_dot(x, lang)}" for x in limits] + ([f"- {note}"] if note else [])
+        out += ["", "## Limits", ""] + [f"- {_md(_en_text(x)) if en else _dot(x, lang)}" for x in limits] \
+            + ([f"- {note}"] if note else [])
     if s["headline"] and not en:
         out += ["", "Headline (original wording): " + _md(s["headline"])]
     return "\n".join(out) + "\n"
