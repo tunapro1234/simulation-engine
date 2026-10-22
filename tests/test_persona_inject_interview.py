@@ -156,6 +156,22 @@ class TestRender(unittest.TestCase):
         with self.assertRaises(TypeError):                         # a memory-style list is refused clearly
             inj({"id": "z", "interview": "hi", "expert_reflections": [{"text": "x"}]}, q_pol)
 
+    def test_plus_survey_reflections(self):
+        plain = pi.get_injector("interview_plus_survey")
+        self.assertNotIn("expert_reflections", plain.needs)
+        self.assertNotIn("Reflections of an expert", plain(person(1), Q_CAR).system)
+        inj = pi.get_injector("interview_plus_survey", expert="auto")       # v3: reflections for every agent type
+        self.assertEqual(inj.label, "interview_plus_survey(expert=auto)")
+        q_pol = {"id": "q9", "text": "Should the government spend more on police?", "options": OPTS}
+        p = inj(person(1), q_pol)
+        self.assertEqual(p.meta["experts"], ["political scientist"])
+        self.assertLess(p.system.index("answers to other survey questions"), p.system.index("Votes in every"))
+        self.assertNotIn("Lives alone.", p.system)
+        with self.assertRaises(pi.MissingPersonField):
+            inj({"id": "x", "interview": "hi", "answers": {"q1": "no"}}, Q_CAR)
+        with self.assertRaises(ValueError):
+            pi.get_injector("interview_plus_survey", expert="astrologer")
+
     def test_summary(self):
         p = pi.get_injector("interview_summary")(person(1), Q_CAR)
         self.assertIn("- drives: daily", p.system)
