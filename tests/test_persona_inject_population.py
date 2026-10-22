@@ -84,6 +84,19 @@ class TestRender(unittest.TestCase):
         self.assertEqual(a.meta["injector"], "cell_verbalized")
         self.assertIn("age: 21", pi.get_injector("cell_verbalized")(ps[1], Q).system)    # keys=None: all fields
 
+    def test_cell_key_order_and_empty_keys(self):
+        a = {"id": "a", "fields": {"region": "north", "age": 30}}
+        b = {"id": "b", "fields": {"age": 30, "region": "north"}}
+        self.assertEqual(pop.cell_key(a, None), pop.cell_key(b, None))
+        inj = pi.get_injector("cell_verbalized")
+        self.assertEqual(inj(a, Q).system, inj(b, Q).system)
+        everyone = pi.get_injector("cell_verbalized", keys=[])
+        self.assertEqual(everyone.label, "cell_verbalized(keys=[])")
+        self.assertIn("the general population", everyone(a, Q).system)
+        self.assertEqual(everyone(a, Q).system, everyone({"id": "c", "fields": {"region": "south"}}, Q).system)
+        res = pop.simulate_population(FakeLLM(oracle), people(), Q, "cell_verbalized", keys=[])
+        self.assertEqual((res.calls, res.n), (1, {"": 12}))
+
     def test_sample_deterministic_with_seed(self):
         ps = people(30)
         inj = pi.get_injector("cell_sample", keys=["region"], seed=1)
@@ -117,6 +130,14 @@ class TestRender(unittest.TestCase):
         self.assertTrue(all(str(e[0]["id"]) != "q0" for e in ex))
         self.assertEqual(inj(ps[1], Q).user, p0 := inj(ps[1], Q).user)    # deterministic
         self.assertTrue(p0)
+        # the north cell answered q0 100% yes; that share line must not be shown for target q0
+        self.assertNotIn(json.dumps({"yes": 100, "no": 0, "unsure": 0}), p0)
+        # the example cache is keyed by target: q0 is a valid example once q3 is the target
+        q3 = inj(ps[1], QS[3])
+        self.assertIn("q0", q3.meta["examples"])
+        self.assertNotIn("q3", q3.meta["examples"])
+        self.assertIn(json.dumps({"yes": 100, "no": 0, "unsure": 0}), q3.user)
+        self.assertEqual(inj(ps[1], Q).user, p0)                          # cache did not mix the targets
 
     def test_fewshot_similarity_then_diversity(self):
         ps = people()
@@ -140,6 +161,14 @@ class TestParse(unittest.TestCase):
         self.assertIsNone(pop.parse_distribution('{"distribution": {"yes": 60}}', Q))   # missing options
         self.assertIsNone(pop.parse_distribution("yes", Q))
         self.assertIsNone(pop.parse_distribution('{"samples": ["maybe"]}', Q))
+        # numeric-coded options keyed by text: not shifted by the 1-based option-number lookup
+        q = {"id": "n", "text": "Cars owned?", "options": ["0", "1", "2"]}
+        self.assertEqual(pop.parse_distribution('{"distribution": {"0": 70, "1": 20, "2": 10}}', q),
+                         {"0": 0.7, "1": 0.2, "2": 0.1})
+        q = {"id": "l", "text": "Agree?", "options": ["5", "4", "3", "2", "1"]}
+        d = pop.parse_distribution('{"distribution": {"1": 10, "2": 10, "3": 10, "4": 20, "5": 50}}', q)
+        self.assertAlmostEqual(d["5"], 0.5)
+        self.assertAlmostEqual(d["4"], 0.2)
         self.assertEqual(pop.parse_modal('{"distribution": {"yes": 10, "no": 30, "unsure": 60}}', Q), "unsure")
         self.assertEqual(pop.parse_modal('{"answer": "no"}', Q), "no")
         self.assertIsNone(pop.parse_modal("perhaps", Q))
@@ -173,6 +202,10 @@ class TestPopulation(unittest.TestCase):
         self.assertLessEqual(res.calls, 40)
         self.assertEqual(sum(res.n.values()), 40)
         self.assertEqual(len(res.per_person), sum(res.parsed.values()))
+        failed = [p["id"] for p, pr in zip(ps, res.prompts) if pr.meta["draw"] in (1, 2)]
+        self.assertTrue(failed)                                       # the seed does hit the failing draws
+        self.assertEqual(sum(res.parsed.values()), 40 - len(failed))
+        self.assertTrue(all(pid not in res.per_person for pid in failed))
         self.assertAlmostEqual(res.dist["region=north"]["yes"], 1.0)
 
     def test_compare_injectors_runs(self):
