@@ -19,10 +19,10 @@ Import it directly (`import simengine.abm.schelling as S`) until the integrator 
 | `tipping_curve(thresholds, seeds, grid, n_steps, **kw)` | DataFrame with the final metrics for each (threshold, seed). |
 | `unlike_pairs(lattice, grid)` | Zhang's rho: the number of neighbouring pairs of different types. |
 | `segregation_coefficient(lattice, torus=False)` | Gauvin, Vannimenus & Nadal (2009) eq. 2: `s = 2/N^2 sum_c n_c^2` over 4-connected same-type clusters. It is 1 for two one-type clusters and near 0 for a fine mix. On a torus, clusters that touch across the wrap are merged. |
-| `ZhangSwap(grid, beta=10, Z=1, M=0.6, share=0.5).run(n_pairs, seed, record_every, target_rho)` -> `ZhangRun` | Zhang's game on a full torus (no vacancies). Each period draws one random type-0 agent and one random type-1 agent. They swap with probability `exp(bV)/(exp(bU)+exp(bV))`. The payoff is kinked: `u = Z x/n` for `x <= n`, `(2Z-M) + (M-Z) x/n` above, with `n = k/2`. rho and the like counts are updated incrementally; a test checks them against a full recount. |
+| `ZhangSwap(grid, beta=10, Z=1, M=0.6, share=0.5).run(n_pairs, seed, record_every, target_rho)` -> `ZhangRun` | Zhang's game on a full torus (no vacancies). Each period draws one random type-0 agent and one random type-1 agent; if they are neighbours the period passes without a trade. Otherwise they swap with probability `exp(bV)/(exp(bU)+exp(bV))`. The payoff is kinked: `u = Z x/n` for `x <= n`, `(2Z-M) + (M-Z) x/n` above, with `n = k/2`. rho and the like counts are updated incrementally; a test checks them against a full recount. |
 | `zhang_payoff(x, n, Z, M)` | Zhang's eq. 1 (Table 4 values with Z=1, M=0.6). |
 | `LLMMover(llm, labels=None, persona=None, ask="unhappy", n_options=0, dedupe=True, max_calls=None, max_tokens=60, parallel=8, system=DEFAULT_SYSTEM, llm_kwargs=None)` | LLM decision round, passed as `Schelling(..., mover=...)`. See below. |
-| `parse_decision(text, n_options)` -> `Decision(move, option, valid)` | Accepts JSON `{"move": ...}`, `{"choice": "stay"/n}`, Cheng et al.-style `{"yes_rating", "no_rating"}`, or plain yes / no / stay / "option n". Anything else means stay with `valid=False`. |
+| `parse_decision(text, n_options)` -> `Decision(move, option, valid)` | Accepts JSON `{"move": ...}`, `{"choice": "stay"/n/"Option n"}`, Cheng et al.-style `{"yes_rating", "no_rating"}`, or plain yes / no / stay / "option n". A negated move in plain text ("I would not move", "don't want to leave") is stay. Anything else means stay with `valid=False`. |
 | `threshold_responder(threshold)` | `FakeLLM` responder that applies the classic rule to the prompt text. It is for tests and for sanity runs of the LLM path. |
 | `describe_cells(counts, own, labels, k)` | Builds the neighbourhood sentence used in prompts. |
 
@@ -80,7 +80,12 @@ Each method was checked against the text of its source (sections named below). N
 - **Zhang (2004)**, "Residential segregation in an all-integrationist world", *JEBO* 54:533-550, §2-3 (author's
   PDF). Our setting follows eqs. 1-2, Table 4 (Z = 1, M = 0.6), the logit switch probability, a torus and no
   vacancies. One detail is our interpretation: Zhang picks "a pair of agents ... from two different
-  neighbourhoods", and we draw one random agent of each colour (a same-colour swap changes nothing).
+  neighborhoods". We draw one random agent of each colour (a same-colour swap changes nothing) and skip the
+  period when the two are neighbours. That restriction is what makes his §2.2 identity exact: for non-adjacent
+  partners the pair's payoff gain equals -M/(2n) x the change in rho (a unit test checks this by brute force on
+  Moore and von Neumann lattices); for neighbours it does not, and -rho is then no exact potential. Neighbour
+  pairs are under 0.2% of draws on 100 x 100 (at most 8 of 5,000 partners). The section 4 runs were made before
+  this fix, with neighbour pairs allowed; a re-run after it gave the same stationary rho (below).
 - **NetLogo Segregation model** (Wilensky; model library page, "Things to notice"). It says that a 30% wanted share
   ends up "on average" at 70% same-colour neighbours. Its unhappy agents move to a nearby patch. We move them to a
   random empty cell.
@@ -118,6 +123,8 @@ API below. The runs were made on 22 Oct 2026 on a shared machine.
 | 0.75 | 0.995 | 1.00 | 0.977 | 0.995 | 0.880 | 132.3 | 10/10 |
 | 0.80 | 0.553 | 0.146 | 0.036 | 0.033 | 0.221 | 300 | 0/10 |
 | 0.90 | 0.501 | 0.009 | 0.009 | 0.020 | 0.167 | 300 | 0/10 |
+
+A review re-run of thresholds 1/3, 0.5 and 0.8 (same call, 10 seeds) reproduced 0.751, 0.874 and 0.553 exactly.
 
 This is the known tipping shape. Below about 1/4 there is almost no segregation. A mild demand of 1/3 gives a 0.75
 like share, and 0.6-0.75 gives near-complete separation. Above 0.75 nobody can be satisfied, agents keep
@@ -158,7 +165,9 @@ L = 50 with free boundaries, 10% vacancies, every agent tries a satisfying vacan
 
 Their Table 1 gives the frozen-to-segregated jump Tf = 3/8 at a vacancy density of 10%. We see it between 1/3 and
 3/8, so it matches. Their segregated-to-mixed jump Tc is "almost at a constant value" of T. Their Figs. 3 and A.7
-put it near 2/3-3/4 (read off the plots; the text gives no number). We see it between 5/7 and 3/4. Our s
+put it near 2/3-3/4 (read off the plots; the text gives no number). We see it between 5/7 and 3/4. A review re-run after
+the frozen-stop fix (T = 1/4, 1/3, 3/8, same seeds) gave the same s (0.018, 0.029, 0.764); the frozen runs at 1/4
+and 1/3 now stop after 2 sweeps with `converged=True`. Our s
 is 0.7-0.85 where theirs is ~1, because we stop at 150 sweeps while they equilibrate and then average over 30,000
 steps. Our clusters are still coarsening.
 
@@ -187,12 +196,24 @@ which is rho <= 8,000.
   (60k pairs at beta 8-10, 40k at 40).
 - **Disagreement:** Zhang (§3.3, Fig. 8) reports that for beta < 2 runs never reach the criterion, that the waiting
   time drops sharply around beta = 2, and that runs at beta = 4 "always end fairly quickly". In our runs the
-  threshold is between beta 5 and 6, and beta = 4 stays mixed at stationarity: 60M pairs, rho ~14k. This fits a
-  check from equilibrium theory. The logit rule on a potential game has the Gibbs stationary law
-  exp(-beta x 0.075 x rho) (Zhang's Prop. 1 / Young 1998). That is an Ising model with coupling K = 0.0375 beta on
-  the 8-neighbour lattice, which orders only above some K_c, so a finite threshold beta is expected. Its exact
-  value was not computed here. Either Zhang's potential or time unit is scaled differently from our reading of
-  eqs. 1-2, or the pair rule matters. We could not settle this from the paper.
+  threshold is between beta 5 and 6, and beta = 4 stays mixed at stationarity: 60M pairs, rho ~14k. This is what
+  equilibrium theory predicts for the model as written. The logit rule on a potential game, with a pair rule
+  that picks a swap and its reverse equally often, has the Gibbs stationary law exp(-beta x 0.075 x rho)
+  (Zhang's Prop. 1 / Young 1998). That is a zero-magnetisation Ising model with equal nearest and next-nearest
+  couplings and K = J/kT = 0.0375 beta (an unlike pair costs 2J). Literature value: that model orders at
+  kT_c = 5.262 J (arXiv:2112.11569, p = 1 case), so K_c = 0.190 and beta_c = 0.190 / 0.0375 = 5.07 in the
+  infinite-lattice limit. Our onset between beta 5 and 6, with beta 5 hovering at rho 8.5k-9.4k next to the
+  criterion, matches it.
+- **Stationarity check** (review re-run, 22 Oct 2026, `melt`: 100 x 100, 4M pairs, seed 0, rho every 500k pairs,
+  started once from two clean stripes, rho = 600, and once from a random state, rho = 19,874): at beta 4 both
+  starts end at the same level (stripes 13,614-14,034, random 13,836-14,148 after the first 500k pairs); at
+  beta 5 both sit at 8,070-9,748; at beta 6 the stripes roughen but hold (3,700-4,064) while the random start is
+  still coarsening (4,358 at 4M). The same check after the neighbour-pair fix: beta 4 stripes 13,816-14,308, random
+  13,474-14,040; beta 6 stripes 3,650-4,218, random 4,234 at 4M. Clean stripes melt at beta 4, so the mixed state there is the stationary
+  state, not a slow transient. Zhang's "beta = 4 always ends fairly quickly" is therefore not reproducible for
+  eqs. 1-2 with Table 4 payoffs at this beta scale; his simulation must scale payoffs or beta differently (he
+  notes that beta "is meaningful only relative to the unit of the payoff function"), or measure something other
+  than our reading of the "potential below 600" criterion. The paper does not give enough to settle which.
 - A raw rho of 600 (two clean stripes) was not reached in 60M pairs at beta = 10. rho levelled off at ~1,200, the
   count for four straight boundaries. A metastable multi-stripe state on the torus is the likely cause; the
   lattice was not inspected.
@@ -225,9 +246,14 @@ LLM.
   not for very large lattices.
 - `rule="nearest"` breaks ties at random. Schelling broke them by hand order. `isolated_happy=True` is a
   convention, because Schelling does not say how he treated an agent with no neighbours.
-- Zhang's run draws one random agent of each colour per period. His "two different neighbourhoods" pairing rule is
-  not specified further, so waiting times measured in pairs are not directly comparable with his Fig. 8 (which is
-  a plot with no table).
+- Zhang's run draws one random agent of each colour per period and skips neighbour pairs. His "two different
+  neighbourhoods" pairing rule is not specified further, and his periods may include same-colour pairs (about half
+  of all draws), so waiting times measured in pairs are not directly comparable with his Fig. 8 (a plot with no
+  table).
+- Gauvin et al. count one time step as one attempted move per occupied site on average (random draws with
+  replacement); our sweep is a random permutation of all agents. A classic run stops after a sweep in which nobody
+  moved: with `movers="all"` that is a frozen state (no agent has a satisfying vacancy), so frozen Gauvin runs end
+  early with `converged=True`.
 - The LLM round is synchronous, while the classic sweep is asynchronous. With options, collisions (`blocked`) are
   frequent when many agents are unhappy. Identical prompts share one reply in a round (`dedupe=True`), which
   removes sampling variation; pass `dedupe=False` to sample each agent.
