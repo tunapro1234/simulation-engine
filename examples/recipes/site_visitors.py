@@ -15,7 +15,8 @@ P(continue) per step; past traffic gives the baselines; the evidence card decide
     step_order  int   1, 2, ... (order of the step in the funnel)
     page_text   str   text description of that variant's page at that step
     continued   0/1   1 = clicked through to the next step (at the last step: purchased); 0 = dropped off here
-    date        str   optional ISO date; when present the last 30 % of dates are the test split (else 30 % of visitors)
+    date        str   optional ISO date; when present the visitors who arrived last (~30 %) are the test split
+                      (split by each visitor's first date, so one visitor is never cut in two); else 30 % of visitors
 Guide, pitfalls and the literature behind each step: docs/recipes/site_visitors.md.
 """
 import argparse
@@ -101,8 +102,8 @@ if need - set(df.columns):
     sys.exit(f"--data is missing columns: {sorted(need - set(df.columns))}")
 df = df.sort_values(["visitor_id", "step_order"]).reset_index(drop=True)
 n_steps = int(df.step_order.max())
-if "date" in df:                                                     # time split: the test days come last
-    t = pd.to_datetime(df.date).astype("int64")
+if "date" in df:                                                     # time split: the last-arriving visitors
+    t = pd.to_datetime(df.date).groupby(df.visitor_id).transform("min").astype("int64")
     df["split"] = np.where(t > np.quantile(t, 0.7), "test", "train")
 else:                                                                # else visitor-disjoint split
     df["split"] = ["test" if zlib.crc32(str(v).encode()) % 10 < 3 else "train" for v in df.visitor_id]
@@ -110,7 +111,10 @@ train = df[df.split == "train"]
 
 # 2. Backend: FakeLLM offline; --live = Claude with a hard budget (BudgetExceeded stops new calls).
 if a.live:
-    key = Path(a.key_file).expanduser().read_text().strip() if a.key_file else os.environ.get("ANTHROPIC_API_KEY")
+    try:
+        key = Path(a.key_file).expanduser().read_text().strip() if a.key_file else os.environ.get("ANTHROPIC_API_KEY")
+    except OSError as e:
+        sys.exit(f"--key-file cannot be read ({type(e).__name__})")
     if a.max_usd is None or not key:                                 # the ledger stops new calls at --max-usd
         sys.exit("--live needs --max-usd (e.g. --max-usd 1) and $ANTHROPIC_API_KEY or --key-file <path>")
     llm = se.llm.Claude(model=a.model, effort="low", thinking="off", max_tokens=200, cache_dir=out / ".cache",
@@ -128,11 +132,17 @@ try:
     replies = llm.map(jobs, max_tokens=200, return_exceptions=True)      # a refusal fills its slot, not a crash
 except se.llm.BudgetExceeded as e:
     sys.exit(f"stopped by the budget (answers so far are cached; rerun resumes): {e}")
+except se.llm.StopError as e:                                        # bad key (401) or account spend limit
+    sys.exit(f"stopped: {type(e).__name__}: {e}")
 
-ps = [p_of(r) for r in replies]
+ps, bad = [p_of(r) for r in replies], [r for r in replies if isinstance(r, BaseException)]
 cells["p_llm"], ctrl["p_np"] = ps[:len(cells)], ps[len(cells):]
-print(f"LLM calls: {len(jobs)} ({len(cells)} cells + {len(ctrl)} no-persona controls); set to 0.5 (unparsed or "
-      f"failed): {sum(p == 0.5 for p in ps)}")
+unparsed = sum(not isinstance(se.sim.parse_json(r.text), dict) for r in replies
+               if not isinstance(r, BaseException))
+print(f"LLM calls: {len(jobs)} ({len(cells)} cells + {len(ctrl)} no-persona controls); failed {len(bad)}, "
+      f"unparsed {unparsed} (both set to 0.5)")
+if len(bad) > len(jobs) // 4:                                        # a few refusals are data; most failing is a bug
+    sys.exit(f"{len(bad)} of {len(jobs)} calls failed, first: {type(bad[0]).__name__}: {str(bad[0])[:200]}")
 df = df.merge(cells.drop(columns="page_text"), on=["segment", "variant", "step"], how="left")
 df = df.merge(ctrl[["variant", "step", "p_np"]], on=["variant", "step"], how="left")
 
@@ -154,7 +164,10 @@ for _ in range(25):                                                   # Newton s
 df["p_stack"] = 1 / (1 + np.exp(-X @ w))
 
 # 6. Seal the test predictions BEFORE the truth is joined (pre-registration; the card shows the seal).
+# item = the page (variant x step): the marginal rung becomes the per-page rate and the persona shuffle permutes
+# visitors WITHIN a page, so it keeps the page text and removes only who the visitor is.
 frame = pd.DataFrame({"truth": df.continued, "group": df.visitor_id, "segment": df.segment, "split": df.split,
+                      "item": df.variant + " | " + df.step,
                       "pred_step_rate": df.step_rate, "pred_cell_rate": df.cell_rate,
                       "pred_llm_nopersona": df.p_np, "pred_llm": df.p_llm, "pred_stack": df.p_stack})
 registry = out / ".onkayit"
@@ -166,19 +179,26 @@ test = df[df.split == "test"]
 vis = test.groupby("visitor_id").agg(variant=("variant", "first"), segment=("segment", "first"),
                                      bought=("continued", lambda s: int(len(s) == n_steps and s.iloc[-1] == 1)))
 arms = {"llm": "p_llm", "no-persona": "p_np", "stack": "p_stack", "cell_rate": "cell_rate"}
-conv = df.groupby(["segment", "variant", "step"])[list(arms.values())].first().groupby(["segment", "variant"]).prod()
+conv = df.groupby(["segment", "variant", "step"])[list(arms.values())].first().groupby(["segment", "variant"]).prod(min_count=n_steps)
 pred = vis.join(conv, on=["segment", "variant"]).groupby("variant")[list(arms.values())].mean()
 A, B = sorted(vis.variant.unique())[:2]                              # control first, challenger second
 rs, va, vb = np.random.default_rng(0), vis.bought[vis.variant == A].to_numpy(), vis.bought[vis.variant == B].to_numpy()
 lift = np.array([rs.choice(vb, len(vb)).mean() - rs.choice(va, len(va)).mean() for _ in range(a.B)])
+past = df[df.split == "train"].groupby("visitor_id").agg(variant=("variant", "first"), bought=(
+    "continued", lambda s: int(len(s) == n_steps and s.iloc[-1] == 1))).groupby("variant").bought.mean()
 print("\nvariant  observed conversion   predicted: " + "  ".join(arms))
 for v, g in vis.groupby("variant"):
     print(f"{v:8} {g.bought.mean():.3f} (n={len(g):4})     " + "  ".join(f"{pred.loc[v, c]:.3f}" for c in arms.values()))
 print(f"lift {B}-{A}: observed {vb.mean() - va.mean():+.3f} [{np.quantile(lift, .025):+.3f}, "
       f"{np.quantile(lift, .975):+.3f}] | predicted " + ", ".join(f"{k} {pred.loc[B, c] - pred.loc[A, c]:+.3f}"
-                                                                  for k, c in arms.items()))
+                                                                  for k, c in arms.items())
+      + f" | train visitors (LLM-free) {past[B] - past[A]:+.3f}")
 drop = test.pivot_table(index="step_order", columns="variant", values=["continued", "p_llm"], aggfunc="mean")
 print("\ncontinue rate by step (observed `continued` vs LLM `p_llm`, test rows):\n" + drop.round(3).to_string())
+gap = test.groupby(["variant", "segment", "step"]).agg(n=("continued", "size"), observed=("continued", "mean"),
+                                                       llm=("p_llm", "first")).query("n >= 20")
+print("\nwhere the LLM is furthest off (cells with >= 20 test visitors; look at these pages):\n"
+      + gap.loc[(gap.observed - gap.llm).abs().nlargest(3).index].round(3).to_string())
 
 # 8. Evidence card: baseline ladder, controls (no-persona arm + automatic persona shuffle), paired CIs, audits.
 report = se.evidence.evaluate(frame, title="site_visitors funnel", ours="stack", raw="llm", task="binary",
@@ -191,7 +211,7 @@ print("\n" + str(s["headline_en"] or s["headline"]))
 for r in s["ladder"]:
     name = functools.reduce(lambda n, kv: n.replace(*kv), EN.items(), str(r["column"] or r["label"]))
     print(f"  {name:34} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
-print("badge:", s["badge"], "| audits with warnings:", [d["check"] for d in s["audits"] if d["status"] == "warning"])
+print("badge:", s["badge"], "| audits with warnings:", [d["name"] for d in s["audits"] if d["status"] == "warning"])
 se.evidence.card(report, out / "card.md", lang="en")
 se.evidence.dashboard([report], out / "dashboard.html")
 cost = f" | spend this run ${llm.spent_usd:.4f}, ledger ${llm.ledger.total():.4f} of ${a.max_usd}" if a.live else ""
