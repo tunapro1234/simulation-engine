@@ -12,7 +12,8 @@ import pandas as pd
 
 from simengine.research.bandits import (ALGORITHMS, AUDIBERT_BUBECK_2010, RacingProposer, SimulatedArms, canonical,
                                         compare, identify_best, logbar, lucb, lucb_beta, simulate, sr_schedule,
-                                        successive_rejects, thompson_gaussian, ucb1)
+                                        successive_rejects, thompson_beta, thompson_gaussian,
+                                        ucb1)
 from simengine.research.loop import Loop
 from simengine.research.proposers import ProposalContext
 from simengine.research.space import Space
@@ -102,6 +103,26 @@ class TestSingleRun(unittest.TestCase):
         res = lucb(SimulatedArms([0.51, 0.5], seed=0), 2, budget=101, delta=0.05)
         self.assertEqual(res.stopped, "budget")
         self.assertLessEqual(res.budget_used, 101)
+
+    def test_lucb_round_index_follows_paper(self):
+        # deterministic rewards 1 / 0: after c two-arm checks each arm has u = c samples and the paper's round index is
+        # t = K + c (rounds 1..K are the initial pulls); LUCB1 stops at the first c with 2 beta(c, K + c) < 1
+        K, delta = 2, 0.05
+        c = next(c for c in range(1, 10_000) if 2 * float(lucb_beta(c, K + c, K, delta)) < 1)
+        res = lucb(lambda i: float(i == 0), K, budget=10_000, delta=delta)
+        self.assertEqual(res.stopped, "confident")
+        self.assertEqual(res.budget_used, K + 2 * (c - 1))
+        c_wrong = next(c for c in range(1, 10_000) if 2 * float(lucb_beta(c, c, K, delta)) < 1)
+        self.assertNotEqual(c, c_wrong)   # the test can tell t = K + c from t = c
+
+    def test_thompson_beta_lower_is_better_default_bounds(self):
+        # losses in [0, 1] without bounds=: the Bernoulli trial uses the negated reward rescaled from (-1, 0), so the
+        # sampler still concentrates on the lowest-loss arm (it used to see only failures and pull at random)
+        rng = np.random.default_rng(0)
+        mu = [0.1, 0.6, 0.7, 0.8]
+        res = thompson_beta(lambda i: float(rng.random() < mu[i]), 4, 400, higher_is_better=False, seed=0)
+        self.assertEqual(res.best, 0)
+        self.assertGreater(res.pulls[0], 0.6 * 400)
 
     def test_single_arm(self):
         res = identify_best(lambda i: 1.0, 1, 10, "successive_rejects")
