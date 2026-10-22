@@ -88,11 +88,17 @@ every seed. Batch calibration lifts accuracy to about the always-no level and do
 baselines with optional LLM columns on dev, then predict. On Twin-2K-500 the fair LLM-free stack reached corr 0.342
 and adding the LLM column gave only +0.006. An earlier +0.071 claim for the LLM was retracted once the LLM-free stack
 was made fair. Always compare against a stack built without the LLM.
+`DevStack` stacks a learner's dev predictions with the LLM's (logistic on logits for binary) and keeps the
+cross-fitted dev predictions; `BinaryCalibrator` recalibrates one probability column on dev (Platt, isotonic
+from 1,000 rows).
 
 **Shrinkage toward a prior** (`ShrunkDeviation`, `ridge_to_prior`, `abm.ElasticityShrinkage`). Shrink noisy per-unit
 estimates toward a prior (category, LLM expert). On Dominick's elasticities the LLM-plus-category mix helped slightly
 on test, but an LLM-swap placebo helped just as much: the gain is shrinkage, not LLM knowledge. Run the placebo before
 crediting the LLM.
+For segment distributions `ShrunkDeviation(distribution=True)` keeps the known population distribution as the
+level and adds alpha times the LLM's segment deviation from its own population answer (alpha picked on training
+segments, rows renormalised).
 
 **Choice models** (`MNL`). Multinomial logit for conjoint. It works for new people (0.509 vs equal share 0.210), but
 for repeat respondents hierarchical Bayes is much better (0.715 vs 0.482), and HB is not ported.
