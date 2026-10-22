@@ -14,6 +14,8 @@ Rozet "yuksek" için: bizim − taban GA'sı sıfırın üstünde ve fark ≥ AN
 ayrıca alt sınır ≥ ESIK_BEDEL ve tabanın kendi bedel alt sınırının üstünde. Fark yalnız taban_var=False iken
 yoksa (taban yok ya da taban insanın kendisi, ör. Upworthy insan@100) bizim yöntemin bedeliyle; fark GA'sız ya da taban
 varken eşleşik fark yoksa "kararsiz". Bizim − taban GA'sı tümüyle sıfırın altındaysa her durumda "kararsiz".
+Rozet hiçbir yoldan "yuksek" olmaz: fark GA'sı sıfır genişlikteyse (bootstrap dejenere) ya da küme sayısı (ab
+görevinde test sayısı) AZ_KUME'den azsa; "kararsiz"a iner, gerekçe yazılır.
 "En güçlü taban belirsiz" denetimi uyarıdaysa (ilk iki taban GA içinde) rozet, eşit tabanların en kötüsüne karşı
 farkla (denetimin en_kotu'su, tekrar başına) verilir; "fark" tek tabana karşı kalır, şema değişmez.
 """
@@ -24,6 +26,7 @@ import math
 SIRA = ("taban", "ham", "kalibre", "tavan", "bosluk", "bedel")
 ANLAMLI_FARK = 0.02
 ESIK_BEDEL = 1.10  # bedelde en küçük etki: alt sınır 1,10×'in altındaysa N büyüdükçe 1,05× de "yüksek" almasın
+AZ_KUME = 10       # cekirdek.AZ_KUME ile aynı: daha az küme/testte bootstrap GA anlamsız
 
 
 def _f(x):
@@ -44,9 +47,24 @@ def _u(d) -> tuple:
 
 
 def rozet(satirlar: list[dict], fark: dict | None = None, gercek_var: bool = True, bedel_kaynak: str | None = None,
-          taban_bedel_alt: float | None = None, taban_var: bool = False) -> tuple[str, str]:
+          taban_bedel_alt: float | None = None, taban_var: bool = False, n_kume: int | None = None) -> tuple[str, str]:
     """bedel_kaynak: "bizim" | "ham" | None (bedel satırı hangi yöntemin çarpanı); yalnız "bizim" rozete dayanak olur.
-    taban_var: kartta kıyaslanacak bir taban var; o zaman eşleşik fark GA'sı olmadan "yüksek" verilmez."""
+    taban_var: kartta kıyaslanacak bir taban var; o zaman eşleşik fark GA'sı olmadan "yüksek" verilmez.
+    n_kume: bootstrap küme sayısı (ab: test sayısı); AZ_KUME'den azsa ya da fark GA'sı sıfır genişlikteyse "yüksek"
+    yerine "kararsiz" (None: küme denetimi yok, geri uyum)."""
+    r, g = _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var)
+    if r != "yuksek":
+        return r, g
+    if n_kume is not None and n_kume < AZ_KUME:
+        return "kararsiz", (f"Yalnız {n_kume} küme/test: bootstrap GA anlamsız (< {AZ_KUME}); yüksek güven verilmez "
+                            f"(only {n_kume} clusters/tests, CI is not meaningful). {g}")
+    if fark and _f(fark.get("alt")) is not None and _f(fark.get("ust")) is not None and fark["ust"] - fark["alt"] <= 1e-12:
+        return "kararsiz", (f"Fark GA'sı sıfır genişlikte [{fark['alt']:+.3f}; {fark['ust']:+.3f}]: bootstrap dejenere, "
+                            f"yüksek güven verilmez (zero-width CI). {g}")
+    return r, g
+
+
+def _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var) -> tuple[str, str]:
     s = {r["tur"]: r for r in satirlar}
     if not gercek_var or all((s.get(t) or {}).get("deger") is None for t in ("kalibre", "ham")):
         return "bekliyor", "Gerçek sonuç henüz yok: tahmin mühürlü, kart gerçek gelince dolar."
@@ -166,8 +184,12 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     fark_r = ({"fark": min(ek["fark"], fark["fark"]), "alt": min(ek["alt"], fark["alt"]), "ust": ek["ust"]}
               if fark and all(_f(ek.get(k)) is not None for k in ("fark", "alt", "ust"))
               and all(_f(fark.get(k)) is not None for k in ("fark", "alt")) else fark)
+    kb = oz.get("kart") or {}
+    n_kume = min((int(n) for n in (kb.get("n_kume"), kb.get("n_madde") if oz.get("gorev") == "ab" else None)
+                  if _f(n) is not None), default=None)
     r, g = rozet(S, fark_r, gercek_var=bool(son), bedel_kaynak=bedel_kaynak,
-                 taban_bedel_alt=_f(tbb[1].get("alt")) if tbb else None, taban_var=bool(biz and tb))
+                 taban_bedel_alt=_f(tbb[1].get("alt")) if tbb else None, taban_var=bool(biz and tb),
+                 n_kume=n_kume if son else None)
     esit = ", ".join((tb_bel or {}).get("esitler") or [])
     if fark_r is not fark and r != "bekliyor":
         g = f"{g} (Rozet eşit tabanların en kötüsüne karşı: {esit}; badge against the worst tied baseline.)"
