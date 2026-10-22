@@ -4,6 +4,7 @@ Tahmin tablosu gerçek sonuç açıklanmadan önce mühürlenir (sha256 + zaman 
 hash zinciri). Gerçek gelince tahminin değişmediği kanıtlanır, sonra notlanır.
 
     python -m simengine.evidence.onkayit muhurle tahmin.csv --aciklama "ilk tahmin"
+    python -m simengine.evidence.onkayit muhurle tahmin.csv --aciklama "ours: H" --belge ONKAYIT.md
     python -m simengine.evidence.onkayit dogrula tahmin.csv
     python -m simengine.evidence.onkayit zincir
     python -m simengine.evidence.onkayit notla tahmin.csv gercek.csv --anahtar kisi,soru
@@ -146,18 +147,33 @@ def _dosya_sha(tahmin) -> str | None:
         return None
 
 
+def belge_kaydi(belge) -> dict:
+    """Ön kayıt belgesinin (ONKAYIT.md gibi) ham bayt sha256'sı: {"dosya": ad, "sha256"} (yol yazılmaz).
+    research.lock_prereg kilidindeki sha256 ile aynı hesap."""
+    p = Path(belge)
+    if not p.is_file():
+        raise FileNotFoundError(f"ön kayıt belgesi yok: {p.name} (prereg_doc)")
+    return {"dosya": p.name, "sha256": _sha(p.read_bytes())}
+
+
 def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = False, *, kopya: bool = True,
-            arsiv_dizini=None) -> dict:
+            arsiv_dizini=None, belge=None) -> dict:
     """Tahmini mühürler: hash + zaman + zincir bağı; kanonik kopyayı saklar.
 
     kopya=False: yalnız zincir kaydı yazılır (kanonik kopya yok; kayıtta "arsiv": None). Doğrulama zincirle yapılır,
     notlama tahminin kendisini ister. arsiv_dizini: kopya kayıt dizini yerine buraya yazılır (kayıtta yalnız dosya adı
     ve "arsiv_konum": "dis"; yol zincire girmez). Varsayılan kayıt dizini çalışma dizinindedir: lisanslı veride
-    git-ignored ya da repo dışında tutun."""
+    git-ignored ya da repo dışında tutun.
+    belge: ön kayıt belgesi (ONKAYIT.md): ham bayt sha256'sı kayda "onkayit_belgesi" olarak girer ve açıklamanın
+    sonuna "[ön kayıt belgesi <ad> sha256:<hash>]" eklenir; evaluate() bu belgeyi mühürle bağlar (belge o anki
+    içeriğiyle mühürden önce vardı)."""
     if not kopya and arsiv_dizini is not None:
         raise ValueError("kopya=False ile arsiv_dizini birlikte verilemez (store_copy=False, archive_dir)")
     dizin = Path(kayit_dizini)
     dizin.mkdir(parents=True, exist_ok=True)
+    bk = belge_kaydi(belge) if belge is not None else None
+    if bk:
+        aciklama = f"{aciklama} [ön kayıt belgesi {bk['dosya']} sha256:{bk['sha256']}]"
     df = _oku(tahmin)
     bayt = kanonik_bayt(df)
     sha = _sha(bayt)
@@ -179,6 +195,8 @@ def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = F
         "onceki": son["sha256"] if son else None,
         "onceki_kayit": son["kayit_hash"] if son else None,
     }
+    if bk:
+        kayit["onkayit_belgesi"] = bk
     if arsiv_dizini is not None:
         kayit["arsiv_konum"] = "dis"   # kopya kayıt dizininin dışında (yol bilerek yazılmaz)
     kayit["kayit_hash"] = _kayit_hash(kayit["onceki_kayit"], kayit)
@@ -286,6 +304,7 @@ def main(argv=None) -> int:
     m.add_argument("--git", action="store_true", help="kayıt dizinini git'e commit et")
     m.add_argument("--kopyasiz", action="store_true", help="kanonik kopya yazma, yalnız zincir kaydı (store_copy=False)")
     m.add_argument("--arsiv", help="kanonik kopyayı bu dizine yaz (archive_dir)")
+    m.add_argument("--belge", help="ön kayıt belgesi (ONKAYIT.md): sha256'sı mühür kaydına girer (prereg_doc)")
     d = alt.add_parser("dogrula", help="tahmin mühürlü mü")
     d.add_argument("dosya")
     d.add_argument("--sha256")
@@ -301,7 +320,7 @@ def main(argv=None) -> int:
         print(json.dumps(veri, ensure_ascii=False, indent=2) if a.json else metin)
 
     if a.komut == "muhurle":
-        k = muhurle(a.dosya, a.aciklama, a.dizin, a.git, kopya=not a.kopyasiz, arsiv_dizini=a.arsiv)
+        k = muhurle(a.dosya, a.aciklama, a.dizin, a.git, kopya=not a.kopyasiz, arsiv_dizini=a.arsiv, belge=a.belge)
         yaz(k, f"Mühürlendi #{k['sira']}: {k['sha256']}\n  zaman: {k['zaman']}  "
                f"({k['satir']} satır × {k['sutun']} sütun)\n  açıklama: {k['aciklama']}\n"
                f"  zincir: {k['kayit_hash'][:16]}…  önceki: {(k['onceki'] or 'yok')[:12]}")

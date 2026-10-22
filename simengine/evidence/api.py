@@ -16,12 +16,14 @@ kanit package on the same input.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
 import tempfile
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -41,9 +43,10 @@ from . import onkayit as _onkayit
 from . import orneklem as _orneklem
 from . import pano as _pano
 from .cekirdek import SURUM, degerlendir
-from .sema import ON_EK, gercek_yok, hazirla
+from .sema import ON_EK, TEST_ADLARI, gercek_yok, hazirla
 
 VERSION = SURUM
+DOMINANT_BLOCK_SHARE = 0.20  # balance_col: one block above this share of scored rows -> block-equal-weighted check
 MULTIPLIER_MAX_ROWS = 2000   # single-item PPI++ multiplier above this many rows: fixed-seed subsample
 
 # ------------------------------------------------------------------ name translation
@@ -133,24 +136,113 @@ def _task(task: str | None) -> str | None:
     return None if task is None else TASK_TO_INTERNAL.get(task, task)
 
 
-def _prereg_texts(prereg) -> list[dict]:
+PREREG_TEXT_SUFFIXES = (".md", ".txt", ".yaml", ".yml", ".json", ".toml")
+PREREG_TEXT_MAX_BYTES = 1_000_000
+
+
+def _iso_time(z) -> float | None:
+    try:
+        return datetime.fromisoformat(str(z)).timestamp() if z else None
+    except ValueError:
+        return None
+
+
+def _prereg_doc_entry(f: Path, records=()) -> dict | None:
+    """One pre-registration text -> {"metin", "zaman", "dosya", "sha256", "zaman_kaynagi"}. zaman is
+    - the lock time of a research.lock_prereg lock `<doc>.lock.json` whose sha256 matches the file ("kilit"), else
+    - the earliest seal record that carries this file's sha256 (seal(prereg_doc=)) ("muhur"), else
+    - the file mtime ("mtime"; a git checkout or copy resets it, so a locked/sealed doc is safer).
+    A lock with a different sha256 sets "kilit_uyusmuyor" (content changed after the lock)."""
+    try:
+        if not f.is_file() or f.suffix.lower() not in PREREG_TEXT_SUFFIXES or f.name.endswith(".lock.json") \
+                or f.stat().st_size > PREREG_TEXT_MAX_BYTES:
+            return None
+        raw = f.read_bytes()
+        ent = {"metin": raw.decode("utf-8", errors="replace"), "zaman": f.stat().st_mtime, "dosya": f.name,
+               "sha256": hashlib.sha256(raw).hexdigest(), "zaman_kaynagi": "mtime"}
+    except OSError:
+        return None
+    lp = Path(str(f) + ".lock.json")
+    if lp.is_file():
+        try:
+            lock = json.loads(lp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            lock = None
+        if isinstance(lock, dict) and lock.get("sha256") == ent["sha256"]:
+            z = _iso_time(lock.get("locked_at_utc") or lock.get("locked_at"))
+            if z is not None:
+                ent.update(zaman=z, zaman_kaynagi="kilit")
+        elif isinstance(lock, dict):
+            ent["kilit_uyusmuyor"] = True
+    if ent["zaman_kaynagi"] == "mtime":
+        z = [_iso_time(r.get("zaman_utc") or r.get("zaman")) for r in records
+             if isinstance(r, dict) and (r.get("onkayit_belgesi") or {}).get("sha256") == ent["sha256"]]
+        z = [x for x in z if x is not None]
+        if z:
+            ent.update(zaman=min(z), zaman_kaynagi="muhur")
+    return ent
+
+
+def _prereg_texts(prereg, records=()) -> list[dict]:
     """Small text files (.md/.txt/.yaml/.yml/.json/.toml) of a prereg registry directory, or the file itself:
-    searched for the `ours` name by the selection-bias audit, as {"metin", "zaman" (file mtime), "dosya"}. A text
+    searched for the `ours` name by the selection-bias audit (see `_prereg_doc_entry` for the time used). A text
     newer than the latest seal does not count as pre-registration. Seal chains (.jsonl) and lock files are skipped."""
-    if prereg is None or isinstance(prereg, list):
+    if prereg is None or isinstance(prereg, (list, tuple)):
         return []
     p = Path(prereg)
     files = [p] if p.is_file() else (sorted(p.iterdir()) if p.is_dir() else [])
-    out = []
-    for f in files:
-        if f.is_file() and f.suffix.lower() in (".md", ".txt", ".yaml", ".yml", ".json", ".toml") \
-                and not f.name.endswith(".lock.json") and f.stat().st_size <= 1_000_000:
-            try:
-                out.append({"metin": f.read_text(encoding="utf-8", errors="replace"), "zaman": f.stat().st_mtime,
-                            "dosya": f.name})
-            except OSError:
-                pass
-    return out
+    return [e for e in (_prereg_doc_entry(f, records) for f in files) if e is not None]
+
+
+def _as_list(x) -> list:
+    return [] if x is None else list(x) if isinstance(x, (list, tuple)) else [x]
+
+
+def _prereg_sources(prereg, prereg_doc) -> tuple[list | None, list[dict]]:
+    """prereg= / prereg_doc= -> (seal records or None, text entries). prereg: seal record dicts, registry
+    directories (their chain + text files) and text files, alone or mixed in a list. A chain file (zincir.jsonl /
+    chain.jsonl) stands for its directory. A seal that recorded a document (seal(prereg_doc=)) pulls that document
+    in from the registry's parent directory when it exists there."""
+    items, docs = _as_list(prereg), [Path(x) for x in _as_list(prereg_doc)]
+    for f in docs:
+        if not f.is_file():
+            raise FileNotFoundError(f"prereg_doc {f.name!r} does not exist")
+    records, dirs, files = [], [], []
+    for x in items:
+        if isinstance(x, dict):
+            records.append(x)
+            continue
+        q = Path(x)
+        if q.is_file() and q.name in (_onkayit.ZINCIR_ADI, RESEARCH_CHAIN):
+            q = q.parent
+        (files if q.is_file() else dirs).append(q)
+    for q in dirs:
+        if not chain_paths(q):
+            warnings.warn(f"prereg registry {str(q)!r} has no {_onkayit.ZINCIR_ADI} (evidence.seal / se.seal) "
+                          f"or {RESEARCH_CHAIN} (research.seal): no seal is attached", UserWarning, stacklevel=3)
+        records.extend(chain(q))
+    if len(dirs) + bool(any(isinstance(x, dict) for x in items)) > 1:
+        records.sort(key=lambda r: str(r.get("zaman_utc") or r.get("zaman") or ""))
+    for q in dirs:   # documents named by a seal record, next to the registry
+        for r in chain(q):
+            ad = (r.get("onkayit_belgesi") or {}).get("dosya")
+            if ad and (q.parent / ad).is_file():
+                files.append(q.parent / ad)
+    texts, seen = [], set()
+    for q in dirs:
+        for f in sorted(q.iterdir()) if q.is_dir() else []:
+            if f.is_file() and f.resolve() not in seen and (e := _prereg_doc_entry(f, records)) is not None:
+                seen.add(f.resolve())
+                texts.append(e)
+    for f in files + docs:
+        key = f.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        e = _prereg_doc_entry(f, records)
+        if e is not None:
+            texts.append(e)
+    return (records if prereg is not None or docs else None), texts
 
 
 def _metric(name: str | None) -> str | None:
@@ -178,7 +270,9 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              noise_ceiling: str | None = None, noise_ceiling_repeats: int = NOISE_CEILING_REPEATS,
              blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None,
              aggregate: str = "mean", ci: str = "percentile", n_configs: int | None = None,
-             block_col: str | None = None, point_pairs: Sequence | None = None) -> dict:
+             block_col: str | None = None, point_pairs: Sequence | None = None,
+             prereg_doc: str | os.PathLike | Sequence | None = None, split: str | None = None,
+             balance_col: str | None = None, dominance_share: float = DOMINANT_BLOCK_SHARE) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -195,7 +289,27 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         signed diagnostic, never primary). Passing primary="wmape" adds both to any continuous evaluation.
     B / B_aggregate: bootstrap replicates for per-unit / aggregate metrics. Cluster = group > item > row.
     memorization: result dict of `memorization_audit` or a path to its JSON.
-    prereg: list of seal records, or a registry directory (its chain is attached to the report).
+    prereg: seal records, a registry directory (its chain is attached to the report and its small text files are
+        searched for the ours name), a text file (e.g. "ONKAYIT.md"), or a list/tuple mixing them
+        (prereg=[".onkayit", "ONKAYIT.md"]; a zincir.jsonl / chain.jsonl path stands for its directory).
+    prereg_doc: pre-registration document(s) (hand-written ONKAYIT.md or research.Prereg(...).write + lock_prereg),
+        path or list; FileNotFoundError when missing. A text counts only when written no later than the latest seal.
+        Its time is the research.lock_prereg lock (`<doc>.lock.json`) when the lock's sha256 matches the file, else
+        the earliest seal that recorded the document's sha256 (seal(..., prereg_doc=)), else the file mtime (a git
+        checkout resets it, so an unlocked, unsealed doc can look "newer than the seal"). A lock whose sha256 does
+        not match warns and adds a card limit. Documents named by a seal are picked up next to the registry
+        directory automatically. The card lists the documents with their sha256 and time source.
+    split: a constant split label ("test" / "holdout" / "deger" / "degerlendirme") written into a split column
+        when the frame has none (TEST-only frames, distribution frames whose cells are all held out), so the split
+        audit runs; an audit row records that the split was declared, not derived. Ignored with a warning when the
+        frame already has a split column; other labels raise ValueError.
+    balance_col: block column whose shares are checked (e.g. "country"; default: block_col when given). When one
+        block holds more than max(dominance_share, 1.5 / n_blocks) of the scored rows (default share 0.20), an
+        audit warning row and a card note give the primary metric of every method person-weighted (as reported)
+        and block-equal-weighted: with aggregate_by, each group's value is the equal-weighted mean of its per-block
+        means (not computed for aggregate="sum"); without it, row weights 1/n_block for per-row metrics and the
+        mean of per-block values for whole-sample metrics (rank / correlation / AUC). `report["baskin_blok"]`,
+        `summary()["dominant_block"]`. With an explicit balance_col an "ok" row is written when no block dominates.
     circular: priors trained on the same population's target labels; excluded from "worth N humans".
     unlabeled_baselines: prediction columns that never saw target labels (e.g. persistence) -> baseline rungs.
     baselines_oof: prediction columns trained on the target labels but cross-fitted (out-of-fold) -> baseline rungs.
@@ -264,7 +378,14 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     if forecast:
         multiplier = False
         task = "continuous"
-    prereg_texts = _prereg_texts(prereg)
+    prereg, prereg_texts = _prereg_sources(prereg, prereg_doc)
+    doc_limits = []
+    for e in prereg_texts:
+        if e.get("kilit_uyusmuyor"):
+            warnings.warn(f"evaluate: pre-registration document {e['dosya']!r} differs from its lock "
+                          f"({e['dosya']}.lock.json): its file time is used", UserWarning, stacklevel=2)
+            doc_limits.append(f"ön kayıt belgesi {e['dosya']} kilidinden sonra değişmiş (sha256 eşleşmiyor); "
+                              "zamanı dosya zamanı (pre-registration document changed after its lock)")
     tmp = None
     ezber_json = None
     if isinstance(memorization, dict):
@@ -274,11 +395,6 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         ezber_json = tmp
     elif memorization is not None:
         ezber_json = str(memorization)
-    if prereg is not None and not isinstance(prereg, list):
-        if not chain_paths(prereg):
-            warnings.warn(f"prereg registry {str(prereg)!r} has no {_onkayit.ZINCIR_ADI} (evidence.seal / se.seal) "
-                          f"or {RESEARCH_CHAIN} (research.seal): no seal is attached", UserWarning, stacklevel=2)
-        prereg = chain(prereg)
     if noise_ceiling is not None:
         if noise_ceiling not in NOISE_CEILINGS:
             raise ValueError(f"noise_ceiling must be one of {NOISE_CEILINGS}, not {noise_ceiling!r}")
@@ -289,11 +405,28 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         if int(noise_ceiling_repeats) < 1:
             raise ValueError("noise_ceiling_repeats must be >= 1")
     d = to_internal(df)
+    split_declared = None
+    if split is not None:
+        sp = str(SPLIT_TO_INTERNAL.get(split, split))
+        if sp.lower() not in TEST_ADLARI:
+            raise ValueError(f"split= fills a constant test split; use one of {TEST_ADLARI}, not {split!r}")
+        if "bolum" in d.columns:
+            warnings.warn("evaluate: the frame already has a split column; split= is ignored", UserWarning, stacklevel=2)
+        else:
+            d = d.assign(bolum=sp)
+            split_declared = sp
+    if doc_limits:
+        limits = list(limits or []) + doc_limits
     blok = None
     if block_col is not None:
         blok = COLUMN_TO_INTERNAL.get(block_col, block_col)
         if blok not in d.columns:
             raise ValueError(f"block_col {block_col!r} is not a column of the frame")
+    denge = blok
+    if balance_col is not None:
+        denge = COLUMN_TO_INTERNAL.get(balance_col, balance_col)
+        if denge not in d.columns:
+            raise ValueError(f"balance_col {balance_col!r} is not a column of the frame")
     methods_i = _methods(methods)
     labels_i = {_method(k): v for k, v in (labels or {}).items()}
     tavan_sutun = tavan_etiket = None
@@ -308,6 +441,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         limits = list(limits or []) + [ofset["note"]]
     toplama = None
     tavan_yarim = None
+    d_rows = d          # row (person) level frame, before aggregate_by
     if aggregate_by is not None:
         d, toplama = _aggregate(d, aggregate_by, _task(task),
                                 halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed, how=aggregate,
@@ -342,6 +476,19 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             os.unlink(tmp)
     if toplama:
         rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
+    if prereg_texts:
+        rep["onkayit_belgeleri"] = [{"dosya": e["dosya"], "sha256": e["sha256"], "zaman_kaynagi": e["zaman_kaynagi"],
+                                     "zaman_utc": datetime.fromtimestamp(e["zaman"]).astimezone().isoformat(timespec="seconds"),
+                                     **({"kilit_uyusmuyor": True} if e.get("kilit_uyusmuyor") else {})}
+                                    for e in prereg_texts]
+    if split_declared and isinstance(rep.get("denetim"), list):
+        rep["denetim"].append({"kontrol": "bölme beyanı (split=)", "durum": "tamam", "deger": split_declared,
+                               "ayrinti": f"split={split!r} verildi: bütün satırlar '{split_declared}' (değerlendirme) "
+                                          "sayıldı; eğitim satırı yok, bölme beyanı kullanıcınındır "
+                                          "(declared split: every row is held out)"})
+    if denge is not None and rep.get("sonuclar"):
+        _dominant_block(rep, d_rows, denge, explicit=balance_col is not None, by=aggregate_by, how=aggregate,
+                        share=dominance_share)
     if ofset:
         rep["ofset"] = {k: v for k, v in ofset.items() if k != "note"}
     if point_pairs is not None and rep.get("sonuclar"):
@@ -606,6 +753,109 @@ def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = 
     return agg, info
 
 
+def _metric_points(frame: pd.DataFrame, gorev: str | None, metric: str, cols: list[str], weight_col=None,
+                   block_col=None) -> dict:
+    """Point value of one metric per prediction column on an internal frame (no bootstrap). weight_col /
+    block_col: per-row metrics are weighted 1 / n_block, whole-sample metrics are the mean of per-block values."""
+    v = hazirla(frame, gorev, [c[len(ON_EK):] for c in cols])
+    d = v.df
+    madde = pd.factorize(d["madde"])[0] if "madde" in d else None
+    m = next((x for x in _metrik.aile(v.gorev, True, madde is not None, True, True) if x.ad == metric), None)
+    if m is None:
+        return {}
+    out = {}
+    for c in cols:
+        try:
+            y, p = _metrik.diziler(v, c)
+            if block_col is None:
+                val = _boot._guvenli(m, y, p, madde) if m.tur == "toplu" else m.deger(y, p)
+            elif m.tur == "toplu":
+                b = d[block_col].astype(str).to_numpy()
+                vals = []
+                for k in pd.unique(b):
+                    i = np.flatnonzero(b == k)
+                    if len(i) >= 2:
+                        vals.append(_boot._guvenli(m, y[i], p[i], None if madde is None else madde[i]))
+                vals = [x for x in vals if x is not None and np.isfinite(x)]
+                val = float(np.mean(vals)) if vals else np.nan
+            else:
+                n_b = d.groupby(block_col, dropna=False)[block_col].transform("size").to_numpy(float)
+                val = m.deger(y, p, w=1.0 / n_b)
+            out[c] = None if val is None or not np.isfinite(val) else float(val)
+        except (ValueError, TypeError, ZeroDivisionError, IndexError, FloatingPointError):
+            out[c] = None
+    return out
+
+
+def _dominant_block(rep: dict, d: pd.DataFrame, col: str, *, explicit: bool, by: str | None, how: str,
+                    share: float = DOMINANT_BLOCK_SHARE) -> None:
+    """Dominant-block check on the row-level frame: audit row, card note and `rep["baskin_blok"]` (in place)."""
+    rows = d
+    if "bolum" in rows.columns:
+        rows = rows[rows["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()]
+    if "gercek" in rows.columns:
+        rows = rows[rows["gercek"].notna().to_numpy()]
+    counts = rows[col].astype(str).value_counts(dropna=False)
+    if len(counts) < 2:
+        return
+    n_blocks, top, top_share = int(len(counts)), str(counts.index[0]), float(counts.iloc[0] / counts.sum())
+    thr = max(float(share), 1.5 / n_blocks)
+    dominant = top_share > thr
+    if not (dominant or explicit):
+        return
+    metric = rep.get("birincil")
+    cols = [c for c in rows.columns if isinstance(c, str) and c.startswith(ON_EK)]
+    gorev = rep.get("gorev")
+    values, kind = {}, None
+    if dominant and metric and cols:
+        x = rows.assign(**{col: rows[col].astype(str)})
+        if by is not None:
+            agg_col = COLUMN_TO_INTERNAL.get(by, by)
+            keys = [agg_col] + [k for k in ("madde", "bolum") if k in x.columns and k != agg_col]
+            if how == "mean" and col not in keys:
+                num = ["gercek"] + cols
+                x = x[keys + [col]].join(x[num].apply(pd.to_numeric, errors="coerce"))
+                person = x.groupby(keys, dropna=False)[num].mean().reset_index()
+                equal = (x.groupby(keys + [col], dropna=False)[num].mean()
+                         .groupby(level=list(range(len(keys))), dropna=False).mean().reset_index())
+                a = _metric_points(person, "surekli", metric, cols)
+                b = _metric_points(equal, "surekli", metric, cols)
+                kind = "iki_adim"   # group value = equal-weighted mean of per-block means
+        else:
+            a = _metric_points(x, gorev, metric, cols)
+            m = next((q for q in _metrik.aile(gorev or "surekli", True, "madde" in x, True, True) if q.ad == metric), None)
+            b = _metric_points(x, gorev, metric, cols, block_col=col)
+            kind = "blok_ortalamasi" if m is not None and m.tur == "toplu" else "agirlik_1_n_blok"
+        if kind:
+            values = {c[len(ON_EK):]: {"kisi_agirlikli": a.get(c), "blok_esit": b.get(c)} for c in cols}
+    f3 = lambda v: "—" if v is None else f"{v:.3f}".replace(".", ",")
+    ours = ((rep.get("manset") or {}).get("bizim") or {}).get("sutun") or ""
+    ours = ours[len(ON_EK):] if ours.startswith(ON_EK) else ours
+    pct = f"{100 * top_share:.1f}".replace(".", ",")
+    detail = f"{col} = {top}: değerlendirilen satırların %{pct}'i ({n_blocks} blok; eşik %{100 * thr:.0f})"
+    kind_tr = {"iki_adim": "grup değeri blok içi ortalamaların eşit ağırlıklı ortalaması",
+               "agirlik_1_n_blok": "satır ağırlığı 1/n_blok", "blok_ortalamasi": "blok değerlerinin ortalaması"}
+    if dominant and ours in values:
+        v = values[ours]
+        detail += (f"; {metric} bizim ({ours}) kişi ağırlıklı {f3(v['kisi_agirlikli'])}, blok eşit ağırlıklı "
+                   f"{f3(v['blok_esit'])} ({kind_tr[kind]}) (dominant block: person-weighted vs block-equal-weighted)")
+    elif dominant and by is not None and how == "sum":
+        detail += "; aggregate='sum' ile blok eşit ağırlıklı değer hesaplanmaz (dominant block)"
+    elif dominant:
+        detail += " (dominant block)"
+    else:
+        detail += " (no dominant block)"
+    rep.setdefault("denetim", []).append({"kontrol": "baskın blok (dominant block)", "durum": "uyari" if dominant else "tamam",
+                                          "ayrinti": detail, "deger": top_share})
+    rep["baskin_blok"] = {"sutun": col, "blok": top, "pay": top_share, "n_blok": n_blocks, "esik": thr,
+                          "baskin": dominant, "metrik": metric, "agirlik": kind, "degerler": values}
+    if dominant:
+        note = "Baskın blok: " + detail
+        rep["sinirlar"] = list(rep.get("sinirlar") or []) + [note]
+        if isinstance(rep.get("kanit_kart"), dict):
+            rep["kanit_kart"]["yanilgi"] = list(rep["kanit_kart"].get("yanilgi") or []) + [note]
+
+
 def save_json(report: dict, path) -> Path:
     """Write the report as JSON (NaN already mapped to null)."""
     p = Path(path)
@@ -714,6 +964,23 @@ def summary(report: dict) -> dict:
     if report.get("blok_bootstrap"):
         b = report["blok_bootstrap"]
         out["block_bootstrap"] = {"column": b.get("sutun"), "n_blocks": b.get("n_blok")}
+    if report.get("baskin_blok"):
+        b = report["baskin_blok"]
+        out["dominant_block"] = {
+            "column": b.get("sutun"), "block": b.get("blok"), "share": b.get("pay"), "n_blocks": b.get("n_blok"),
+            "threshold": b.get("esik"), "dominant": b.get("baskin"),
+            "metric": METRIC_TO_ENGLISH.get(b.get("metrik"), b.get("metrik")),
+            "weighting": {"iki_adim": "two-step mean (block means, then equal weights)",
+                          "agirlik_1_n_blok": "row weight 1/n_block",
+                          "blok_ortalamasi": "mean of per-block values"}.get(b.get("agirlik")),
+            "values": {m: {"person_weighted": v.get("kisi_agirlikli"), "block_equal": v.get("blok_esit")}
+                       for m, v in (b.get("degerler") or {}).items()}}
+    if report.get("onkayit_belgeleri"):
+        out["prereg_docs"] = [{"file": e.get("dosya"), "sha256": e.get("sha256"), "time": e.get("zaman_utc"),
+                               "time_source": {"kilit": "lock", "muhur": "seal", "mtime": "file mtime"}.get(
+                                   e.get("zaman_kaynagi"), e.get("zaman_kaynagi")),
+                               "lock_mismatch": bool(e.get("kilit_uyusmuyor"))}
+                              for e in report["onkayit_belgeleri"]]
     if report.get("tek_koken"):
         t = report["tek_koken"]
         out["single_origin"] = {"column": t.get("sutun"), "value": t.get("deger"), "note": t.get("not")}
@@ -836,6 +1103,13 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     if s.get("single_origin"):
         so = s["single_origin"]
         out += [f"Note: {so['note']} (`{so['column']}` = {_md(so['value'])}).", ""]
+    db = s.get("dominant_block")
+    if db and db.get("dominant"):
+        ours_v = (db.get("values") or {}).get(_method(((report.get("manset") or {}).get("bizim") or {}).get("sutun")) or "")
+        out += [f"Note: dominant block `{_md(db['column'])}` = {_md(db['block'])} holds {100 * db['share']:.1f}% of the "
+                f"scored rows (threshold {100 * db['threshold']:.0f}%)"
+                + (f"; {db['metric']} of ours person-weighted {_num(ours_v['person_weighted'])} vs block-equal-weighted "
+                   f"{_num(ours_v['block_equal'])} ({db['weighting']})" if ours_v else "") + ".", ""]
     if s.get("headline_en"):
         out += [f"Summary: {s['headline_en']}", ""]
     out += ["| Row | Method | Value [95% CI] | Note |", "|---|---|---|---|"]
@@ -912,7 +1186,13 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
                     "of the submitted file as written on disk (what `sha256sum <file>` prints)."]
     else:
         out += ["", "Sealed predictions: none attached (pass prereg=<registry dir> to evaluate)."]
+    if s.get("prereg_docs"):
+        out += ["", "Pre-registration documents searched for the ours name: " + "; ".join(
+            f"{_md(e['file'])} (sha256 `{str(e['sha256'])[:12]}`, time {_md(e['time'])} from {e['time_source']}"
+            + (", CHANGED AFTER LOCK" if e["lock_mismatch"] else "") + ")" for e in s["prereg_docs"]) + "."]
     limits = list(k.get("yanilgi") or [])
+    if db and db.get("dominant"):   # already shown as the dominant-block note above
+        limits = [x for x in limits if not str(x).startswith("Baskın blok:")]
     note = _rank_note(report)
     if limits or note:
         out += ["", "## Limits", ""] + [f"- {_dot(x, lang)}" for x in limits] + ([f"- {note}"] if note else [])
@@ -1253,7 +1533,7 @@ def _registry(registry, registry_dir):
 
 def seal(predictions, description: str, registry: str | os.PathLike | None = None, git_commit: bool = False, *,
          registry_dir: str | os.PathLike | None = None, store_copy: bool = True,
-         archive_dir: str | os.PathLike | None = None) -> dict:
+         archive_dir: str | os.PathLike | None = None, prereg_doc: str | os.PathLike | None = None) -> dict:
     """Seal a prediction table before the truth is revealed: SHA-256 of a canonical CSV + timestamp + hash chain.
     registry (default '.onkayit'; `registry_dir=` is an accepted alias) gets `zincir.jsonl` + a gzip copy.
 
@@ -1266,11 +1546,15 @@ def seal(predictions, description: str, registry: str | os.PathLike | None = Non
     and "arsiv_konum": "dis", no path); grade(None, truth, keys, archive_dir=...) can reopen it.
     A file path also records the raw file bytes' sha256 as "dosya_sha256" (file_sha256) next to the canonical
     "sha256"; the card's seal table shows both, labelled. Report the canonical one for verify/grade, the file one
-    for `sha256sum` checks of the submitted file."""
+    for `sha256sum` checks of the submitted file.
+    prereg_doc: the hand-written / research.Prereg pre-registration document (e.g. "ONKAYIT.md"): its raw-byte
+    sha256 goes into the record ("onkayit_belgesi": {"dosya", "sha256"}, file name only) and the description gets
+    "[ön kayıt belgesi <name> sha256:<hash>]". evaluate(prereg=<registry>) then finds the document next to the
+    registry and counts it as written no later than this seal while its bytes still match."""
     if not store_copy and archive_dir is not None:
         raise ValueError("store_copy=False and archive_dir= exclude each other")
     return _onkayit.muhurle(predictions, description, _registry(registry, registry_dir), git_commit,
-                            kopya=store_copy, arsiv_dizini=archive_dir)
+                            kopya=store_copy, arsiv_dizini=archive_dir, belge=prereg_doc)
 
 
 def verify(predictions, sha256: str | None = None, registry: str | os.PathLike | None = None, *,
