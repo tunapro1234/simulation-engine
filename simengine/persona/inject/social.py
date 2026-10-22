@@ -46,7 +46,9 @@ PENG = ("Peng et al. 2026, Do LLM-Driven Agents Exhibit Engagement Mechanisms? I
 WILLIAMS = "Williams et al. 2023, Epidemic Modeling with Generative Agents (arXiv:2307.04986)"
 
 SELECT = ("recent", "random")
-SOCIAL_KEYS = ("neighbors", "norms", "media", "state", "group")   # never shown as persona attributes
+# never shown as persona attributes: social structure, and the person's own current message / action (an ABM step
+# writes those onto the person dict for attach_neighbors; shown as an attribute they can be the target answer)
+SOCIAL_KEYS = ("neighbors", "norms", "media", "state", "group", "label", "message", "action", "time")
 # Chuang et al. 2023: Appendix F (bias, verbatim) and G (closed world, verbatim but "XYZ" -> "this topic" and
 # "other strangers on Twitter" -> "the people you follow")
 BIAS = {
