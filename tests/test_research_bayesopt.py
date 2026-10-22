@@ -165,6 +165,30 @@ class TestMinimize(unittest.TestCase):
         with self.assertRaises(ValueError):
             minimize(obj, sp, method="cmaes")
 
+    def test_all_crashes_stay_random(self):
+        def boom(c):
+            raise RuntimeError("down")
+
+        for m in ("gp", "tpe"):        # no finite loss yet: no surrogate fit on NaN, uniform proposals instead
+            r = minimize(boom, Space({"x": (0.0, 1.0)}), method=m, n_calls=12, seed=0)
+            self.assertIsNone(r["best"])
+            self.assertEqual(len(r["history"]), 12)
+            self.assertEqual({h["method"] for h in r["history"]}, {"random"})
+
+    def test_invalid_x0_does_not_label_model_proposal(self):
+        sp = Space({"x": (0.0, 1.0)})
+        r = minimize(lambda c: (c["x"] - 0.3) ** 2, sp, method="gp", n_calls=5, n_init=3, seed=0,
+                     x0=[{"x": 0.1}, {"x": 0.5}, {"x": 0.9}, {"x": 5.0}])
+        self.assertEqual([h["method"] for h in r["history"]], ["x0"] * 3 + ["gp"] * 2)
+
+    def test_ucb_round_index(self):
+        # Srinivas et al. Algorithm 1: round t uses the posterior after t - 1 points, so t = observations + 1
+        from simengine.research.bayesopt import gp_scores
+        sp = Space({"x": (0.0, 1.0)})
+        cfgs = [{"x": v} for v in (0.1, 0.5, 0.9)]
+        sc = gp_scores(SpaceEncoder(sp), cfgs, np.array([1.0, 0.0, 1.0]), [{"x": 0.3}, {"x": 0.7}], acquisition="ucb")
+        self.assertAlmostEqual(sc["beta"], ucb_beta(4, 2))
+
 
 class TestLoopProposers(unittest.TestCase):
     def _check(self, out, space):
