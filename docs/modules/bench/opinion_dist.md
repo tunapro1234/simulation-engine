@@ -112,6 +112,55 @@ of questions. EvalFrame columns: `unit` (`item|attribute:group`), `item`, `group
   groups answered, with at least `min_shared` of them; ties are broken alphabetically. If no such h answered q, the
   prediction falls back to `overall`. The fallback count is stored in `data.meta["nearest_group_fallbacks"]`.
 
+## Measured numbers
+
+These are from runs on the local copies (22 Oct 2026, `nice -n 19`). The script ran all five configurations below in
+28.7 s wall time with 168 MB peak RSS. Every value is shown as `value [95% CI]`. Command, from the repository root:
+
+```python
+from simengine.bench.tasks import subpop as sp
+for T, opts in ((sp.SubPOPOpinionQA, {}), (sp.SubPOPOpinionQA, {"groups": "61"}), (sp.SubPOPOpinionQA, {"split": "dev"}),
+                (sp.GlobalOpinionQA, {}), (sp.GlobalOpinionQA, {"split": "dev"})):
+    task = T(**opts); data = task.load("<catalogue>")
+    print(task.score_all(task.run(data=data)))
+```
+
+**subpop_opinionqa, test split, 22 groups, setting B** (237 test questions, 253 train questions, 5,211 rows,
+0 fallbacks):
+
+| baseline | wd | tvd | js_sim |
+|---|---|---|---|
+| uniform | 0.1815 [0.1722, 0.1907] | 0.2718 [0.2608, 0.2822] | 0.7198 [0.7090, 0.7309] |
+| overall | 0.0646 [0.0617, 0.0680] | 0.1044 [0.1009, 0.1081] | 0.8899 [0.8863, 0.8933] |
+| nearest_group | **0.0506** [0.0480, 0.0531] | **0.0868** [0.0836, 0.0901] | **0.9064** [0.9033, 0.9097] |
+
+- **`groups="61"`** (56 of the listed groups occur in the file; 13,247 rows): uniform 0.1784, overall 0.0588
+  [0.0563, 0.0613], nearest_group 0.0484 [0.0462, 0.0507] (wd).
+- **`split="dev"`** (130 dev and 123 train questions): uniform 0.1823, overall 0.0634, nearest_group 0.0496
+  [0.0464, 0.0532] (wd).
+- **Uniform check:** uniform `wd` over all 490 items × 22 groups (10,775 rows, no split) is 0.1775. SubPOP Table 1
+  reports 0.178 for the uniform upper bound on OpinionQA. The `TestRealData` test checks this agreement when
+  `$SIMENGINE_DATA` is set.
+
+**global_opinionqa, test split, setting B** (860 test questions, 847 train questions, 22,487 rows, 138 country labels,
+3 fallbacks):
+
+| baseline | tvd | js_sim |
+|---|---|---|
+| uniform | 0.4031 [0.3888, 0.4164] | 0.5819 [0.5669, 0.5975] |
+| overall | 0.1786 [0.1737, 0.1839] | 0.8081 [0.8024, 0.8136] |
+| nearest_group | **0.1591** [0.1553, 0.1627] | **0.8273** [0.8236, 0.8311] |
+
+`split="dev"` (426 questions): uniform 0.3995, overall 0.1786, nearest_group 0.1610 [0.1555, 0.1661] (tvd).
+
+Literature numbers for comparison (not measured here). From SubPOP Table 1 on OpinionQA, 22 groups, setting A:
+- human sampling lower bound 0.031;
+- zero-shot prompting 0.138 to 0.209;
+- SubPOP fine-tuned models 0.094 to 0.106 `wd`.
+
+Setting B baselines read the target question's other groups, so they are not comparable with those setting-A
+numbers. Under setting A, uniform (0.18) is the only baseline here; see `opinionqa_groups` for train-only baselines.
+
 ## Limitations
 
 - **Setting B contract:** setting B is a contract, not enforced. `data.test` carries every group's truth, so a method
