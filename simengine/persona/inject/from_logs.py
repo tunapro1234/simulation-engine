@@ -736,8 +736,8 @@ def _task_prompt(hist: str, task: str) -> str:
 
 
 def summarize_logs(llm, people: Sequence[dict], style: str = "paars", *, cutoff: Any = None,
-                   hide_items: Iterable = (), hide_qids: Iterable = (), n: int = 50, n_items: int = 25, seed: int = 0, like_at: float = 3,
-                   task: str | None = None, max_tokens: int = 400, parallel: int = 4, dry_run: bool = False,
+                   hide_items: Iterable = (), hide_qids: Iterable = (), n: int = 50, n_items: int = 25,
+                   seed: int = 0, like_at: float = 3, task: str | None = None, max_tokens: int = 400, parallel: int = 4, dry_run: bool = False,
                    **llm_kw: Any) -> list[dict] | dict:
     """Copies of `people` with person['log_summary'][style] = {text, ..., cutoff, items, qids, n_events, model}.
 
@@ -745,7 +745,8 @@ def summarize_logs(llm, people: Sequence[dict], style: str = "paars", *, cutoff:
     the last `n` events in daily sessions. 'agent4rec': one call over `n_items` seeded-sampled rated events
     (like = rating >= like_at). 'task': one call over the last `n` events, steered by `task` (e.g. "predict which
     product categories the user buys next month"). Only events before `cutoff`, not on `hide_items` and not tagged
-    with a `hide_qids` qid are used; the summary records what it used so injectors can refuse leaky use. dry_run: {"calls", "input_tokens_est"}, no call."""
+    with a `hide_qids` qid are used; the summary records what it used so injectors can refuse leaky use.
+    dry_run: {"calls", "input_tokens_est", "output_tokens_max"}, no call."""
     if style not in STYLES:
         raise ValueError(f"style must be one of {STYLES}")
     if style == "task" and not task:
