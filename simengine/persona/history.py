@@ -13,7 +13,12 @@ Levels (talp73 protocol):
 
     personas = from_history(survey, id_col="uid", level="L2", purchases=orders, cutoff="2022-07-01",
                             category_col="category", date_col="order_date", questions={"age": "Age group", ...})
-    print(personas[0].text())
+    print(personas[0].pid, personas[0].text())
+
+IDS: the person id is `p.pid` (= `p.identity.persona_id`); it is kept out of `Persona.text()` and of the profile
+body (the id column is never rendered as an answer), so label prompt blocks with `p.pid` yourself.
+MULTI-SELECT: `comma_cols` (alias `comma_fields`, the `sim.prediction.PredictionSpec` name) renders "a,b" as
+"a, b" in the table profile and in the known-answers block alike; `none_cols` (alias `none_fields`) likewise.
 
 LEAKAGE RULE: purchases on/after `cutoff` are never used; `targets` (items/columns to be predicted) are dropped
 from answer histories and raise if listed in `questions`.
@@ -24,7 +29,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from .builders import Mapping, _is_empty, check_ids, from_row
+from .builders import Mapping, _is_empty, check_ids, from_row, warn_off_enum
 from .schema import Persona
 
 LEVELS = ("L0", "L1", "L2")
@@ -142,7 +147,8 @@ def from_history(table: pd.DataFrame | None = None, *, id_col: str, level: str =
                  none_cols: Iterable = (), comma_cols: Iterable = (), profile_header: str = PROFILE_HEADER,
                  answers_header: str = ANSWERS_HEADER, history_header: str = HISTORY_HEADER,
                  neutral_text: str = NEUTRAL_TEXT, locale: str = "en-US", source_name: str = "data",
-                 ids: Iterable | None = None) -> list[Persona]:
+                 ids: Iterable | None = None, comma_fields: Iterable = (),
+                 none_fields: Iterable = ()) -> list[Persona]:
     """Personas whose prompt text is the person's own survey answers (L1) plus purchase history (L2).
 
     table      survey/demographic rows (one per person, `id_col`); rendered by `survey_profile_text` with
@@ -153,9 +159,13 @@ def from_history(table: pd.DataFrame | None = None, *, id_col: str, level: str =
     answers    long frame (`id_col`, `item_col`, `value_col`) of known past answers (twin-style persona text);
                `item_text` maps item -> question text; `targets` are dropped.
     level      'L0' neutral control, 'L1' profile (+ answers), 'L2' L1 + purchase history.
-    Returns personas in `ids` order (default: table ids, else purchase/answer ids)."""
+    comma_cols / none_cols (aliases comma_fields / none_fields): applied to the table profile and the answers.
+    Returns personas in `ids` order (default: table ids, else purchase/answer ids); the id is `p.pid`
+    (`identity.persona_id`) and does not appear in `p.text()`."""
     if level not in LEVELS:
         raise ValueError(f"level must be one of {LEVELS}")
+    comma_cols = set(comma_cols) | set(comma_fields)
+    none_cols = set(none_cols) | set(none_fields)
     targets = set(targets)
     if questions is not None:
         bad = targets & set(questions)
@@ -198,14 +208,16 @@ def from_history(table: pd.DataFrame | None = None, *, id_col: str, level: str =
         ids = list(rows) or (list(summary) if summary else list(ans))
     ids = [str(i) for i in ids]
 
-    out = []
+    if questions is not None and id_col in questions:      # the id is p.pid, never an answer line
+        questions = {c: q for c, q in questions.items() if c != id_col}
+    out, off_enum = [], {}
     for pid in ids:
         row = rows.get(pid)
         if level == "L0":
             p = Persona.from_dict({"identity": {"persona_id": pid, "name": pid, "locale": locale},
                                    "authored": {"persona": neutral_text}})
         elif mapping is not None and row is not None:
-            p = from_row(row, mapping)
+            p = from_row(row, mapping, pid=pid, off_enum=off_enum)
         else:
             p = Persona.from_dict({"identity": {"persona_id": pid, "name": pid, "locale": locale},
                                    "evidence": {"measured_receipt": {"draws": [{"contract_id": source_name,
@@ -220,7 +232,8 @@ def from_history(table: pd.DataFrame | None = None, *, id_col: str, level: str =
                 g = ans[pid]
                 q = {it: (item_text or {}).get(it, str(it)) for it in g[item_col]}
                 vals = dict(zip(g[item_col], g[value_col]))
-                parts.append(answers_header + "\n" + survey_profile_text(vals, q))
+                parts.append(answers_header + "\n" + survey_profile_text(vals, q, none_cols=none_cols,
+                                                                          comma_cols=comma_cols))
             if parts:
                 p.authored.consumer_profile = "\n\n".join(parts)
         if level == "L2":
@@ -234,6 +247,7 @@ def from_history(table: pd.DataFrame | None = None, *, id_col: str, level: str =
             p.extra["history_cutoff"] = str(pd.Timestamp(cutoff).date()) if cutoff is not None else \
                 purchase_summary.attrs.get("cutoff")
         out.append(p)
+    warn_off_enum(off_enum, mapping, len(out))
     return out
 
 

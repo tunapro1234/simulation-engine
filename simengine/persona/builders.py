@@ -20,6 +20,13 @@ IDS: `from_table` checks the id column first and raises ValueError with the numb
 ids (an empty id never becomes the string "None" or "nan"). `id_col=None` uses the row number (position in the
 table before sampling) as the id: "row0", "row1", ...
 
+WHAT REACHES THE PROMPT (`Persona.text()`): TALP fields whose value is in the enum (`schema.ENUMS`) become
+identity/traits; an exact `age` column is banded to `age_band` (18-24 ... 65+; the exact age is not kept, under 18
+is dropped). A TALP field value outside its enum (e.g. income_tier "high" vs low..affluent) is NOT dropped: it is
+kept as a facet under the field name and `from_table` warns once per column with the counts and allowed values.
+Every non-TALP column goes to the facets, rendered on the `Measured:` line. The persona id (`p.pid`,
+`identity.persona_id`) is not repeated in the text; callers label blocks with it (`### <pid>`).
+
 VALUE LABELS (codebook codes): `from_table(df, ..., value_labels={"Gender": {1: "male", 2: "female"}})` (or
 `Mapping.value_labels`) turns codes into labels before enum mapping and text rendering, so the persona reads
 "female" and not "Gender: 2". Codes match as numbers or strings (2, 2.0, "2" and "02" are one code); an unknown
@@ -107,7 +114,20 @@ def gender_value(v) -> str | None:
 def _age_value(v):
     if isinstance(v, str) and v.strip() in AGE_BAND:
         return v.strip()
-    return age_band(v)
+    band = age_band(v)
+    if band is None and isinstance(v, str) and v.strip():
+        try:
+            float(v)
+        except ValueError:          # a band text in another cut ("18-29", "50-64"): kept as an off-enum facet
+            return v.strip()
+    return band
+
+
+def _gender_field(v):
+    """auto_mapping's gender converter: gender_value, else the raw value (codes such as 1/2, "Prefer not to say")
+    so the off-enum path keeps it as a facet with a warning instead of dropping the column silently."""
+    g = gender_value(v)
+    return _plain(v) if g is None and not _is_empty(v) else g
 
 
 def _apply(convert, value):
@@ -264,9 +284,33 @@ def _id_text(v) -> str:
     return str(_plain(v))
 
 
-def from_row(row, mapping: Mapping, *, pid: str | None = None,
+def _field_column(mapping: Mapping, name: str) -> str:
+    spec = mapping.fields.get(name)
+    col = spec[0] if isinstance(spec, tuple) else spec
+    return name if callable(col) or col is None else str(col)
+
+
+def warn_off_enum(off_enum: dict, mapping: Mapping | None = None, n_rows: int | None = None) -> None:
+    """One UserWarning per TALP field with out-of-enum values: counts per value and the allowed values.
+    `off_enum`: {field: Counter(value -> rows)}, filled by `from_row(..., off_enum=...)`."""
+    for name, cnt in off_enum.items():
+        if not cnt:
+            continue
+        col = _field_column(mapping, name) if mapping is not None else name
+        total = sum(cnt.values())
+        vals = ", ".join(f"{v!r} x{k}" for v, k in cnt.most_common(8)) + (", ..." if len(cnt) > 8 else "")
+        of = f" of {n_rows}" if n_rows is not None else ""
+        warnings.warn(f"{name} (column {col!r}): {total}{of} rows have values outside the TALP enum ({vals}); "
+                      f"allowed: {', '.join(enum_for(name) or ())}. Kept as facet {name!r} (the 'Measured:' line), "
+                      "not as a trait; map them to enum values to use them as traits.", UserWarning, stacklevel=3)
+
+
+def from_row(row, mapping: Mapping, *, pid: str | None = None, off_enum: dict | None = None,
              unlabelled: dict | None = None) -> Persona:
-    """One row (dict or pandas Series) -> Persona. Out-of-enum TALP values are dropped silently.
+    """One row (dict or pandas Series) -> Persona.
+    A TALP field value outside its enum is kept as a facet named after the field (so it still reaches the
+    prompt on the `Measured:` line) instead of a trait. `off_enum`: a dict collecting {field: Counter(value)} for
+    one aggregated warning (`warn_off_enum`); None = warn here for this row.
     `pid` overrides the id column (from_table passes the row number when `mapping.id_col` is None).
     An empty/NaN id raises ValueError (it never becomes the string "None").
     `mapping.value_labels` are applied to the row first; `unlabelled`: a dict collecting {column: Counter(code)}
@@ -285,7 +329,7 @@ def from_row(row, mapping: Mapping, *, pid: str | None = None,
             raise ValueError(f"empty id in column {mapping.id_col!r}; fill it, drop the row, or use "
                              "from_table(..., id_col=None) to number the rows")
         pid = _id_text(raw)
-    cell = {}
+    cell, off, collect = {}, {}, ({} if off_enum is None else off_enum)
     for name, spec in mapping.fields.items():
         col, convert = spec if isinstance(spec, tuple) else (spec, None)
         v = col(row) if callable(col) else _apply(convert, get(col))
@@ -293,9 +337,17 @@ def from_row(row, mapping: Mapping, *, pid: str | None = None,
             continue
         allowed = enum_for(name)
         if allowed and v not in allowed:
+            off[name] = _plain(v)
+            collect.setdefault(name, Counter())[str(_plain(v))] += 1
             continue
         cell[name] = v
+    if off_enum is None and collect:
+        warn_off_enum(collect, mapping)
     facets, claims = {}, {}
+    for name, v in off.items():                 # first, so max_facets in text() never cuts them
+        facets[name] = v
+        claims[name] = {"contract_id": mapping.source_name, "scope": _field_column(mapping, name),
+                        "note": "outside the TALP enum"}
     for name, src in mapping.facets.items():
         if not callable(src) and src in mapping.forbidden:
             raise ValueError(f"leakage: '{src}' is a target/future column and cannot be a facet")
@@ -310,8 +362,10 @@ def from_row(row, mapping: Mapping, *, pid: str | None = None,
         segment = seg(row)
     elif seg:
         # a mapped TALP field (enum-checked) wins; otherwise the raw column, so `segment="region"` works and an
-        # out-of-enum value (dropped from the traits) still segments the panel
+        # out-of-enum value (a facet, not a trait) still segments the panel
         segment = cell.get(seg)
+        if _is_empty(segment):
+            segment = off.get(seg)              # the converted off-enum value ("High" -> "high")
         if _is_empty(segment):
             segment = get(seg)
     else:
@@ -341,7 +395,7 @@ def auto_mapping(df: pd.DataFrame, id_col: str | None, forbidden=(), locale: str
         if low in ("age_band", "age") and "age_band" not in fields:
             fields["age_band"] = (col, _age_value)
         elif low in ("gender", "sex") and "gender" not in fields:
-            fields["gender"] = (col, gender_value)
+            fields["gender"] = (col, _gender_field)
         elif low in TALP_FIELDS and low not in fields:
             fields[low] = (col, lambda v: v.strip().lower() if isinstance(v, str) else v)
         else:
@@ -382,6 +436,7 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
     the mapping is guessed by `auto_mapping` (every non-forbidden column becomes a facet, so put the target in
     `forbidden`). `n` samples n rows (`seed`); with `stratify` (a column) the sample is proportional-stratified.
 
+    Values outside a TALP enum are kept as facets (see the module docstring) with one warning per column.
     `value_labels` {column: {code: label}} (merged over `mapping.value_labels`) relabels codebook codes before
     the enum mapping and the text; unknown codes are kept with one warning per column (see the module docstring).
     The id column is checked first: empty/NaN or duplicated ids raise ValueError with their counts. `id_col=None`
@@ -412,9 +467,13 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
     if mapping.value_labels:                    # once for the table: one warning per column
         df = apply_value_labels(df, mapping.value_labels, skip=(mapping.id_col,))
         mapping = replace(mapping, value_labels={})
+    off_enum: dict = {}
     if mapping.id_col is None:
-        return [from_row(r, mapping, pid=f"{ROW_ID_PREFIX}{i}") for i, r in df.iterrows()]
-    return [from_row(r, mapping) for _, r in df.iterrows()]
+        out = [from_row(r, mapping, pid=f"{ROW_ID_PREFIX}{i}", off_enum=off_enum) for i, r in df.iterrows()]
+    else:
+        out = [from_row(r, mapping, off_enum=off_enum) for _, r in df.iterrows()]
+    warn_off_enum(off_enum, mapping, len(df))
+    return out
 
 
 NARRATE_TASK = ("Each person below is a REAL survey respondent; the 'Measured' line lists recorded facts. "
@@ -638,6 +697,6 @@ def pool_curve(df: pd.DataFrame, sizes, score_fn: Callable, *, method="random", 
                         ).reset_index()
 
 
-__all__ = ["Mapping", "from_row", "from_table", "check_ids", "auto_mapping", "narrate", "age_band", "gender_value",
+__all__ = ["Mapping", "from_row", "from_table", "check_ids", "auto_mapping", "warn_off_enum", "narrate", "age_band", "gender_value",
            "to_frames", "TALP_FIELDS", "NARRATE_TASK",
            "apply_value_labels", "read_codebook", "warn_unlabelled", "pool_select", "pool_curve", "POOL_METHODS"]

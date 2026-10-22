@@ -165,8 +165,8 @@ class TestHistory(unittest.TestCase):
         l1 = from_history(df, level="L1", **kw)
         l2 = from_history(df, level="L2", **kw)
         self.assertEqual([p.pid for p in l2], list(df["rid"]))
-        self.assertEqual(len({p.text() for p in l0}), len(l0))          # differ only by id line
-        self.assertEqual(len({p.text().split("\n", 1)[1] for p in l0}), 1)
+        self.assertEqual(len({p.text() for p in l0}), 1)                # the id is p.pid, not in the text
+        self.assertEqual(len({p.pid for p in l0}), len(l0))
         self.assertIsNone(l1[0].authored.history_data)
         self.assertIn("- Age group: ", l1[0].authored.consumer_profile)
         self.assertNotIn("income", l1[0].authored.consumer_profile.lower())
