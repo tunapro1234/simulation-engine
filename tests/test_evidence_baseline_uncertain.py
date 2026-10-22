@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from simengine import evidence as ev
-from simengine.evidence import denetim
+from simengine.evidence import denetim, kart
 
 KONTROL = "en güçlü taban belirsiz mi"
 
@@ -78,10 +78,28 @@ class TestCard(unittest.TestCase):
         best = rep["manset"]["en_iyi_baseline"]
         self.assertLessEqual(a["en_kotu"]["fark"], -(rep["manset"]["bizim"]["deger"] - best["deger"]) + 1e-12)
 
+    def test_badge_uses_worst_tied_baseline(self):
+        rep = _eval(_frame(sds=(1.0, 1.0, 1.0, 1.0), ours_sd=0.6))
+        k = kart.kart(rep)
+        self.assertEqual(k["rozet"], "yuksek")
+        self.assertIn("belirsiz", k["satirlar"][0]["not"])
+        self.assertTrue(any("en güçlü taban belirsiz" in e for e in k["etiketler"]))
+        self.assertIn("worst tied baseline", k["rozet_gerekce"])
+        # the single strongest baseline clears 0, the worst tied one does not: no high-confidence badge
+        a = _audit(rep)
+        a["en_kotu"]["alt"] = -0.01
+        self.assertGreater(k["fark"]["alt"], 0)
+        k2 = kart.kart(rep)
+        self.assertEqual(k2["rozet"], "kararsiz")
+        self.assertEqual(k2["fark"], k["fark"])            # fark stays ours − the single strongest baseline
+        self.assertIn("-0.010", k2["rozet_gerekce"])
+
     def test_clearly_best_baseline_no_warning(self):
-        a = _audit(_eval(_frame(sds=(0.3, 2.0, 2.0, 2.0), ours_sd=0.2)))
+        rep = _eval(_frame(sds=(0.3, 2.0, 2.0, 2.0), ours_sd=0.2))
+        a = _audit(rep)
         self.assertIsNotNone(a)
         self.assertEqual(a["durum"], "tamam")
+        self.assertNotIn("worst tied baseline", rep["kanit_kart"]["rozet_gerekce"])
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ Rozet "yuksek" için: bizim − taban GA'sı sıfırın üstünde ve fark ≥ AN
 ayrıca alt sınır ≥ ESIK_BEDEL ve tabanın kendi bedel alt sınırının üstünde. Fark yalnız taban_var=False iken
 yoksa (taban yok ya da taban insanın kendisi, ör. Upworthy insan@100) bizim yöntemin bedeliyle; fark GA'sız ya da taban
 varken eşleşik fark yoksa "kararsiz". Bizim − taban GA'sı tümüyle sıfırın altındaysa her durumda "kararsiz".
+"En güçlü taban belirsiz" denetimi uyarıdaysa (ilk iki taban GA içinde) rozet, eşit tabanların en kötüsüne karşı
+farkla (denetimin en_kotu'su, tekrar başına) verilir; "fark" tek tabana karşı kalır, şema değişmez.
 """
 from __future__ import annotations
 
@@ -155,8 +157,17 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
             if k.get("a") == biz.get("sutun") and k.get("b") == tb.get("sutun") and k.get("metrik") == birincil:
                 fark = {"fark": yon * k["fark"], "alt": yon * (k["alt"] if yon > 0 else k["ust"]),
                         "ust": yon * (k["ust"] if yon > 0 else k["alt"])}
-    r, g = rozet(S, fark, gercek_var=bool(son), bedel_kaynak=bedel_kaynak,
+    # en güçlü taban belirsizse (D5 #10) rozet eşitlerin en kötüsüne karşı: en_kotu zaten metrik yönünde (+ = bizim iyi)
+    tb_bel = next((d for d in oz.get("denetim") or [] if d.get("kontrol", "").startswith("en güçlü taban belirsiz")
+                   and d.get("durum") == "uyari"), None)
+    ek = (tb_bel or {}).get("en_kotu") or {}
+    fark_r = ({"fark": ek["fark"], "alt": ek["alt"], "ust": ek["ust"]}
+              if fark and all(_f(ek.get(k)) is not None for k in ("fark", "alt", "ust")) else fark)
+    r, g = rozet(S, fark_r, gercek_var=bool(son), bedel_kaynak=bedel_kaynak,
                  taban_bedel_alt=_f(tbb[1].get("alt")) if tbb else None, taban_var=bool(biz and tb))
+    esit = ", ".join((tb_bel or {}).get("esitler") or [])
+    if fark_r is not fark and r != "bekliyor":
+        g = f"{g} (Rozet eşit tabanların en kötüsüne karşı: {esit}; badge against the worst tied baseline.)"
     atl = [d.get("kontrol") for d in oz.get("denetim") or [] if d.get("durum") == "atlandi" and not d.get("uygulanamaz")
            and any(k in (d.get("kontrol") or "") for k in ("bölme", "grup", "zaman", "kontaminasyon", "ezber"))]
     llm_yok = any(d.get("uygulanamaz") and "ezber" in (d.get("kontrol") or "") for d in oz.get("denetim") or [])
@@ -174,6 +185,9 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     bd = oz.get("bilgi_duzeyi") or {}
     if bd.get("B") and tb:   # dağılım: taban_marjinal hedef sorunun öbür hücrelerini okur (ayar B), rozete dayanak değil
         S[0]["not"] = BILGI_NOT.format(", ".join(bd["B"]))
+    if tb_bel and tb:
+        et.append(f"en güçlü taban belirsiz ({len(tb_bel.get('esitler') or [])} taban GA içinde): seçim gürültüsü")
+        S[0]["not"] = "; ".join(x for x in (S[0].get("not"), f"belirsiz: {esit} GA içinde (strongest baseline uncertain)") if x)
     if bd.get("B_ustte"):
         et.append(f"ayar-B tabanı ({', '.join(bd['B_ustte'])}) daha güçlü: rozet ayar-A tabanına karşı")
     for sut, x in ((oz.get("dolgu") or {}).get("kollar") or {}).items():
