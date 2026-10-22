@@ -59,21 +59,51 @@ class Veri:
     egitim: pd.DataFrame | None = None    # bolum=egitim satırları (varsa)
     tam: pd.DataFrame | None = None       # ham girdi (sızıntı kontrolü için)
     notlar: list[str] = field(default_factory=list)
+    blok: str | None = None               # blok bootstrap sütunu (köken/hafta): verilirse bloklar × kümeler iki yönlü örneklenir
 
     @property
-    def kume(self) -> np.ndarray:
-        """Bootstrap kümesi: grup > madde > satır."""
+    def taban_kume(self) -> np.ndarray:
+        """Blok dışı bootstrap kümesi: grup > madde > satır."""
         for s in ("grup", "madde"):
             if s in self.df:
                 return pd.factorize(self.df[s])[0]
         return np.arange(len(self.df))
 
     @property
-    def kume_adi(self) -> str:
+    def taban_kume_adi(self) -> str:
         for s in ("grup", "madde"):
             if s in self.df:
                 return s
         return "satir"
+
+    @property
+    def kume(self) -> np.ndarray:
+        """Bootstrap kümesi kodları. Blok verildiyse hücre (blok × küme) kodları: iki yönlü yeniden örnekleme
+        (bkz. iki_yon); yoksa grup > madde > satır."""
+        if self.blok is not None:
+            return pd.factorize(pd.MultiIndex.from_arrays([pd.factorize(self.df[self.blok])[0], self.taban_kume]))[0]
+        return self.taban_kume
+
+    @property
+    def iki_yon(self):
+        """Blok verildiyse (hücre başına blok kodu, hücre başına küme kodu); Orneklem bunlarla blok ve küme
+        ağırlıklarını bağımsız çekip çarpar (iki yönlü bootstrap). Blok yoksa None."""
+        if self.blok is None:
+            return None
+        bk, ck, hucre = pd.factorize(self.df[self.blok])[0], self.taban_kume, self.kume
+        G = int(hucre.max()) + 1
+        hb, hc = np.zeros(G, int), np.zeros(G, int)
+        hb[hucre], hc[hucre] = bk, ck
+        return hb, hc
+
+    @property
+    def n_kume(self) -> int:
+        """Kartta gösterilen küme sayısı (blokta da blok dışı kümeler; blok sayısı ayrıca)."""
+        return int(self.taban_kume.max()) + 1 if len(self.df) else 0
+
+    @property
+    def kume_adi(self) -> str:
+        return self.taban_kume_adi
 
     def tahmin(self, yontem: str):
         return self.df[ON_EK + yontem]

@@ -71,7 +71,7 @@ def segment_analizi(veri, sutun_dizileri: dict, metrik, w, B: int, tohum: int, e
                 idx = kume[m] * S + sc[m]
                 top = np.bincount(idx, (ww * v)[m], minlength=G * S).reshape(G, S)
                 agi = np.bincount(idx, ww[m], minlength=G * S).reshape(G, S)
-                orn = Orneklem(kume, B=B, tohum=tohum)
+                orn = Orneklem(kume, B=B, tohum=tohum, iki_yon=veri.iki_yon)
                 R = np.empty((B, S))
                 for b in range(B):
                     c = orn.sayim(b)
@@ -197,7 +197,7 @@ def yayilim(veri, sutun_dizileri: dict, B: int, tohum: int) -> dict:
     if veri.gorev == "ab":
         return {}
     out = {}
-    orn = Orneklem(veri.kume, B=B, B_toplu=min(B, 100), tohum=tohum)
+    orn = Orneklem(veri.kume, B=B, B_toplu=min(B, 100), tohum=tohum, iki_yon=veri.iki_yon)
     for sutun, (y, p, maske) in sutun_dizileri.items():
         if maske is not None:
             continue

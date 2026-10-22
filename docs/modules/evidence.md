@@ -593,6 +593,26 @@ ev.seal("teslim/tahmin.csv", "final", registry="teslim/onkayit")      # records 
   baselines (random, item median/mean) are labelled "look-ahead": they are cross-fitted on the test-window truth,
   so they are not legitimate rungs. Pass origin-time baselines (persistence, last-k mean) as `pred_` columns, or
   `baselines=False`.
+- **`block_col=`** (e.g. `"origin"` or the week column; `"time"` accepted): two-way block bootstrap. Each distinct
+  value is one block; in every replicate the blocks and the clusters (grup / item / row) are resampled
+  independently with replacement and a row's weight is block count × cluster count, so column, ladder, headline and
+  paired CIs (`compare=`, `blind_col=`) cover block-to-block variation and series dependence across blocks (a
+  one-way block resample could come out narrower than the default when series carry a persistent bias). The card
+  meta says "bootstrap: two-way, blocks of `<col>` (n blocks) × clusters"; `summary()["block_bootstrap"]` gives the
+  block count, `kart.n_kume` stays the cluster count. Blocks are non-overlapping; for a moving-block flavour with
+  length L pass a coarser column (week // L). With `aggregate_by=` the column must be constant within each group
+  (else `ValueError`); NaN in the column raises `ValueError`. A one-valued `block_col` is not applied (default
+  clusters). Fewer than 10 blocks: audit warning "blok bootstrap blok sayısı" and a limits note; below 5 the card
+  meta says "CI not reliable across blocks". Default `None`: clusters as before.
+- **Single forecast origin.** With `task="forecast"`, when the `origin` column (else `time`) has one distinct value,
+  whatever `block_col` is, an audit warning row "tek tahmin kökeni (single origin)" and a card note say "single
+  forecast origin: CIs cover series sampling only, not origin-to-origin variation; use
+  methods.forecast.backtest(origins=[...])" (`summary()["single_origin"]`). D4 `SIMENGINE-EKSIK.md` #8.
+- **Mean vs median row.** Opt-in. With `task="forecast"` and an L1 primary (`mae` / `wmape`),
+  `point_pairs=[(mean_col, median_col)]` or `point_pairs="auto"` (pairs ours with `pred_<ours>_median` if present)
+  adds a card table with the primary metric and bias of both, and a sentence with the observed direction (L1
+  lower/higher with the median, |bias| smaller/larger) (`summary()["mean_median"]`). Explicit columns are always
+  validated; outside forecast + L1 an explicit list is skipped with a `UserWarning`. Default `None`: no row. D4 #9.
 - **`ci="basic"`** (2·θ − bootstrap quantiles) for column, ladder, headline and paired CIs; default `"percentile"`.
   When a primary-metric point estimate falls outside its percentile CI (possible for ratio/aggregate metrics), a
   `UserWarning` is raised, an audit row "bootstrap GA (nokta tahmini yüzdelik GA dışında)" is added and the card gets

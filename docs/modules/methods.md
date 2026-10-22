@@ -19,7 +19,7 @@ that combine an LLM prediction with a model learned from data.
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
-| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature` | multi-series demand forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon, rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
+| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature` | multi-series demand forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon, rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -587,6 +587,8 @@ import simengine.methods as M
 M.persistence_forecast(panel, 269, 4)
 M.seasonal_naive(panel, 269, 4, season=52)
 M.moving_mean(panel, 269, 4, window=4)
+M.seasonal_ratio(panel, 269, 4, window=4, season=52)          # T4: last-4 mean x last year's same-period ratio
+M.seasonal_ratio(panel, 269, 4, group_col="store_dept", around=0, smooth=0)   # T4b: ratio pooled per group
 fr, alpha, scores = M.ses(panel, 269, 4, return_alpha=True)  # alpha tuned on earlier origins, targets <= 269
 
 # features: only y at times <= origin; exog read at the target time; static -> category codes
@@ -641,5 +643,12 @@ Cautions:
 - **LLM prior.** In D4 the six-call category x event multiplier added nothing: named and blind arms both
   0.359 on dev, difference to the no-LLM arm +0.0006 [-0.0007, +0.0017] (`NOTLAR.md`). Keep the blind and
   shuffled columns; a prior only counts when `value` beats both.
+- **`seasonal_ratio`** (the D4 team's T4 / T4b rungs): mean of the last `window` periods x
+  `(ly + smooth) / (base + smooth)` clipped to `cap=(0.5, 2.0)`, where `base` is the same window one `season` back
+  and `ly` the target period one season back +- `around` periods (never past the origin). Defaults are T4
+  (`window=4, season=52, around=1, smooth=1`); T4b is `group_col=<store x dept>, around=0, smooth=0` (ratio of the
+  group's sums). A zero denominator gives ratio 1; NaN when the history is shorter than season + window. Output
+  format as `moving_mean`. D4 dev WMAPE (origin 269, one run, the team's code): T4 0.488 (per-series ratio is
+  noisy), T4b 0.393, against last-4 mean 0.387 and persistence 0.434; neither beat the plain last-4 mean.
 - `seasonal_naive` was the worst rung on M5 weekly data (0.600). It wins only where the season really repeats
   (the synthetic test).

@@ -177,7 +177,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              multiplier_max_rows: int | None = MULTIPLIER_MAX_ROWS, offset_col: str | None = None,
              noise_ceiling: str | None = None, noise_ceiling_repeats: int = NOISE_CEILING_REPEATS,
              blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None,
-             aggregate: str = "mean", ci: str = "percentile", n_configs: int | None = None) -> dict:
+             aggregate: str = "mean", ci: str = "percentile", n_configs: int | None = None,
+             block_col: str | None = None, point_pairs: Sequence | None = None) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -236,6 +237,22 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         flag.
     cutoff: the LLM's training cutoff date (e.g. cutoff="2025-03-01") for the contamination audit; it needs a
         `time` (or `zaman`) column and compares the primary metric before vs after the cutoff.
+    block_col: block bootstrap column (e.g. the forecast origin or week column, "time" accepted): every distinct value
+        is one block and the bootstrap is two-way: in each replicate the blocks and the clusters (grup / item / row)
+        are resampled independently with replacement and a row's weight is block count × cluster count, so the column,
+        ladder, headline and paired-difference CIs (compare=, blind_col=) cover both block-to-block variation and
+        series dependence across blocks. Non-overlapping blocks; for a moving-block flavour with block length L pass a
+        coarser column (e.g. week // L). With aggregate_by= the column must be constant within each group. NaN in the
+        column raises ValueError. One distinct value: not applied (default clusters) and an audit row says so; fewer
+        than 10 blocks: audit warning + card note (below 5: "CI not reliable across blocks").
+    Single forecast origin (task="forecast"): when an `origin` (else `time`) column has one distinct value, whatever
+        block_col is, an audit warning row and a card note say "single forecast origin: CIs cover series sampling only,
+        not origin-to-origin variation; use methods.forecast.backtest(origins=[...])".
+    point_pairs: None (default: off), "auto" (pair ours with `<ours>_median` if that prediction column exists) or
+        [(mean_col, median_col), ...] prediction columns (with or without `pred_`) of the same model as a mean and a
+        median point forecast. In forecast mode with an L1 primary (mae / wmape) the card shows a row per pair with the
+        primary metric and bias of both, plus the observed direction. Explicit columns are always validated
+        (ValueError); outside forecast + L1 an explicit list is skipped with a UserWarning.
     Missing truth: rows with no truth are dropped (noted); when the truth column is absent or all missing the
     report is an "awaiting truth" card (seals + prediction summary; no ladder, calibration or bootstrap).
     """
@@ -272,6 +289,11 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         if int(noise_ceiling_repeats) < 1:
             raise ValueError("noise_ceiling_repeats must be >= 1")
     d = to_internal(df)
+    blok = None
+    if block_col is not None:
+        blok = COLUMN_TO_INTERNAL.get(block_col, block_col)
+        if blok not in d.columns:
+            raise ValueError(f"block_col {block_col!r} is not a column of the frame")
     methods_i = _methods(methods)
     labels_i = {_method(k): v for k, v in (labels or {}).items()}
     tavan_sutun = tavan_etiket = None
@@ -288,7 +310,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     tavan_yarim = None
     if aggregate_by is not None:
         d, toplama = _aggregate(d, aggregate_by, _task(task),
-                                halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed, how=aggregate)
+                                halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed, how=aggregate,
+                                keep=(blok,) if blok else ())
         tavan_yarim = toplama.pop("halves", None)
         task = "continuous"
         limits = list(limits or []) + [toplama["note"]]
@@ -313,7 +336,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             oof_tabanlar=_methods(baselines_oof), tavan_sutun=tavan_sutun, tavan_etiket=tavan_etiket,
             carpan_en_fazla=multiplier_max_rows, tavan_yarim=tavan_yarim, kor=_method(blind_col),
             kiyaslar=kiyas, ezber_llm=ours_uses_llm, tahmin_gorevi=forecast, ga_yontemi=ci,
-            n_yapilandirma=n_configs, onkayit_metin=prereg_texts)
+            n_yapilandirma=n_configs, onkayit_metin=prereg_texts, blok=blok)
     finally:
         if tmp:
             os.unlink(tmp)
@@ -321,7 +344,71 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
     if ofset:
         rep["ofset"] = {k: v for k, v in ofset.items() if k != "note"}
+    if point_pairs is not None and rep.get("sonuclar"):
+        rep["_forecast"] = bool(forecast)
+        try:
+            pairs = _point_pairs(rep, point_pairs, ours)
+        finally:
+            rep.pop("_forecast", None)
+        if pairs:
+            rep["ortalama_medyan"] = pairs
     return rep
+
+
+L1_METRICS = ("mae", "wmape")
+
+
+def _mean_median_here(r: dict) -> str:
+    """Observed direction for one mean/median row (L1 lower/higher, |bias| smaller/larger)."""
+    a, b, ba, bb = r.get("mean_value"), r.get("median_value"), r.get("mean_bias"), r.get("median_bias")
+    parts = []
+    if a is not None and b is not None and np.isfinite(a) and np.isfinite(b):
+        parts.append(f"{r['metric']} {'lower' if b < a else 'higher' if b > a else 'equal'} with the median "
+                     f"({b - a:+.3f})")
+    if ba is not None and bb is not None and np.isfinite(ba) and np.isfinite(bb):
+        parts.append(f"|bias| {'smaller' if abs(bb) < abs(ba) else 'larger' if abs(bb) > abs(ba) else 'equal'} "
+                     f"({ba:+.3f} → {bb:+.3f})")
+    return f"`{r['median']}` vs `{r['mean']}`: " + (", ".join(parts) or "not computable")
+
+
+def _point_pairs(rep: dict, point_pairs, ours) -> list[dict]:
+    """Mean vs median point forecast rows (forecast mode, L1 primary): primary metric and bias of both columns.
+
+    point_pairs None: off (default, old behaviour). "auto": pair ours with `<ours>_median` when that column exists.
+    An explicit list is always validated; when the mode or primary metric means it is skipped, a UserWarning says so."""
+    if point_pairs is None:
+        return []
+    res = rep.get("sonuclar") or {}
+    col = lambda c: ON_EK + _method(c)
+    if isinstance(point_pairs, str):
+        if point_pairs != "auto":
+            raise ValueError(f"point_pairs must be None, 'auto' or [(mean_col, median_col), ...], not {point_pairs!r}")
+        o = _method(ours) if ours else (rep.get("kart") or {}).get("bizim")
+        pairs = [(o, o + "_median")] if o and col(o + "_median") in res else []
+        explicit = False
+    else:
+        pairs = [tuple(p) for p in point_pairs]
+        explicit = True
+    for a, b in pairs:
+        for name in (a, b):
+            if col(name) not in res:
+                raise ValueError(f"point_pairs column {name!r} is not an evaluated prediction column")
+    if not pairs:
+        return []
+    if not rep.get("_forecast") or rep.get("birincil") not in L1_METRICS:
+        if explicit:
+            warnings.warn("point_pairs ignored: the mean/median row needs task='forecast' and an L1 primary "
+                          f"(mae / wmape); here primary={rep.get('birincil')!r}"
+                          + ("" if rep.get("_forecast") else ", task is not forecast"), UserWarning, stacklevel=3)
+        return []
+    out = []
+    for a, b in pairs:
+        ca, cb = col(a), col(b)
+        m = lambda c, ad: (res[c]["metrikler"].get(ad) or {})
+        out.append({"ortalama": ca, "medyan": cb, "metrik": rep["birincil"],
+                    "ortalama_deger": m(ca, rep["birincil"]).get("deger"), "medyan_deger": m(cb, rep["birincil"]).get("deger"),
+                    "ortalama_yanlilik": m(ca, "yanlilik").get("deger"), "medyan_yanlilik": m(cb, "yanlilik").get("deger")})
+    return out
 
 
 def _compare_list(compare) -> list | None:
@@ -434,7 +521,7 @@ def _within_variance(y: np.ndarray, codes: np.ndarray, G: int):
 
 
 def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0,
-               how: str = "mean"):
+               how: str = "mean", keep: Sequence[str] = ()):
     """Average (how="mean") or sum (how="sum") truth, predictions, retest and model ceiling per group (x item x split
     when present). halves: number of random within-group half splits for the split-half noise ceiling (None: not
     computed)."""
@@ -480,6 +567,14 @@ def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = 
         s = d.groupby(keys, sort=True, dropna=False)[c]
         if (s.nunique(dropna=False) <= 1).all():
             agg[c] = s.first().to_numpy()
+    for c in keep:   # e.g. block_col: must be constant within the group
+        if c in agg.columns:
+            continue
+        s = d.groupby(keys, sort=True, dropna=False)[c]
+        if not (s.nunique(dropna=False) <= 1).all():
+            raise ValueError(f"block_col {c!r} varies within aggregate_by groups; aggregate by a finer key or "
+                             "use a block column that is constant within each group")
+        agg[c] = s.first().to_numpy()
     if col != "grup":
         agg["grup"] = agg[col].astype(str)
     n_groups = int(agg[col].nunique())
@@ -616,6 +711,18 @@ def summary(report: dict) -> dict:
         "blind_arm": report.get("kor_kol"),
         "badge_caveat": _caveat_en(report),
     }
+    if report.get("blok_bootstrap"):
+        b = report["blok_bootstrap"]
+        out["block_bootstrap"] = {"column": b.get("sutun"), "n_blocks": b.get("n_blok")}
+    if report.get("tek_koken"):
+        t = report["tek_koken"]
+        out["single_origin"] = {"column": t.get("sutun"), "value": t.get("deger"), "note": t.get("not")}
+    if report.get("ortalama_medyan"):
+        out["mean_median"] = [{"mean": _method(r["ortalama"]), "median": _method(r["medyan"]),
+                               "metric": METRIC_TO_ENGLISH.get(r["metrik"], r["metrik"]),
+                               "mean_value": r["ortalama_deger"], "median_value": r["medyan_deger"],
+                               "mean_bias": r["ortalama_yanlilik"], "median_bias": r["medyan_yanlilik"]}
+                              for r in report["ortalama_medyan"]]
     out["headline_en"] = _headline_en(out)
     return out
 
@@ -650,6 +757,10 @@ def _num(x, unit=""):
     if unit == "×":
         return f"{x:.2f}×"
     return f"{x:.3f}"
+
+
+def _signed(x) -> str:
+    return "—" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:+.3f}"
 
 
 def _ci(lo, hi, unit=""):
@@ -712,11 +823,19 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     if s.get("aggregate"):
         a = s["aggregate"]
         meta += f" · level: group (aggregate_by={a.get('by')}: {a.get('n_rows')} rows -> {a.get('n_groups')} groups)"
+    if s.get("block_bootstrap"):
+        b = s["block_bootstrap"]
+        meta += (f" · bootstrap: two-way, blocks of `{b['column']}` ({b['n_blocks']} blocks) × clusters"
+                 + (" — CI not reliable across blocks (< 5 blocks)" if (b.get("n_blocks") or 0) < 5 else
+                    " — few blocks (< 10): coarse CIs" if (b.get("n_blocks") or 0) < 10 else ""))
     if s.get("ceiling_kind"):
         meta += f" · ceiling: {s['ceiling_kind']}"
     if s.get("declared_baselines"):
         meta += " · declared baselines: " + ", ".join(f"`{c}`" for c in s["declared_baselines"])
     out += ["", meta, ""]
+    if s.get("single_origin"):
+        so = s["single_origin"]
+        out += [f"Note: {so['note']} (`{so['column']}` = {_md(so['value'])}).", ""]
     if s.get("headline_en"):
         out += [f"Summary: {s['headline_en']}", ""]
     out += ["| Row | Method | Value [95% CI] | Note |", "|---|---|---|---|"]
@@ -742,6 +861,16 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
                     f"-> ceiling {_f3(nc.get('tavan'))} ({conv}). Split-half check (not used; biased low for small groups): "
                     f"half-mean {nc.get('korelasyon')} {_f3(nc.get('yari_korelasyon'))} over {nc.get('n_grup_yari')} groups "
                     f"({nc.get('R')} splits) -> Spearman-Brown {_f3(nc.get('spearman_brown'))}."]
+    if s.get("mean_median"):
+        out += ["", "| Point forecast | Mean column | Median column | " + "Primary (mean → median) | Bias (mean → median) |",
+                "|---|---|---|---|---|"]
+        for r in s["mean_median"]:
+            out.append(f"| mean vs median ({r['metric']}) | `{r['mean']}` | `{r['median']}` | "
+                       f"{_num(r['mean_value'])} → {_num(r['median_value'])} | "
+                       f"{_signed(r['mean_bias'])} → {_signed(r['median_bias'])} |")
+        out += ["", "A median point forecast can lower L1 metrics (MAE / WMAPE) but usually biases totals down "
+                    "(bias = sum pred / sum truth − 1); here: " + "; ".join(_mean_median_here(r) for r in s["mean_median"])
+                    + ". Report both and pick by the decision's loss."]
     if s.get("comparisons"):
         out += ["", "## Registered comparisons / drop conditions", "",
                 "| Comparison | Kind | Metric | A − B [95% CI] | p | n clusters | Verdict |", "|---|---|---|---|---|---|---|"]

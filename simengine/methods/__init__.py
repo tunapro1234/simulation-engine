@@ -24,7 +24,7 @@ from .twin import (TwinStack, base_predict, binned_median, column_correlation, d
                    pooled_logistic_oof)
 from .transfer import GroupTransfer, oof_predict
 from .forecast import (DirectForecaster, backtest, llm_prior_feature, make_features, mask_future, moving_mean,
-                       persistence_forecast, point_for_metric, seasonal_naive, ses, ses_level, summarize_backtest)
+                       persistence_forecast, point_for_metric, seasonal_naive, seasonal_ratio, ses, ses_level, summarize_backtest)
 from ._util import lightgbm_available
 
 __all__ = [
@@ -57,7 +57,7 @@ __all__ = [
     # item cold start
     "item_holdout_features", "ItemHoldout", "MFBaseline", "procrustes_align",
     # multi-series demand forecasting (D4)
-    "persistence_forecast", "seasonal_naive", "moving_mean", "ses", "ses_level", "make_features",
+    "persistence_forecast", "seasonal_naive", "moving_mean", "seasonal_ratio", "ses", "ses_level", "make_features",
     "DirectForecaster", "backtest", "summarize_backtest", "point_for_metric", "llm_prior_feature", "mask_future",
     "lightgbm_available",
 ]

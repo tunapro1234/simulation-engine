@@ -61,6 +61,7 @@ _ENTRY_POINTS = {
     "persistence_forecast": ("methods", "persistence_forecast"),
     "seasonal_naive": ("methods", "seasonal_naive"),
     "moving_mean": ("methods", "moving_mean"),
+    "seasonal_ratio": ("methods", "seasonal_ratio"),
     "ses": ("methods", "ses"),
     "make_features": ("methods", "make_features"),
     "DirectForecaster": ("methods", "DirectForecaster"),

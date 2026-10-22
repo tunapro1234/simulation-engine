@@ -266,6 +266,59 @@ def _gurultu_tavan_asimi(nokta, tekrar, yontemler, M):
                         if asan else "hiçbir yöntem örneklem gürültüsü tavanını anlamlı aşmıyor")}
 
 
+KOKEN_SUTUNLARI = ("koken", "origin", "zaman")   # tek köken denetiminde bakılan zaman/köken sütunları
+TEK_KOKEN_NOTU = ("single forecast origin: CIs cover series sampling only, not origin-to-origin variation; "
+                  "use methods.forecast.backtest(origins=[...])")
+
+
+AZ_BLOK = 10        # bu kadardan az blokta blok bootstrap GA'sı kaba: denetimde uyarı
+COK_AZ_BLOK = 5     # bundan az blokta blok bileşeni güvenilir değil: kartta "GA güvenilir değil" notu
+
+
+def _blok_kur(veri, blok: str | None, tahmin_gorevi: bool) -> dict:
+    """Blok bootstrap sütununu doğrular ve veri.blok'u kurar; tahmin görevinde tek köken uyarısını hazırlar.
+
+    Döner: {"blok", "sinir", "sinir_ek", "denetimler": [...], "tek_koken"} (yalnız ilgili anahtarlar)."""
+    d = veri.df
+    out: dict = {"denetimler": []}
+    if blok is not None and blok not in d.columns:
+        raise ValueError(f"block_col {blok!r} is not a column of the evaluated frame")
+    if blok is not None and d[blok].isna().any():
+        raise ValueError(f"block_col {blok!r} has {int(d[blok].isna().sum())} missing (NaN) rows in the evaluated "
+                         "frame; fill or drop them before block bootstrap")
+    n_blok = int(d[blok].nunique()) if blok is not None else None
+    if blok is not None and n_blok > 1:
+        veri.blok = blok
+        out["blok"] = {"sutun": blok, "n_blok": n_blok}
+        out["sinir"] = (f"Bootstrap iki yönlü (block_col={blok}): {n_blok} blok ve {veri.n_kume} "
+                        f"'{veri.kume_adi}' kümesi her tekrarda bağımsız yerine koymalı örneklenir, satır ağırlığı "
+                        "blok sayımı × küme sayımı; GA'lar hem bloklar (ör. kökenler/haftalar) arası hem seriler/kümeler "
+                        "arası değişkenliği (blokları aşan seri bağımlılığı dahil) kapsar.")
+        if n_blok < AZ_BLOK:
+            ek = (f"Yalnız {n_blok} blok (< {AZ_BLOK}): blok bileşeninin GA katkısı kaba"
+                  + (f"; {COK_AZ_BLOK} bloktan az olduğu için bloklar arası değişkenlik bu GA'larla tahmin edilemez "
+                     "(GA güvenilir değil: CI not reliable across blocks), daha çok köken/hafta ile backtest edin."
+                     if n_blok < COK_AZ_BLOK else "; blok sayısını artırmak (daha çok köken/hafta) GA'yı sağlamlaştırır."))
+            out["sinir_ek"] = ek
+            out["denetimler"].append({"kontrol": "blok bootstrap blok sayısı", "durum": "uyari", "deger": n_blok,
+                                      "ayrinti": ek})
+    elif blok is not None:
+        out["denetimler"].append({"kontrol": "blok bootstrap", "durum": "uyari", "deger": n_blok,
+                                  "ayrinti": f"block_col={blok} tek değerli: blok bootstrap uygulanmadı, varsayılan "
+                                             "kümeler kullanıldı"})
+    if not tahmin_gorevi:
+        return out
+    # tek köken denetimi block_col'dan bağımsız: köken sütunu (yoksa zaman sütunu)
+    sutun = next((c for c in KOKEN_SUTUNLARI if c in d.columns), None)
+    if sutun is not None and int(d[sutun].nunique()) == 1:
+        out["tek_koken"] = {"sutun": sutun, "deger": str(d[sutun].iloc[0]), "not": TEK_KOKEN_NOTU}
+        out["denetimler"].append({"kontrol": "tek tahmin kökeni (single origin)", "durum": "uyari", "deger": 1,
+                                  "ayrinti": f"'{sutun}' tek değerli ({d[sutun].iloc[0]}): " + TEK_KOKEN_NOTU
+                                             + (f"; block_col={blok} blokları köken değil, kökenler arası değişkenlik "
+                                                "yine kapsanmaz" if veri.blok is not None and veri.blok != sutun else "")})
+    return out
+
+
 def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | None = None,
                 yontemler: list[str] | None = None, bizim: str | None = None, ham: str | None = None,
                 etiketler: dict | None = None, birincil: str | None = None, B: int = 1000,
@@ -280,7 +333,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 carpan_en_fazla: int | None = 2000, tavan_yarim: dict | None = None, kor: str | None = None,
                 kiyaslar: list | None = None, ezber_llm: bool | None = None, *, tahmin_gorevi: bool = False,
                 ga_yontemi: str = "percentile", n_yapilandirma: int | None = None,
-                onkayit_metin: list[str] | None = None) -> dict:
+                onkayit_metin: list[str] | None = None, blok: str | None = None) -> dict:
     """bizim/ham: tahmin_ ön eki olmadan yöntem adı. bizim verilmezse SON yöntem (önceden belirlenmeli;
     en iyiyi sonradan seçmek iyimser yanlılık yaratır, denetimde işaretlenir).
 
@@ -300,7 +353,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     tavan_yarim: örneklem gürültüsü tavanı girdisi {"n", "s2": grup boyu / iç varyans, "A", "B": R × n yarı
     ortalamaları (split-half denetimi), "sutun": satır no sütunu, "R"}; api.evaluate(noise_ceiling=...) kurar. kor: kör (adsız) kol; bizim − kör eşleşik satırı.
     kiyaslar: [(a, b | None, etiket)] kayıtlı eşleşik karşılaştırmalar (düşme koşulları). ezber_llm: bizim yöntem LLM
-    kolu içeriyor mu (None: ezber sonucu verildiyse evet sayılır); ezber uyarısında rozet gerekçesine ek düşer."""
+    kolu içeriyor mu (None: ezber sonucu verildiyse evet sayılır); ezber uyarısında rozet gerekçesine ek düşer.
+    blok: blok bootstrap sütunu (ör. tahmin kökeni / hafta): küme yerine bu sütunun her değeri bir blok olarak
+    yerine koymalı örneklenir (blok içindeki bütün satırlar/kümeler birlikte); sütun, merdiven, manşet ve eşleşik fark
+    GA'ları. Tek değerliyse uygulanmaz (varsayılan kümeye dönülür, denetimde not)."""
     if gercek_yok(df):
         return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
                         etiketler=etiketler, birincil=birincil, onkayit=onkayit, sinirlar=sinirlar, duzey=duzey,
@@ -315,6 +371,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                          "from the metric table")
     veri = hazirla(df, gorev, yontemler, siniflar)
     d = veri.df
+    blok_bilgi = _blok_kur(veri, blok, tahmin_gorevi)
     etiketler = dict(etiketler or {})
     madde_var = "madde" in d
     olasilik = veri.gorev != "cok_sinif" or isinstance(d[ON_EK + veri.yontemler[0]].iloc[0], np.ndarray)
@@ -412,7 +469,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
 
     # ---- bootstrap (eşleşik)
     madde_kod = pd.factorize(d["madde"])[0] if madde_var else None
-    orn = Orneklem(veri.kume, B=B, B_toplu=B_toplu, tohum=tohum, madde_kume=veri.kume_adi == "madde")
+    orn = Orneklem(veri.kume, B=B, B_toplu=B_toplu, tohum=tohum,
+                   madde_kume=veri.kume_adi == "madde" and veri.blok is None, iki_yon=veri.iki_yon)
     tavan_girdi = {"tavan": girdiler.pop("tavan")} if "tavan" in girdiler else {}
     nokta, tekrar = hesapla(orn, girdiler, metrikler, madde_kod, agirlik)
     if tavan_girdi:
@@ -665,6 +723,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                     "ayrinti": "talep/zaman serisi tahmini (task=forecast): persona karıştırma kontrolü, insan test-retest "
                                "tavanı ve PPI++ 'kaç insana bedel' uygulanamaz (insan yanıtı ya da kişi bilgisi yok); "
                                "atlandı. Metrikler WMAPE ve yanlılık içerir."})
+    den.extend(blok_bilgi.get("denetimler", []))
     if ga_disi:
         ayr = "; ".join(f"{etiket.get(c, c)} {_f(th)} ∉ [{_f(a)}, {_f(u)}]" for c, th, a, u in ga_disi[:4])
         warnings.warn(f"percentile bootstrap CI excludes the point estimate of {birincil} for {len(ga_disi)} column(s) "
@@ -683,7 +742,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         den.append({"kontrol": "girdi notu", "durum": "uyari" if "düşürüldü" in n_ else "tamam", "ayrinti": n_, "deger": None})
 
     # ---- kayıtlı karşılaştırmalar (düşme koşulları) ve kör kol
-    n_kume = int(veri.kume.max()) + 1
+    n_kume = veri.n_kume
 
     def _cozum(ad):
         if ad is None:
@@ -787,13 +846,19 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             den.append({"kontrol": "etkin örneklem çarpanı", "durum": "atlandi", "ayrinti": f"hata: {e}", "deger": None})
 
     sinir = [
-        f"Bootstrap birimi '{veri.kume_adi}' ({int(veri.kume.max()) + 1} küme, B={B}; toplu metriklerde {orn.B_toplu}). "
-        + ("Seriler (madde) sabit kabul edilir: GA aynı serilerde yeni kümelere (seri/grup) genellemeyi ölçer; tek "
-         "tahmin başlangıcı (origin) zamanda genellemeyi ölçmez, birden çok başlangıç için backtest kullanın."
-         if tahmin_gorevi else
+        f"Bootstrap birimi '{veri.kume_adi}' ({veri.n_kume} küme"
+        + (f" × {blok_bilgi['blok']['n_blok']} '{veri.blok}' bloğu" if veri.blok is not None else "")
+        + f", B={B}; toplu metriklerde {orn.B_toplu}). "
+        + (("Blok × küme iki yönlü örneklenir (aşağıda)." if veri.blok is not None else
+            "Seriler (madde) sabit kabul edilir: GA aynı serilerde yeni kümelere (seri/grup) genellemeyi ölçer; tek "
+            "tahmin başlangıcı (origin) zamanda genellemeyi ölçmez, birden çok başlangıç için backtest kullanın.")
+           if tahmin_gorevi else
          "Maddeler sabit kabul edilir: GA yeni kişilere genellemeyi ölçer, yeni sorulara değil."),
         "Baseline'lar ve kalibrasyon çapraz uydurmalıdır (aynı grubun satırı kendi eşlemesini görmez).",
     ]
+    for k_ in ("sinir", "sinir_ek"):
+        if blok_bilgi.get(k_):
+            sinir.append(blok_bilgi[k_])
     if tahmin_gorevi and baseline:
         sinir.append("Tahmin görevi: otomatik tabanlar (rastgele / madde medyanı-ortalaması) test penceresinin "
                      "gerçeğinden çapraz uydurulur, yani tahmin başlangıcından ileriye bakar; meşru bir merdiven basamağı "
@@ -816,7 +881,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     if yalniz_basit:  # sona: özgün sınır sırası (kart ilk üçünü alır) değişmesin
         sinir.append("Yalnız basit tabanlar (rastgele/marjinal): bildirilmiş güçlü bir taban olmadan rozet iyimserdir.")
 
-    kart = {"n_satir": len(d), "n_kume": int(veri.kume.max()) + 1, "kume_adi": veri.kume_adi,
+    kart = {"n_satir": len(d), "n_kume": veri.n_kume, "kume_adi": veri.kume_adi,
             "n_madde": int(d["madde"].nunique()) if madde_var else None, "B": B, "tohum": tohum,
             "segmentler": veri.segmentler, "notlar": veri.notlar,
             "yontemler": veri.yontemler, "bizim": bizim, "ham": ham}
@@ -840,6 +905,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     }
     if tahmin_gorevi:
         ozet["tahmin_gorevi"] = True
+    if blok_bilgi.get("blok"):
+        ozet["blok_bootstrap"] = blok_bilgi["blok"]
+    if blok_bilgi.get("tek_koken"):
+        ozet["tek_koken"] = blok_bilgi["tek_koken"]
     if ga_yontemi != "percentile":
         ozet["ga_yontemi"] = ga_yontemi
     if ga_disi:

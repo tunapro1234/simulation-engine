@@ -183,6 +183,60 @@ def moving_mean(panel: pd.DataFrame, origin, horizon: int | Sequence[int] = 4, *
     return _baseline(f)(panel, origin, horizon, id_col=id_col, time_col=time_col, y_col=y_col, fill_value=fill_value)
 
 
+def seasonal_ratio(panel: pd.DataFrame, origin, horizon: int | Sequence[int] = 4, *, window: int = 4,
+                   season: int = 52, cap: tuple[float, float] | None = (0.5, 2.0), around: int = 1,
+                   smooth: float = 1.0, group_col: str | None = None, id_col: str = "id", time_col: str = "time",
+                   y_col: str = "y", fill_value: float = 0.0) -> pd.DataFrame:
+    """Last ``window`` periods mean x last year's same-period ratio (D4 ladder T4 / T4b).
+
+    pred(h) = mean(y[p-window+1 .. p]) * ratio(h), p = the origin's position, with
+    ratio(h) = (ly(h) + smooth) / (base + smooth) clipped to ``cap`` (None: no clip), where
+    base = mean(y[p-window+1-season .. p-season]) (the same window one season back) and
+    ly(h) = mean(y[k-around .. k+around]), k = p + h - season (the target period one season back, +-around periods;
+    never past the origin). A horizon longer than the season wraps as ``seasonal_naive``: n = ceil(h / season) seasons
+    back for both ly and base. Defaults are T4 (window=4, season=52, around=1, smooth=1, cap=(0.5, 2)).
+    group_col: pool the ratio over a static grouping column (e.g. store x dept): sum(ly) / sum(base) over the
+    group's series; T4b is ``group_col=..., around=0, smooth=0``. A zero or negative denominator gives ratio 1.
+    NaN when the history is shorter than one season plus the window. Same output format as ``moving_mean``.
+    """
+    if window < 1 or season < 1 or around < 0:
+        raise ValueError("window and season must be >= 1 and around >= 0")
+    w = _Wide(panel, id_col, time_col, y_col, fill_value)
+    p, hs = w.pos(origin), _horizons(horizon)
+    Y = w.Y[:, :p + 1]
+    m = Y[:, max(p - window + 1, 0):p + 1].mean(1)
+    b0, b1 = p - window + 1 - season, p - season
+    base = Y[:, b0:b1 + 1].mean(1) if b0 >= 0 else np.full(Y.shape[0], np.nan)
+    codes = None
+    if group_col is not None:
+        if group_col not in panel.columns:
+            raise KeyError(f"panel has no column {group_col!r}")
+        g = panel.groupby(id_col, sort=False)[group_col].first().reindex(w.ids)
+        codes = pd.factorize(g)[0]
+    out = np.full((Y.shape[0], len(hs)), np.nan)
+    for j, h in enumerate(hs):
+        n = max(int(np.ceil(h / season)), 1)        # seasons back (as seasonal_naive): 1 unless horizon > season
+        k = p + h - season * n
+        lo, hi = k - around, min(k + around, p)
+        bj0, bas = b0, base
+        if n > 1:
+            bj0 = p - window + 1 - season * n
+            bas = Y[:, bj0:p - season * n + 1].mean(1) if bj0 >= 0 else base
+        if lo < 0 or bj0 < 0 or hi < lo:
+            continue
+        ly = Y[:, lo:hi + 1].mean(1)
+        num, den = ly + smooth, bas + smooth
+        if codes is not None:
+            num = np.bincount(codes, ly, codes.max() + 1)[codes] + smooth
+            den = np.bincount(codes, bas, codes.max() + 1)[codes] + smooth
+        with np.errstate(invalid="ignore", divide="ignore"):
+            r = np.where(den > 0, num / np.where(den > 0, den, 1.0), 1.0)
+        if cap is not None:
+            r = np.clip(r, cap[0], cap[1])
+        out[:, j] = m * r
+    return w.frame(origin, out, hs)
+
+
 def ses_level(Y: np.ndarray, alpha: float) -> np.ndarray:
     """Simple exponential smoothing level per column (kod/ses.py ses_seviye): L[:, t] = level after time t."""
     Y = np.asarray(Y, float)
@@ -549,6 +603,6 @@ def llm_prior_feature(llm, keys: Sequence[Any], question: str | Callable[[Any], 
     return out
 
 
-__all__ = ["persistence_forecast", "seasonal_naive", "moving_mean", "ses", "ses_level", "make_features",
+__all__ = ["persistence_forecast", "seasonal_naive", "moving_mean", "seasonal_ratio", "ses", "ses_level", "make_features",
            "DirectForecaster", "backtest", "summarize_backtest", "point_for_metric", "llm_prior_feature",
            "mask_future", "wmape", "bias", "SES_ALPHAS"]

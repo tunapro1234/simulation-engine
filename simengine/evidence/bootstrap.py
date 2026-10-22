@@ -12,9 +12,15 @@ HIZLI_SIRA_ESIK = 5000  # bu kadar satırdan büyük tabloda Spearman ve ikili t
 
 class Orneklem:
     def __init__(self, kume: np.ndarray, B: int = 1000, B_toplu: int = 200, tohum: int = 0,
-                 madde_kume: bool = False):
+                 madde_kume: bool = False, iki_yon=None):
+        """iki_yon: (hücre→blok kodu, hücre→küme kodu); verilirse kume hücre kodudur ve her tekrarda blok ve küme
+        sayımları bağımsız çekilip çarpılır (iki yönlü / çapraz bootstrap: blok ve seri bağımlılığı birlikte)."""
         self.kume = np.asarray(kume)
         self.G = int(self.kume.max()) + 1 if len(self.kume) else 0
+        self.iki_yon = None
+        if iki_yon is not None:
+            hb, hc = (np.asarray(a, int) for a in iki_yon)
+            self.iki_yon = (hb, hc, int(hb.max()) + 1, int(hc.max()) + 1)
         self.B, self.B_toplu, self.tohum = B, min(B_toplu, B), tohum
         self.madde_kume = madde_kume  # küme = madde ise çoğaltılan maddeler ayrı grup sayılmalı
         sira = np.argsort(self.kume, kind="stable")
@@ -23,7 +29,13 @@ class Orneklem:
         self.baslangic = np.concatenate([[0], np.cumsum(self.uzunluk)[:-1]])
 
     def secim(self, b: int) -> np.ndarray:
-        return np.random.default_rng([self.tohum, b]).integers(0, self.G, self.G)
+        rng = np.random.default_rng([self.tohum, b])
+        if self.iki_yon is None:
+            return rng.integers(0, self.G, self.G)
+        hb, hc, Gb, Gc = self.iki_yon
+        cb = np.bincount(rng.integers(0, Gb, Gb), minlength=Gb)
+        cc = np.bincount(rng.integers(0, Gc, Gc), minlength=Gc)
+        return np.repeat(np.arange(self.G), cb[hb] * cc[hc])
 
     def sayim(self, b: int) -> np.ndarray:
         return np.bincount(self.secim(b), minlength=self.G).astype(float)
