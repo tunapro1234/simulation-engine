@@ -431,7 +431,7 @@ def predict_people(*args, llm=None, people=None, items: Sequence[str] | None = N
     level = level.upper()
     if level not in ("L0", "L1", "L2", "SSR"):
         raise ValueError("level must be L0, L1, L2 or SSR")
-    items = [str(k) for k in (items or ())]
+    items = [] if items is None else [str(k) for k in items]     # arrays / Index / Series as before
     if not items:
         raise ValueError("items is empty")
     spec = spec or PredictionSpec()

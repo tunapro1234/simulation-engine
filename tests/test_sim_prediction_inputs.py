@@ -151,6 +151,12 @@ class TestLLMKeyword(unittest.TestCase):
         r = predict_people(None, ITEMS, llm=FakeLLM(responder), level="L0", l0_samples=2)
         self.assertEqual(r["p"]["_all"]["ABIS_BOOK"], 0.4)
 
+    def test_array_items(self):
+        # items as ndarray / Index / Series (e.g. df["item"].unique()) work as in the legacy signature
+        for its in (pd.Index(ITEMS), pd.Series(ITEMS), pd.Series(ITEMS).unique()):
+            r = predict_people(FakeLLM(responder), self.PEOPLE, its, spec=AMAZON)
+            self.assertEqual(r["items"], list(ITEMS))
+
     def test_errors(self):
         llm = FakeLLM(responder)
         with self.assertRaisesRegex(TypeError, "both"):
