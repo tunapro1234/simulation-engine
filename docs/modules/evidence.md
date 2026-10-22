@@ -99,6 +99,13 @@ Cluster bootstrap with resampling by group (person), falling back to item and th
 every metric uses the **same** resamples, so method differences are paired. Per-unit metrics use the fast
 cluster-sum path with B = 1000. Aggregate metrics (AUC, F1, correlations) are recomputed in a loop with
 `B_aggregate = 200`. Intervals are 2.5/97.5 % percentiles. The p-value is two-sided.
+- *Copies are separate items:* when a cluster is drawn k times, every copy of an item that sits inside one
+  cluster gets its own item code (`Resampler.satirlar(b, item_codes)`), so item-grouped aggregate metrics
+  (`pair_sign`, `winner_top1`, `within_spearman`) never pair A1 with B2 and the cluster weighs k, not k².
+  Items spread over several clusters (person × question) stay shared. This holds for cluster = item, a group
+  column equal to the item, `block_col`, `paired_ci` and `compare`. Before the fix a 400-test A/B card
+  showed a 0.147-wide pair-accuracy CI with group = item and 0.319 with 20 blocks (binomial: 0.092); now 0.090
+  and 0.157 (the two-way block bootstrap is wider by design) [rehearsal G3 #3].
 - *Limit:* the CI generalises to **new people, not new questions**. On Twin the gap closed is [16–19] with
   person clusters and [2–35] with task clusters [kanit RECETE 5, RAPOR §6]. A two-way (person × item)
   bootstrap is not written. If the event brings new questions, read the item axis separately.
