@@ -14,6 +14,9 @@ numbers, and flags incoherent behaviour. It adds the scoring layer that BeeBench
 | `coherence_audit`, `flag_rows`, `PRECEDENT` | `coherence.py` | the 10 b01 detectors; they flag rows and never drop them |
 | `wtp_scorecard`, `CRITERIA`, `WTP_PARAMS`, `ERTAN_TARGETS` | `wtp.py` | the 9-criterion who-to-punish human-likeness index |
 
+WTP in this module means who-to-punish (a punishment game), not willingness-to-pay; for pricing and
+willingness-to-pay use `methods.conjoint` (`simengine.methods.conjoint.wtp`).
+
 Dependencies: numpy, pandas and `simengine.llm` (for `FakeLLM` and `cost_usd` in the cost gate). scipy is used
 only to cross-check the distances in the tests. The module uses `simengine.evidence.evaluate` only through the
 frame that `moment_frame` returns. It does not depend on `simengine.sim`: answer parsing is a small local helper.
