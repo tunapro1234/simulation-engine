@@ -8,12 +8,15 @@ ported: the LLM goes through the `simengine.types.LLM` protocol, and `simengine.
     fields = [FieldSpec("contribution", "int", min=0, max=20, label="Tokens you put in the group account"),
               FieldSpec("vote", "choice", choices=[("1", "Yes"), ("0", "No")])]
     res = ask_constrained(llm, persona_text, game_text, fields, meta={"condition": "random", "agent_id": "a1"})
+    res = ask_constrained(persona_text, game_text, fields, llm=llm)   # same call, llm= as in survey / ab_test
     res.completed, res.values, res.failures       # {"contribution": 12, "vote": "1"} when completed
     completion_summary(all_results, by="condition")  # n_planned, n_completed, failed_<field>, missing_<field>
 
 A field that never validates stays missing. Nothing is imputed, salvaged from free text or defaulted: the
 failure is logged (`failures`) and counted (`completion_summary`). replicant's `_try_direct_value` (substring and
 first-number salvage, which reads "yes" inside "no, yes ...") is deliberately dropped.
+
+llm may be passed positionally (legacy) or as llm=; neither or both -> TypeError.
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import pandas as pd
 
+from ._llmarg import MISSING, resolve_llm
 from .panel import Usage
 from .parse import parse_json
 
@@ -288,7 +292,8 @@ class ConstrainedResult:
 
 # ---------------------------------------------------------------- ask
 
-def ask_constrained(llm, system: str, prompt: str, fields, *, max_retries: int = MAX_RETRIES,
+def ask_constrained(*args, llm=None, system: str = MISSING, prompt: str = MISSING, fields=MISSING,
+                    max_retries: int = MAX_RETRIES,
                     sequential_threshold: int | None = SEQUENTIAL_THRESHOLD, max_tokens: int = 1024,
                     system_suffix: str = JSON_ONLY, stop_on_failure: bool = True, meta: Mapping | None = None,
                     usage: Usage | None = None, **kw) -> ConstrainedResult:
@@ -302,7 +307,11 @@ def ask_constrained(llm, system: str, prompt: str, fields, *, max_retries: int =
     as failures with attempt 0. `sequential_threshold=None` always batches.
 
     Errors raised by the LLM backend (budget, auth) propagate; an empty or unparseable reply is a failed attempt.
-    `**kw` goes to `llm.complete` (e.g. effort, temperature). `meta` is stored on the result only."""
+    `**kw` goes to `llm.complete` (e.g. effort, temperature). `meta` is stored on the result only.
+    llm may be passed positionally (legacy) or as llm=: `ask_constrained(llm, system, prompt, fields)` ==
+    `ask_constrained(system, prompt, fields, llm=llm)`."""
+    llm, (system, prompt, fields) = resolve_llm("ask_constrained", args, llm,
+                                                {"system": system, "prompt": prompt, "fields": fields})
     fields = as_fields(fields)
     if not fields:
         raise ValueError("ask_constrained needs at least one field")

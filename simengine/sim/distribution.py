@@ -9,9 +9,11 @@ marginal (W1 0.206) and a 37-person real survey of the segment (0.049): W1 0.077
 
     qs = [{"id": "q1", "text": "Do you approve of ...?", "options": ["Strongly approve", ..., "Strongly disapprove"]}]
     segs = {"D-young": "US adults aged 18 to 54 who identify as Democrats", ...}
-    res = segment_distribution(llm, segs, qs, population="US adults")
+    res = segment_distribution(llm, segs, qs, population="US adults")    # or segment_distribution(segs, qs, llm=llm)
     res["dist"]["D-young"]["q1"]      # averaged probability vector
     frame = distribution_frame(res, truth={"D-young": {"q1": [0.1, 0.3, ...]}, ...})
+
+llm may be passed positionally (legacy) or as llm= (as in survey / ab_test); neither or both -> TypeError.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from ._llmarg import MISSING, resolve_llm
 from ._stats import to_jsonable
 from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many
 from .parse import normalize_probs, parse_distribution, parse_json, unwrap
@@ -94,8 +97,8 @@ def distribution_prompt(framing: str, group: str, question: dict, *, population:
                                 example=json.dumps({str(j + 1): round(100 / k) for j in range(k)}))
 
 
-def segment_distribution(llm, segments, questions, *, population: str = "adults", source: str | None = None,
-                         when: str | None = None, framings: Mapping[str, str] | None = None,
+def segment_distribution(*args, llm=None, segments=MISSING, questions=MISSING, population: str = "adults",
+                         source: str | None = None, when: str | None = None, framings: Mapping[str, str] | None = None,
                          max_tokens: int = 300, fallback: str = "uniform", ask_kw: dict | None = None,
                          repeats: int = 1) -> dict:
     """One call per segment x question x framing (x repeat); vectors averaged over framings and repeats.
@@ -114,7 +117,11 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
     Calls go through `sim.panel.ask_many`: a soft refusal is not cached and is re-asked once with a
     research-forecast note; an empty reply (EmptyResponseError) is re-asked once with a larger max_tokens; a cell
     still without a reply counts as invalid (usage refused_calls / empty_calls / error_calls). `ask_kw` passes
-    options to ask_many (refusal_retry, cache_refusals, empty_retry, empty_retry_kw)."""
+    options to ask_many (refusal_retry, cache_refusals, empty_retry, empty_retry_kw).
+    llm may be passed positionally (legacy) or as llm=: `segment_distribution(llm, segs, qs)` ==
+    `segment_distribution(segs, qs, llm=llm)`."""
+    llm, (segments, questions) = resolve_llm("segment_distribution", args, llm,
+                                             {"segments": segments, "questions": questions})
     segs = _segments(segments)
     qs = _questions(questions)
     framings = dict(framings or (FRAMINGS_NAMED if source else FRAMINGS_HIDDEN))
@@ -167,8 +174,9 @@ def _person_block(questions) -> str:
                      for i, q in enumerate(questions))
 
 
-def persona_distribution(llm, personas, questions, *, setting: str = "a survey of adults", batch: int = 12,
-                         session: str = "s1", max_tokens: int | None = None, ask_kw: dict | None = None,
+def persona_distribution(*args, llm=None, personas=MISSING, questions=MISSING,
+                         setting: str = "a survey of adults", batch: int = 12, session: str = "s1",
+                         max_tokens: int | None = None, ask_kw: dict | None = None,
                          segments: Mapping[str, Any] | None = None) -> dict:
     """Per-persona probability vectors, many respondents per call (k2.py arm (iii), OLAS_ISTEM, generalised:
     `setting` replaces the measured "a public opinion survey of US adults in October 2020, ..." line; tables are
@@ -184,7 +192,10 @@ def persona_distribution(llm, personas, questions, *, setting: str = "a survey o
     {scheme: {label: {question_id: vector}}}, "filled_by" and "segments_by" {scheme: {pid: label}}. A column is
     looked up like `survey(stimulus_col=)` (flat key, facet, identity / demographic field, trait label,
     authored, extra, attribute); a callable gets the original persona item. A missing value gives label "NA".
-    `person_distribution_frame(result)` gives one row per persona x question."""
+    `person_distribution_frame(result)` gives one row per persona x question.
+    llm may be passed positionally (legacy) or as llm=: `persona_distribution(personas, qs, llm=llm)`."""
+    llm, (personas, questions) = resolve_llm("persona_distribution", args, llm,
+                                             {"personas": personas, "questions": questions})
     ps = as_personas(personas)
     order = {sg: i for i, sg in enumerate(dict.fromkeys(p.seg for p in ps))}
     ps = sorted(ps, key=lambda p: order[p.seg])     # tables within a segment, as in the measured run
