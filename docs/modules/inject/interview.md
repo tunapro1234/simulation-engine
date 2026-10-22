@@ -29,7 +29,8 @@ question, and the strict JSON answer line that `parse_option` reads.
 
 With `cot=True` (the default), the prompt adds the paper's step list. Choice questions get four steps: Option
 Interpretation, Option Choice, Reasoning and Response. Numeric questions get three: Range Interpretation,
-Reasoning and Response. The reply must end with a JSON line, so call with `max_tokens >= 1024`. With
+Reasoning and Response. The paper reuses the choice task line for numeric items; the "The question asks for a
+number." wording is ours. The reply must end with a JSON line, so call with `max_tokens >= 1024`. With
 `compare_injectors`' default of 256 tokens, the reasoning gets cut off before the JSON and the reply scores as
 unparsed. `cot=False` keeps the task wording without the steps. Use it when comparing with families that do not
 reason, so that the CoT effect is not mixed into the injection effect.
@@ -40,7 +41,7 @@ reason, so that the CoT effect is not mixed into the injection effect.
 | `interview_lesion` | `interview` | The transcript with `round(drop*n)` exchanges removed at random (default `drop=0.8`), with at least one kept | random-lesion agents (0, 20, 40, 60, 80 %) |
 | `interview_summary` | `interview_summary` | A `- key: value` dictionary of facts in place of the transcript | summary agents |
 | `interview_expert_reflection` | `interview`, `expert_reflections` | The transcript plus the notes of the expert who fits the question | the paper's full agent architecture |
-| `interview_plus_survey` | `interview`, `answers` | The transcript plus the person's other answers through `known_answers` | survey-plus-interview agents (v3) |
+| `interview_plus_survey` | `interview`, `answers` | The transcript plus the person's other answers through `known_answers`; `expert="auto"` (or `"all"`, a name) also appends expert notes and then needs `expert_reflections` | survey-plus-interview agents (v3) |
 
 Common params: `cot=True`, `budget_tokens=None`, `truncate="head_tail"`, `seed=0`.
 
@@ -72,8 +73,12 @@ Expert options:
 - `expert="<name>"` fixes one expert.
 - `transcript=False` sends the notes alone, as a compressed variant that the paper did not run.
 
-If the routed expert has no notes, the injector uses the notes the person has and sets
-`meta["expert_fallback"]`.
+If the routed expert has no notes (a missing key or an empty list), the injector uses the notes the person has
+and sets `meta["expert_fallback"]`.
+
+In v3, every agent type, the survey-plus-interview agents included, appended the routed expert's reflections, written
+over that agent's self-report data. `interview_plus_survey` leaves them out by default; `expert="auto"` gives the v3
+agent, with notes made from the transcript alone (`prepare` does not see the survey answers).
 
 **Summary.** The paper asked GPT-4o to turn the transcript into "bullet-pointed dictionaries of key response pairs"
 (for example `{"childhood_town": "Small town", "siblings": "Only child", ...}`). This keeps the facts and drops the
@@ -99,19 +104,26 @@ people get different lesions.
 
 **Leakage.** A transcript is not the person's answer list, so `known_answers` does not apply to it. In
 `interview_plus_survey`, the shown answers always go through `known_answers`, which drops the target and
-`question["exclude"]`. The paper excluded the whole category of the predicted item. To reproduce that, pass the
-category's qids in `exclude`.
+`question["exclude"]`. By default only the target is dropped, which is v3's robustness variant (0.85 below). For
+its main survey-plus-interview result, v3 removed from the input every GSS item it evaluated on, and for the Big
+Five the whole block of the predicted item's trait. To reproduce that, pass those qids in `exclude`. (v1's
+robustness agents excluded "data from the same category as the question being predicted".)
 
-The interview can still contain the answer in plain words. Analysis in the v3 paper names verbatim answer
-retrieval from the transcript as one mechanism behind the gain. When a held-out item is asked in the interview,
-the score measures retrieval, not simulation.
+The interview can still contain the answer in plain words. v3 screened all GSS-item and interview-question pairs
+for duplicate or near-duplicate wording and removed the 27 GSS items it flagged from the evaluation set; simengine
+does no such screening, so drop such items from `questions` yourself. v3 also names direct answer retrieval from
+the transcript as one mechanism behind the gain: on a 59-agent subset, interview agents lose accuracy as the items
+most likely to have a verbatim answer are removed, and still reach 0.79 against 0.71 for demographic agents with
+80 such items dropped. When a held-out item is asked in the interview, the score measures retrieval, not
+simulation.
 
 ## Published effect sizes (Park et al., GSS normalized accuracy = agent accuracy / participant two-week test-retest)
 
 | condition | v1 (Nov 2024) | v3 (Jun 2026) |
 |---|---|---|
 | interview (transcript + expert reflection) | 0.85 (raw 68.85 %) | 0.83 (raw 65.67 %) |
-| survey-plus-interview | n/a | 0.86 |
+| survey-plus-interview (all evaluated GSS items held out) | n/a | 0.86 |
+| survey-plus-interview, only the target held out (subsample) | n/a | 0.85 |
 | survey only (GSS + Big Five) | n/a | 0.82 |
 | demographics only | 0.71 | 0.74 |
 | persona paragraph (self-written) | 0.70 | 0.71 |
@@ -128,8 +140,9 @@ between agent types on that construct (F(4, 5255) = 1.63, p = 0.16).
 For the lesion runs, v1 Table 6 lists GSS normalized accuracy of 0.85, 0.84, 0.83, 0.83 and 0.79 at 0, 20, 40, 60
 and 80 % removed. That is roughly linear.
 
-All results come from GPT-4o with the paper's chain of thought. The paper does not report an ablation of reflection
-against no reflection.
+All results come from GPT-4o with the paper's chain of thought. Neither version reports reflection against no
+reflection on its own. The nearest is v3's fine-tuning check on 552 agents: GPT-4o with reasoning and reflection
+reached 0.84, and the same model with both removed from the prompt 0.82 (roughly `interview_transcript(cot=False)`).
 
 **In simengine:** not yet measured. Only FakeLLM tests exist so far (`tests/test_persona_inject_interview.py`),
 and no real LLM run has been made.
