@@ -7,7 +7,7 @@ effects: exaggeration ratio, LOO correction, and how many human respondents the 
     res["conditions"]            # per condition: mean, sd, n, refused, unparsed (+ the no_persona arm)
     frame = experiment_frame({"study1": res, "study2": res2}, human={"study1": {"norms": 0.21}})
 
-    fit = exaggeration_ratio(sim_g, human_g, family=study)    # median |sim|/|human|, slope with family CI, LOO
+    fit = exaggeration_ratio(sim_g, human_g, family=study, human_se=se)  # median |sim|/|human|, slope, LOO
     corrected = correct_effects(sim_g, human_g=human_g, family=study)   # LOO: never uses its own human value
     human_equivalent_n(corrected, human_g, human_se, family=study)      # {"n": ..., "ci": [...]} or n None
     effect_section(sim_g, human_g, human_se, family=study)              # evidence-extras section for the card
@@ -148,7 +148,8 @@ def experiment(llm, personas, conditions: Mapping[str, str], question, *, betwee
     ssr=). `control`: the reference condition (default: the first). `between=True`: each persona gets one
     condition (`assign_conditions`, seeded); False: every persona answers under every condition, paired g.
     `samples` > 1 repeats the ask with the personas reshuffled (different batches, so different prompts and
-    cache keys) and averages each persona's answers. `no_persona`: also run survey's no_persona arm on the same
+    cache keys) and averages each persona's answers; the averaging removes answer noise from the sd, so g grows
+    with `samples` (a human study asks once: compare g with human g at samples=1). `no_persona`: also run survey's no_persona arm on the same
     condition texts and report its g per effect. `ask_kw`: extra `survey` keyword arguments (batch, ssr,
     free_text, parallel, tag, refusal_retry, ...).
 
@@ -355,11 +356,30 @@ def _cluster_draws(cl: np.ndarray, B: int, seed: int):
         yield np.concatenate([groups[i] for i in pick])
 
 
-def _pct(draws, alpha: float):
+def _stretch(n_clusters: int, alpha: float) -> float:
+    """Few-cluster widening of a cluster-percentile CI: t(G-1) / z * sqrt(G / (G-1)). The plain percentile
+    interval covered 0.72-0.90 with 3-6 families (simulated); stretched around the estimate the ratio, slope and
+    human-N CIs cover 0.89-0.97 at 3-30 families; the factor tends to 1 as G grows."""
+    g = int(n_clusters)
+    if g < 2:
+        return float("nan")
+    from scipy.stats import t
+    return float(t.ppf(1 - alpha / 2, g - 1) / _z(alpha) * math.sqrt(g / (g - 1)))
+
+
+def _pct(draws, alpha: float, est=None, n_clusters: int | None = None):
+    """Percentile CI of bootstrap draws; with `est` and `n_clusters` both ends are pushed away from the estimate
+    by `_stretch(n_clusters)` (few-cluster correction)."""
     d = np.asarray([x for x in draws if x is not None and np.isfinite(x)], float)
     if len(d) < 10:
         return [None, None]
-    return [float(np.quantile(d, alpha / 2)), float(np.quantile(d, 1 - alpha / 2))]
+    lo, hi = float(np.quantile(d, alpha / 2)), float(np.quantile(d, 1 - alpha / 2))
+    if est is not None and n_clusters is not None:
+        c = _stretch(n_clusters, alpha)
+        if not np.isfinite(c):
+            return [None, None]
+        lo, hi = min(lo, est - c * (est - lo)), max(hi, est + c * (hi - est))
+    return [lo, hi]
 
 
 def _ratio(s, h, min_human: float = 0.0):
@@ -373,6 +393,18 @@ def _slope(s, h):
         return None, None
     b = float(np.cov(h, s, ddof=0)[0, 1] / np.var(h))
     return b, float(s.mean() - b * h.mean())
+
+
+def _slope_corrected(s, h, se2: float, min_rel: float = 0.2):
+    """Slope sim ~ human corrected for the human sampling noise (errors in the regressor attenuate OLS by the
+    reliability (var(h) - mean se^2) / var(h)) -> (slope, reliability); slope None when reliability < min_rel."""
+    if len(h) < 2 or np.var(h, ddof=1) <= 0:
+        return None, None
+    vh = float(np.var(h, ddof=1))
+    rel = (vh - se2) / vh
+    if rel < min_rel:
+        return None, rel
+    return float(np.cov(h, s, ddof=1)[0, 1] / (vh - se2)), rel
 
 
 def _affine(s, h):
@@ -397,19 +429,28 @@ def _loo(s, h, cl, min_human: float = 0.0):
     return pr, pa, scales
 
 
-def exaggeration_ratio(sim_g, human_g, family=None, *, B: int = 2000, seed: int = 0, alpha: float = 0.05,
-                       min_human: float = 0.0) -> dict:
+def exaggeration_ratio(sim_g, human_g, family=None, *, human_se=None, B: int = 2000, seed: int = 0,
+                       alpha: float = 0.05, min_human: float = 0.0) -> dict:
     """How much larger the simulated effects are than the human ones. sim_g / human_g: aligned sequences, or
     dicts / Series keyed by effect (intersected); family: a label per effect (study / paper; same alignment)
     for the clustered CIs and the leave-one-family-out (LOO) scale. Effects with |human| <= min_human (and
-    exact zeros) are left out of the ratio only.
+    exact zeros) are left out of the ratio only. human_se (one value or one per effect, same alignment): adds
+    slope_corrected, the slope with the human sampling noise taken out of var(human) (OLS on noisy human
+    effects is pulled toward 0, so it understates the exaggeration).
 
     Returns {k, families, ratio (median |sim| / |human|), ratio_ci, ratio_sum (sum |sim| / sum |human|),
     slope / intercept (OLS sim ~ human; 1 = right size) with slope_ci, slope0 (through the origin) with
     slope0_ci, r (Pearson), sign_agreement, affine {a, b} (human ~ a + b sim, the correction fit),
     verdict ("exaggerates" | "understates" | "about right" | "too few"), loo {scale: median / min / max of
-    the LOO ratios, mae_raw, mae_ratio, mae_affine}}. CIs: percentile, clusters resampled with replacement."""
-    _, s, h, fam = _align(sim_g, human_g, family)
+    the LOO ratios, mae_raw, mae_ratio, mae_affine}}, and with human_se: slope_corrected, slope_corrected_ci,
+    reliability. CIs: percentile over clusters resampled with replacement, widened for few clusters (`_stretch`;
+    simulated coverage at 3-30 families: ratio 0.93-0.97, corrected slope 0.91-0.95; the plain percentile
+    interval covered 0.72-0.90 at 3-6). The raw slope's CI misses the true slope when the human SEs are not
+    small (0.68 at 20 families with se 0.1): read slope_corrected then."""
+    _, s, h, fam, hse = _align(sim_g, human_g, family, human_se)
+    if hse is not None:
+        hse = _f(hse)
+        hse = hse if np.isfinite(hse).any() else None      # missing SEs: mean se^2 over the effects that have one
     k = len(s)
     cl = _clusters(fam, k)
     nf = int(len(np.unique(cl))) if k else 0
@@ -422,13 +463,17 @@ def exaggeration_ratio(sim_g, human_g, family=None, *, B: int = 2000, seed: int 
     slope, icpt = _slope(s, h)
     slope0 = float((s * h).sum() / (h * h).sum()) if (h * h).sum() > 0 else None
     aff = _affine(s, h)
-    rd, sd, s0d = [], [], []
+    sc_fit = _slope_corrected(s, h, float(np.nanmean(hse ** 2))) if hse is not None else (None, None)
+    rd, sd, s0d, scd = [], [], [], []
     for idx in _cluster_draws(cl, B, seed):
         rd.append(_ratio(s[idx], h[idx], min_human))
         sd.append(_slope(s[idx], h[idx])[0])
         hh = (h[idx] ** 2).sum()
         s0d.append(float((s[idx] * h[idx]).sum() / hh) if hh > 0 else None)
-    ratio_ci = _pct(rd, alpha)
+        if sc_fit[0] is not None:
+            se2 = hse[idx] ** 2
+            scd.append(_slope_corrected(s[idx], h[idx], float(np.nanmean(se2)) if np.isfinite(se2).any() else 0.0)[0])
+    ratio_ci = _pct(rd, alpha, ratio, nf)
     pr, pa, scales = _loo(s, h, cl, min_human)
     if ratio_ci[0] is not None and ratio_ci[0] > 1:
         verdict = "exaggerates"
@@ -440,7 +485,8 @@ def exaggeration_ratio(sim_g, human_g, family=None, *, B: int = 2000, seed: int 
     out.update({
         "ratio": ratio, "ratio_ci": ratio_ci,
         "ratio_sum": float(np.abs(s).sum() / np.abs(h).sum()) if np.abs(h).sum() > 0 else None,
-        "slope": slope, "intercept": icpt, "slope_ci": _pct(sd, alpha), "slope0": slope0, "slope0_ci": _pct(s0d, alpha),
+        "slope": slope, "intercept": icpt, "slope_ci": _pct(sd, alpha, slope, nf), "slope0": slope0,
+        "slope0_ci": _pct(s0d, alpha, slope0, nf),
         "r": float(np.corrcoef(s, h)[0, 1]) if s.std() > 0 and h.std() > 0 else None,
         "sign_agreement": float(np.mean(np.sign(s) == np.sign(h))),
         "affine": {"a": aff[0], "b": aff[1]} if aff else None, "verdict": verdict,
@@ -451,6 +497,15 @@ def exaggeration_ratio(sim_g, human_g, family=None, *, B: int = 2000, seed: int 
                 "mae_ratio": float(np.nanmean(np.abs(pr - h))) if np.isfinite(pr).any() else None,
                 "mae_affine": float(np.nanmean(np.abs(pa - h))) if np.isfinite(pa).any() else None},
     })
+    if hse is not None:
+        out.update({"slope_corrected": sc_fit[0], "reliability": sc_fit[1],
+                    "slope_corrected_ci": [None, None]})
+        if sc_fit[0] is None:
+            out["note_slope"] = "the human effects barely vary beyond their own noise (reliability < 0.2): no corrected slope"
+        elif sum(x is None for x in scd) > alpha / 2 * len(scd):
+            out["note_slope"] = "reliability < 0.2 in too many bootstrap draws: the corrected slope has no CI"
+        else:
+            out["slope_corrected_ci"] = _pct(scd, alpha, sc_fit[0], nf)
     if family is not None and nf < 2:
         out["note"] = "one family only: the LOO scale leaves out single effects and the CI resamples effects"
     return to_jsonable(out)
@@ -515,7 +570,9 @@ def human_equivalent_n(sim_g, human_g, human_se, family=None, *, B: int = 2000, 
     that is the human studies' own noise. A two-arm study with N people has var(d) ~ (4 + d^2/2) / N, so the
     simulation is worth N = (4 + mean(human^2)/2) / err humans per effect. err <= 0 (the simulation is within
     the human noise) gives n None with a note, not infinity. human_se: one value or one per effect. CI: cluster
-    bootstrap over `family` (else effects) of err; a draw with err <= 0 is an open upper end (ci[1] None).
+    bootstrap over `family` (else effects) of err, widened for few clusters like `exaggeration_ratio`'s CIs
+    (simulated coverage of the true N 0.89-0.96 at 3-30 families; the plain percentile 0.76-0.79 at 4);
+    an err CI end <= 0 is an open upper end (ci[1] None).
     Returns {n, n_per_arm, ci, mse, noise_var, err_var, k, note}."""
     _, s, h, se, fam = _align(sim_g, human_g, human_se, family)
     se = _f(se)
@@ -540,8 +597,7 @@ def human_equivalent_n(sim_g, human_g, human_se, family=None, *, B: int = 2000, 
     errs = []
     for idx in _cluster_draws(cl, B, seed):
         errs.append(float(np.mean((s[idx] - h[idx]) ** 2) - np.mean(se[idx] ** 2)))
-    errs = np.asarray(errs)
-    lo_err, hi_err = np.quantile(errs, alpha / 2), np.quantile(errs, 1 - alpha / 2)
+    lo_err, hi_err = _pct(errs, alpha, err, len(np.unique(cl)))
     out.update({"n": n, "n_per_arm": n / 2, "ci": [_n_from(float(hi_err), h2), _n_from(float(lo_err), h2)],
                 "note": "N = total two-arm human sample; ci[1] None = the error may be within the human noise"
                 if lo_err <= 0 else "N = total two-arm human sample"})
@@ -572,11 +628,14 @@ def effect_section(sim_g, human_g, human_se=None, family=None, *, B: int = 2000,
     'worth ~N humans' for the raw and the LOO-corrected simulation next to the baseline that predicts every
     effect as the mean of the other human effects (LOO). When the simulation is not worth more humans than that
     baseline, a note says so. Extra keys: fit (exaggeration_ratio), human_n {raw, corrected, baseline}."""
-    fit = exaggeration_ratio(sim_g, human_g, family, B=B, seed=seed, alpha=alpha)
+    fit = exaggeration_ratio(sim_g, human_g, family, human_se=human_se, B=B, seed=seed, alpha=alpha)
     rows = [["exaggeration ratio (median |sim| / |human|)", _fmt(fit.get("ratio")), _ci(fit.get("ratio_ci")),
              fit.get("verdict", "")],
             ["slope sim ~ human (1 = right size)", _fmt(fit.get("slope")), _ci(fit.get("slope_ci")),
              "family-clustered CI" if family is not None else "effect-resampled CI"]]
+    if fit.get("slope_corrected") is not None:
+        rows.append(["slope corrected for human noise", _fmt(fit["slope_corrected"]), _ci(fit.get("slope_corrected_ci")),
+                     f"reliability {_fmt(fit.get('reliability'))}"])
     loo = fit.get("loo") or {}
     notes = [f"{fit['k']} effects" + (f" in {fit['families']} families" if fit.get("families") else "")
              + "; corrections are leave-one-" + ("family" if loo.get("by") == "family" else "effect")
@@ -602,9 +661,15 @@ def effect_section(sim_g, human_g, human_se=None, family=None, *, B: int = 2000,
             rows.append([label, _fmt_n(r.get("n")) if r.get("n") is not None else "none", _ci(r.get("ci"), _fmt_n),
                          "within human noise" if r.get("n") is None and r.get("err_var") is not None
                          and r["err_var"] <= 0 else ""])
-        best = max((human_n[x].get("n") or 0) for x in ("raw", "corrected"))
-        bn = human_n["baseline"].get("n")
-        if bn is not None and best <= bn:
+        def worth(r):          # within the human noise beats any finite N; no estimate (too few) is 0
+            if r.get("n") is not None:
+                return r["n"]
+            return math.inf if r.get("err_var") is not None and r["err_var"] <= 0 else 0.0
+        best, bn = max(worth(human_n["raw"]), worth(human_n["corrected"])), worth(human_n["baseline"])
+        if math.isinf(bn):
+            notes.append("The mean-effect baseline is already within the human noise: these effects cannot show "
+                         "that the simulation adds information.")
+        elif best <= bn:
             notes.append(f"The simulation is not worth more humans than the mean-effect baseline (~{_fmt_n(bn)}): its "
                          "N reflects that effects are small, not information from the model.")
         notes.append("N = total two-arm human sample whose sampling error matches the error left after removing "

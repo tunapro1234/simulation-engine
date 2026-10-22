@@ -1,6 +1,7 @@
 """simengine.sim.experiment: between/within experiments on a panel, exaggeration ratio, LOO correction,
 human-equivalent N, card section."""
 import hashlib
+import json
 import math
 import re
 import unittest
@@ -12,7 +13,7 @@ from simengine.llm import FakeLLM
 from simengine.llm.fake import survey_responder
 from simengine.sim import (correct_effects, effect_section, experiment, experiment_frame, exaggeration_ratio,
                            hedges_g, human_equivalent_n)
-from simengine.sim.experiment import assign_conditions, paired_g
+from simengine.sim.experiment import _pct, _stretch, assign_conditions, paired_g
 
 SD = 10.0      # per-person spread of the fake answers (0-100 scale)
 
@@ -27,13 +28,20 @@ def _noise(pid: str) -> float:
 
 def responder(true_g: dict, mult: float, neutral_mult: float = 0.0):
     """Panel answers = 50 + SD * (noise + mult * true_g[condition]); the condition is read from the
-    '[cond=<name>]' tag in the stimulus. The no_persona arm ('typical adult') gets neutral_mult instead."""
+    '[cond=<name>]' tag in the stimulus. The no_persona arm ('typical adult') gets neutral_mult instead (set
+    here: survey_responder keeps value_fn out of that arm and gives it the hashed default)."""
     def respond(system, user):
         m = re.search(r"\[cond=([^\]]+)\]", user)
         g = true_g.get(m.group(1), 0.0) if m else 0.0
-        k = neutral_mult if "typical adult" in user.lower() else mult
-        fn = lambda pid, qid, spec: 50 + SD * (_noise(pid) + k * g)   # noqa: E731
-        return survey_responder(fn)(system, user)
+        neutral = "typical adult" in user.lower()
+        val = lambda pid: 50 + SD * (_noise(pid) + (neutral_mult if neutral else mult) * g)   # noqa: E731
+        rows = json.loads(survey_responder(lambda pid, qid, spec: val(pid))(system, user))
+        if neutral:
+            for r in rows:
+                for f, v in r.items():
+                    if f != "id" and isinstance(v, (int, float)) and not isinstance(v, bool):
+                        r[f] = min(100.0, max(0.0, val(str(r["id"]))))
+        return json.dumps(rows)
     return respond
 
 
@@ -191,6 +199,36 @@ class TestCalibration(unittest.TestCase):
         self.assertIn("exaggeration ratio", md)
         no_se = effect_section(f.pred_g, f.truth, family=f.group, B=100)
         self.assertTrue(any("human_se" in n for n in no_se["notes"]))
+
+    def test_few_family_ci_and_corrected_slope(self):
+        rng = np.random.default_rng(3)
+        th = rng.choice([-1, 1], 60) * rng.uniform(0.1, 0.6, 60)
+        fam = np.repeat(np.arange(20), 3)
+        sim, h = 2 * th + rng.normal(0, 0.1, 60), th + rng.normal(0, 0.15, 60)    # noisy human effects
+        fit = exaggeration_ratio(sim, h, fam, human_se=0.15, B=300)
+        self.assertLess(fit["slope"], fit["slope_corrected"] - 0.15)           # OLS attenuated by the human noise
+        self.assertAlmostEqual(fit["slope_corrected"], 2.0, delta=0.25)
+        self.assertLess(fit["slope_corrected_ci"][0], fit["slope_corrected"])
+        self.assertAlmostEqual(fit["reliability"], 1 - 0.15 ** 2 / np.var(h, ddof=1))
+        # few clusters: the percentile CI is pushed away from the estimate by t(G-1) / z * sqrt(G / (G-1))
+        self.assertAlmostEqual(_stretch(3, 0.05), 4.302653 / 1.959964 * math.sqrt(1.5), places=4)
+        self.assertLess(_stretch(1000, 0.05), 1.01)
+        d = list(np.linspace(0, 1, 101))
+        plain, wide = _pct(d, 0.05), _pct(d, 0.05, 0.5, 3)
+        self.assertAlmostEqual(wide[1] - 0.5, _stretch(3, 0.05) * (plain[1] - 0.5))
+        few = exaggeration_ratio(sim[:9], h[:9], fam[:9], B=300)
+        self.assertLess(few["ratio_ci"][0], few["ratio"])
+        self.assertGreater(few["ratio_ci"][1], few["ratio"])
+        self.assertIsNone(exaggeration_ratio(sim, h, fam, human_se=1.0, B=50)["slope_corrected"])
+
+    def test_section_within_noise_is_not_worse_than_baseline(self):
+        rng = np.random.default_rng(5)
+        h = rng.normal(0, 0.4, 30)
+        fam = np.repeat(np.arange(10), 3)
+        sec = effect_section(h + rng.normal(0, 0.02, 30), h, 0.1, family=fam, B=200)   # error far below se^2
+        self.assertIsNone(sec["human_n"]["raw"]["n"])
+        self.assertIsNotNone(sec["human_n"]["baseline"]["n"])
+        self.assertFalse(any("not worth more humans" in n for n in sec["notes"]))
 
     def test_too_few(self):
         self.assertEqual(exaggeration_ratio([1, 2], [1, 1])["verdict"], "too few")
