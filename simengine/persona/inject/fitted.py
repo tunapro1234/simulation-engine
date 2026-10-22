@@ -19,7 +19,7 @@ Injectors (family "fitted"; all render `key: value` lines like plain_fields, so 
 - fitted_stepwise: coordinate ascent over attribute inclusion with `simengine.research.Loop` (one flip per turn,
   kept only if the paired bootstrap CI on train cells excludes 0; simpler ties kept).
 - fitted_grips: GrIPS edit search over attribute lines (delete / swap / add-back), m candidates per iteration,
-  patience P (Prasad et al. 2022, arXiv:2203.07281).
+  patience P, score = balanced accuracy + 10 x answer entropy (Prasad et al. 2022, arXiv:2203.07281).
 - fitted_opro: OPRO over the framing sentence above the attribute lines (`simengine.research.prompt_evolution.opro`;
   Yang et al. 2023, arXiv:2309.03409).
 
@@ -32,12 +32,13 @@ and at render, and is never a forest feature for that question (`hidden(question
 from __future__ import annotations
 
 import json
+import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Sequence
 
 from ._base import Injector, Prompt, parse_option, register
-from .compare import _key, _truth_fn
+from .compare import UNPARSED, _key, _truth_fn
 
 HEADER = "You are a person with these attributes:"
 TAIL = "Answer as this person would."
@@ -227,7 +228,7 @@ class _Ctx:
         self.calls = 0
         self._ev = None
 
-    def score(self, text: str, units) -> list[float]:
+    def score(self, text: str, units) -> dict:
         from ...llm.parallel import parallel_map
 
         cfg = self.inj.cfg_of(text)
@@ -237,16 +238,14 @@ class _Ctx:
                                                         **self.llm_kw),
                            prompts, parallel=self.parallel, return_exceptions=True)
         self.calls += len(prompts)
-        sc = []
+        preds = []
         for u, r in zip(units, out):
-            if isinstance(r, Exception):
-                sc.append(0.0)
-                continue
             try:
-                sc.append(float(_key(self.parse(r.text, u["question"])) == _key(u["truth"])))
-            except Exception:  # noqa: BLE001 - a broken parser cell counts as wrong
-                sc.append(0.0)
-        return sc
+                preds.append(UNPARSED if isinstance(r, Exception) else _key(self.parse(r.text, u["question"])))
+            except Exception:  # noqa: BLE001 - a broken parser cell counts as unparsed (wrong)
+                preds.append(UNPARSED)
+        sc = [float(p != UNPARSED and p == _key(u["truth"])) for u, p in zip(units, preds)]
+        return {"scores": sc, "outputs": preds}
 
     @property
     def ev(self):
@@ -297,11 +296,12 @@ class _Ctx:
 @register
 class FittedTopK(_Fitted):
     """Random-forest attribute selection. Fröhling et al. 2026 (§3.2, "feature importance" baseline) fit one forest
-    per target question from the other variables and keep its k=5 most important; Rupprecht et al. 2025 (§3) sum the
-    top-10 importances of many forests into one ranking (TOP-k). Held-out questions have no answers at fit time, so
-    here one forest per FIT question, the `per_model` most important attributes of each add their importance to a
-    global ranking, keep the top k (one set for every held-out question). No LLM call; one-hot columns are summed back
-    to their attribute."""
+    per target question from the other variables and keep its k=5 most important; Rupprecht et al. 2025 (§3)
+    aggregate the top-10 importances of many forests into one ranking (TOP-k; the paper does not say how, here a
+    sum). Held-out questions have no answers at fit time, so here one forest per FIT question, the `per_model` most
+    important attributes of each add their importance to a global ranking, keep the top k (one set for every
+    held-out question). Forest settings follow Rupprecht et al. App. C.2 (100 trees, max_depth 10,
+    min_samples_leaf 2). No LLM call; one-hot columns are summed back to their attribute."""
     name = "fitted_topk"
     paper = ("Fröhling et al. 2026, arXiv:2609.02526 (RF feature-importance selection, k=5); Rupprecht et al. 2025, "
              "arXiv:2511.21722 (summed top-10 importances, TOP-k)")
@@ -309,18 +309,22 @@ class FittedTopK(_Fitted):
                    "per_model importances rank the attributes; system shows the top k as key: value lines.")
     llm_free = True
 
-    def __init__(self, k: int = 5, per_model: int = 10, n_estimators: int = 200, **params: Any):
-        super().__init__(k=k, per_model=per_model, n_estimators=n_estimators, **params)
+    def __init__(self, k: int = 5, per_model: int = 10, n_estimators: int = 100, max_depth: int | None = 10,
+                 min_samples_leaf: int = 2, **params: Any):
+        super().__init__(k=k, per_model=per_model, n_estimators=n_estimators, max_depth=max_depth,
+                         min_samples_leaf=min_samples_leaf, **params)
         if k < 1:
             raise ValueError("k must be >= 1")
         self.k, self.per_model, self.n_estimators = int(k), int(per_model), int(n_estimators)
+        self.max_depth, self.min_samples_leaf = max_depth, int(min_samples_leaf)
 
     def estimate_calls(self, n_attrs, n_train, n_val):
         return {"calls": 0, "optimizer_calls": 0}
 
     def _search(self, ctx: _Ctx, **kw) -> FitResult:
         weights = forest_importance(ctx.cells["train"], ctx.attrs, self.person_fields, per_model=self.per_model,
-                                    n_estimators=self.n_estimators, seed=self.seed)
+                                    n_estimators=self.n_estimators, max_depth=self.max_depth,
+                                    min_samples_leaf=self.min_samples_leaf, seed=self.seed)
         rank = sorted(ctx.attrs, key=lambda a: (-weights[a], ctx.attrs.index(a)))
         keys = [a for a in rank if weights[a] > 0][:self.k]
         if not keys:
@@ -338,9 +342,11 @@ class FittedTopK(_Fitted):
 
 
 def forest_importance(cells: Sequence[dict], attrs: Sequence[str], fields_of: Callable[[dict], dict], *,
-                      per_model: int = 10, n_estimators: int = 200, seed: int = 0) -> dict[str, float]:
+                      per_model: int = 10, n_estimators: int = 100, max_depth: int | None = 10,
+                      min_samples_leaf: int = 2, seed: int = 0) -> dict[str, float]:
     """{attribute: summed importance}: one RandomForestClassifier per question over the cells' people, numeric
-    attributes as numbers (missing -> median), others one-hot (missing is its own level)."""
+    attributes as numbers (missing -> median), others one-hot (missing is its own level). Defaults: Rupprecht et
+    al. 2025, App. C.2."""
     try:
         import numpy as np
         import pandas as pd
@@ -376,7 +382,8 @@ def forest_importance(cells: Sequence[dict], attrs: Sequence[str], fields_of: Ca
         if not cols:
             continue
         X = pd.concat(cols, axis=1).to_numpy(float)
-        rf = RandomForestClassifier(n_estimators=n_estimators, random_state=seed).fit(X, y)
+        rf = RandomForestClassifier(n_estimators=n_estimators, max_depth=max_depth, min_samples_leaf=min_samples_leaf,
+                                    random_state=seed).fit(X, y)
         imp: dict[str, float] = {}
         for o, v in zip(owner, rf.feature_importances_):
             imp[o] = imp.get(o, 0.0) + float(v)
@@ -449,21 +456,27 @@ class FittedStepwise(_Fitted):
 class FittedGrips(_Fitted):
     """GrIPS (Prasad et al. 2022, Alg. 1) with attribute lines as the phrases: each iteration samples m candidates,
     each with l edits from {delete a line (kept for later), swap two lines, add back a deleted line at a random
-    position}; the best candidate replaces the base only if it scores higher on train cells; patience P.
-    Paraphrase (PEGASUS in the paper) has no meaning for `key: value` lines and is left out; the score is cell
-    accuracy, not the paper's balanced accuracy + 10 x answer entropy."""
+    position}; the best candidate replaces the base only if it scores higher on train cells; patience P as in
+    Alg. 1 (P failed iterations are allowed, the next one stops). Paraphrase (PEGASUS in the paper) has no meaning
+    for `key: value` lines and is left out. objective="grips" (default) is the paper's §3.2 score per train
+    question, balanced accuracy (0-100) + entropy_weight x entropy of the predicted answers (alpha = 10), averaged
+    over train questions; objective="accuracy" uses mean cell accuracy."""
     name = "fitted_grips"
     paper = "Prasad et al. 2022, GrIPS, arXiv:2203.07281"
     description = ("Edit search over the attribute lines (delete / swap / add-back; m candidates per iteration, "
-                   "patience P, accept only a higher train score); validation re-rank of the visited configs.")
+                   "patience P, accept only a higher train GrIPS score); validation re-rank of the visited configs.")
     OPS = ("del", "swap", "add")
 
     def __init__(self, m: int = 5, l: int = 1, n_iter: int = 10, patience: int = 2, start: str = "all",
-                 **params: Any):
+                 objective: str = "grips", entropy_weight: float = 10.0, **params: Any):
         if start not in ("empty", "all"):
             raise ValueError("start must be 'empty' or 'all'")
-        super().__init__(m=m, l=l, n_iter=n_iter, patience=patience, start=start, **params)
+        if objective not in ("grips", "accuracy"):
+            raise ValueError("objective must be 'grips' or 'accuracy'")
+        super().__init__(m=m, l=l, n_iter=n_iter, patience=patience, start=start, objective=objective,
+                         entropy_weight=entropy_weight, **params)
         self.m, self.l, self.n_iter, self.patience, self.start = int(m), int(l), int(n_iter), int(patience), start
+        self.objective, self.entropy_weight = objective, float(entropy_weight)
 
     def estimate_calls(self, n_attrs, n_train, n_val):
         return {"calls": (1 + self.n_iter * self.m) * n_train + self.top_k * n_val, "optimizer_calls": 0}
@@ -485,11 +498,18 @@ class FittedGrips(_Fitted):
             keys.insert(rng.randrange(len(keys) + 1), pool.pop(rng.randrange(len(pool))))
         return keys, pool, op
 
+    def _cand(self, ctx: _Ctx, keys: list[str], origin: str, step: int = 0):
+        c = ctx.ev.candidate(self.text_of(keys), self.name, origin, step=step)
+        if self.objective == "grips":       # fitness drives acceptance and the top_k for validation; .train stays accuracy
+            c = replace(c, fitness=grips_score(ctx.cells["train"], ctx.ev.scores(c.text, "train")["outputs"],
+                                               self.entropy_weight))
+        return c
+
     def _search(self, ctx: _Ctx, registry_dir=None, prereg=None, **kw) -> FitResult:
         rng = random.Random(self.seed)
         base = list(ctx.attrs) if self.start == "all" else []
         pool = [] if self.start == "all" else list(ctx.attrs)
-        base_c = ctx.ev.candidate(self.text_of(base), self.name, "start")
+        base_c = self._cand(ctx, base, "start")
         hist, patience, accepted = [base_c], self.patience, 0
         for it in range(1, self.n_iter + 1):
             cands = []
@@ -502,7 +522,7 @@ class FittedGrips(_Fitted):
                     k, p, op = e
                     ops.append(op)
                 if ops:
-                    c = ctx.ev.candidate(self.text_of(k), self.name, "+".join(ops), step=it)
+                    c = self._cand(ctx, k, "+".join(ops), step=it)
                     hist.append(c)
                     cands.append((c, p))
             if not cands:
@@ -511,13 +531,34 @@ class FittedGrips(_Fitted):
             if best.fitness > base_c.fitness:
                 base, pool, base_c, patience = self.cfg_of(best.text)["keys"], best_pool, best, self.patience
                 accepted += 1
-            else:
+            elif patience > 0:                  # Alg. 1: decrement while patience is left, else stop
                 patience -= 1
-                if patience <= 0:
-                    break
+            else:
+                break
         return ctx.finish(hist, self.name, registry_dir, prereg,
-                          meta={"iterations": it if self.n_iter else 0, "accepted": accepted,
-                                "base": self.cfg_of(base_c.text)["keys"]})
+                          meta={"iterations": it if self.n_iter else 0, "accepted": accepted, "objective": self.objective,
+                                "base": self.cfg_of(base_c.text)["keys"], "base_fitness": base_c.fitness})
+
+
+def grips_score(units: Sequence[dict], preds: Sequence[Any], entropy_weight: float = 10.0) -> float:
+    """GrIPS score (Prasad et al. 2022, §3.2) averaged over questions: 100 x balanced accuracy + entropy_weight x
+    H(predicted answers), H = -sum_y p_y log p_y with p_y = share of the question's cells predicted y (unparsed
+    replies count in the denominator, not as a label)."""
+    by_q: dict[str, list[tuple[str, str]]] = {}
+    for u, p in zip(units, preds):
+        by_q.setdefault(str(u["question"]["id"]), []).append((_key(u["truth"]), str(p)))
+    out = []
+    for pairs in by_q.values():
+        recall = [sum(p == c for t, p in pairs if t == c) / sum(t == c for t, _ in pairs)
+                  for c in sorted({t for t, _ in pairs})]
+        n = len(pairs)
+        counts: dict[str, int] = {}
+        for _, p in pairs:
+            if p != UNPARSED:
+                counts[p] = counts.get(p, 0) + 1
+        h = -sum(c / n * math.log(c / n) for c in counts.values())
+        out.append(100.0 * sum(recall) / len(recall) + entropy_weight * h)
+    return sum(out) / len(out)
 
 
 @register
@@ -565,4 +606,4 @@ class FittedOpro(_Fitted):
 
 
 __all__ = ["FittedTopK", "FittedStepwise", "FittedGrips", "FittedOpro", "FitResult", "NotFitted", "HeldOutViolation",
-           "split_questions", "forest_importance", "hidden", "HEADER", "TAIL"]
+           "split_questions", "forest_importance", "grips_score", "hidden", "HEADER", "TAIL"]
