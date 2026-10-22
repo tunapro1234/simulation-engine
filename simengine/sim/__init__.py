@@ -6,6 +6,11 @@ Runners (each returns a JSON-safe dict; a matching *_frame turns it into an Eval
   ab_test / ab_frame / ab_many        A/B test on a persona panel (PAARS-style), many-test batch prompt
   roundtable / roundtable_frame       multi-round group discussion
   strategy / strategy_frame           2+ scenarios x segment
+  experiment / experiment_frame       between-subject (or within) k-condition experiment: per-condition means,
+                                      Hedges g with SE / CI, no_persona arm g; one frame row per effect
+  exaggeration_ratio, correct_effects, human_equivalent_n, effect_section
+                                      simulated vs human effects: median |sim|/|human|, slope (family CI), LOO
+                                      correction, "worth ~N humans", card section
   segment_distribution                ask the model directly for each segment's answer distribution
   persona_distribution                per-persona probability vectors
   predict_people / prediction_frame   per-person L0 / L1 / L2 / SSR prediction prompts
@@ -20,6 +25,8 @@ What works and what does not, with measured numbers: docs/modules/sim.md.
 """
 from .ab import ab_frame, ab_many, ab_test, confidence_check, paars_decision
 from .constrained import ConstrainedResult, FieldSpec, ask_constrained, completion_summary, validate_answers
+from .experiment import (correct_effects, effect_section, exaggeration_ratio, experiment, experiment_frame,
+                         hedges_g, human_equivalent_n)
 from .distribution import (DIST_TEMPLATE, FRAMINGS_HIDDEN, FRAMINGS_NAMED, distribution_frame, distribution_prompt,
                            persona_distribution, segment_distribution, w1_ordinal)
 from .panel import (REFRAME_NOTE, REFRAME_NOTE_GENERIC, Usage, ask_many, ask_panel, build_prompts, looks_like_refusal,
@@ -38,6 +45,8 @@ __all__ = [
     "ab_test", "ab_frame", "ab_many", "confidence_check", "paars_decision",
     "roundtable", "roundtable_frame", "CONFIRMATION_BIAS", "KEEP_VIEW",
     "strategy", "strategy_frame",
+    "experiment", "experiment_frame", "hedges_g", "exaggeration_ratio", "correct_effects", "human_equivalent_n",
+    "effect_section",
     "segment_distribution", "persona_distribution", "distribution_prompt", "distribution_frame", "w1_ordinal",
     "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE",
     "PredictionSpec", "AMAZON", "predict_people", "prediction_frame", "prompt_l0", "prompt_l1", "prompt_l2",
