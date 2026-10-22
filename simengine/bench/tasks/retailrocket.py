@@ -368,11 +368,13 @@ def _rank_lists(cands: pd.DataFrame, n: int, k: int) -> np.ndarray:
 
 
 def _hits(frame: pd.DataFrame, col: str, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """(hit, reciprocal rank) per row, top k of the ranked list."""
+    """(hit, reciprocal rank) per row, top k of the ranked list. Repeated ids count once (first position) and
+    negative ids are padding, as in the source metric (`sonraki_metrik`: unique per session, then rank)."""
     truth = frame["truth"].to_numpy(np.int64)
     rank = np.zeros(len(frame))
     for r, (lst, t) in enumerate(zip(frame[col], truth)):
-        a = np.asarray(lst, np.int64)[:k]
+        a = np.asarray(lst, np.int64).ravel()
+        a = pd.unique(a[a >= 0])[:k]
         j = np.flatnonzero(a == t)
         rank[r] = j[0] + 1 if len(j) else 0
     return (rank > 0).astype(float), np.where(rank > 0, 1.0 / np.maximum(rank, 1), 0.0)
@@ -420,6 +422,8 @@ class RetailRocketNext(_RetailRocket):
     def __init__(self, **options):
         super().__init__(**options)
         self.k = int(self.options.get("k", K))
+        if self.k < 1:
+            raise ValueError("k must be >= 1")
         if self.k != K:
             self.metrics = tuple(Metric(m.name.replace("@20", f"@{self.k}"), m.higher_is_better, m.fn, m.description)
                                  for m in type(self).metrics)
