@@ -358,7 +358,7 @@ class SocSci210(BenchTask):
     accepted_options = {
         "split": '"study" | "condition" | "outcome" (default "study")',
         "max_levels": "drop cells whose scale has more levels (default 101)",
-        "min_n": "drop cells with fewer in-scale answers (default 1)",
+        "min_n": "drop cells with fewer in-scale answers (default 1; a cell with none is always dropped)",
         "min_in_scale": "drop cells where a smaller share of answers lies on the stated scale (default 0.9)",
         "k": "tfidf_knn neighbours (default 10)",
         "per_item": 'tfidf_knn: max neighbour cells per train outcome, 0 = no cap (default 1 for split="study", '
@@ -384,7 +384,7 @@ class SocSci210(BenchTask):
         if split not in SPLITS:
             raise ValueError(f"split must be one of {SPLITS}")
         h, src = load_hist(root)
-        max_k, min_n = int(self.options.get("max_levels", 101)), int(self.options.get("min_n", 1))
+        max_k, min_n = int(self.options.get("max_levels", 101)), max(int(self.options.get("min_n", 1)), 1)
         min_share = float(self.options.get("min_in_scale", 0.9))
         n_all, n_unparsed = len(h), int((h.levels < 2).sum())
         n_offscale = int(((h.levels >= 2) & (h.in_scale < min_share)).sum())
