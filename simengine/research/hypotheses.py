@@ -58,8 +58,8 @@ PROTOCOLS = ("round_robin", "random")
 def _jsonable(o):
     if isinstance(o, dict):
         return {str(k): _jsonable(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple, set)):
-        return [_jsonable(v) for v in o]
+    if isinstance(o, (list, tuple, set, np.ndarray, pd.Series)):
+        return [_jsonable(v) for v in (o.tolist() if hasattr(o, "tolist") else o)]
     if isinstance(o, np.generic):
         o = o.item()
     if isinstance(o, float) and not math.isfinite(o):
@@ -184,40 +184,52 @@ def hypothesis_prompt(scenario: str, n: int = 1, max_causes: int = 3, max_levels
             f"{max_levels} levels each; levels of continuous/count causes are numbers. Format:\n{_HYP_FORMAT}")
 
 
+# one number: thousands groups "1,250" / "1,250.5" first, then a plain or decimal-comma number ("3,5")
+_NUM = r"-?(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?)"
+
+
+def _to_float(s: str) -> float:
+    return float(s.replace(",", "") if re.fullmatch(r"-?\d{1,3}(?:,\d{3})+(?:\.\d+)?", s) else s.replace(",", "."))
+
+
 def _numeric(v) -> float | None:
     if isinstance(v, bool):
         return float(v)
     if isinstance(v, (int, float, np.number)) and math.isfinite(float(v)):
         return float(v)
     if isinstance(v, str):
-        m = re.fullmatch(r"\s*\$?\s*(-?\d+(?:[.,]\d+)?)\s*%?\s*", v)
+        m = re.fullmatch(rf"\s*\$?\s*({_NUM})\s*%?\s*", v)
         if m:
-            return float(m.group(1).replace(",", "."))
+            return _to_float(m.group(1))
     return None
+
+
+def _norm_name(s) -> str:
+    return re.sub(r"\W+", "_", str(s).strip()).strip("_").lower()
 
 
 def _clean_variable(d: dict, role: str, max_levels: int, problems: list) -> Variable | None:
     if not isinstance(d, dict) or not str(d.get("name", "")).strip():
         problems.append(f"{role}: missing name")
         return None
-    name = re.sub(r"\W+", "_", str(d["name"]).strip()).strip("_").lower()
+    name = _norm_name(d["name"])
     kind = str(d.get("kind", "continuous")).lower()
     if kind not in VARIABLE_KINDS:
         problems.append(f"{role} {name}: kind {kind!r} -> continuous")
         kind = "continuous"
     levels = list(d.get("levels") or [])
+    if role == "cause" and kind in NUMERIC_KINDS:
+        nums = [_numeric(v) for v in levels]
+        bad = [v for v, x in zip(levels, nums) if x is None]
+        if bad:
+            problems.append(f"cause {name}: dropped non-numeric levels {bad}")
+        levels = [x for x in nums if x is not None]
     dedup = []
-    for v in levels:
+    for v in levels:                    # after conversion, so 10 and "10" are one level
         if v not in dedup:
             dedup.append(v)
     levels = dedup
     if role == "cause":
-        if kind in NUMERIC_KINDS:
-            nums = [_numeric(v) for v in levels]
-            bad = [v for v, x in zip(levels, nums) if x is None]
-            if bad:
-                problems.append(f"cause {name}: dropped non-numeric levels {bad}")
-            levels = [x for x in nums if x is not None]
         if len(levels) > max_levels:
             problems.append(f"cause {name}: {len(levels)} levels, kept the first {max_levels}")
             levels = levels[:max_levels]
@@ -272,10 +284,15 @@ def parse_hypotheses(obj: Any, scenario: str, max_causes: int = 3, max_levels: i
                 v.agent = None
         if outcome is not None and outcome.agent is None:
             outcome.agent = agents[0]
+        kept = [c.name for c in causes]          # after the max_causes cut, so no interaction names a dropped cause
         inter = []
         for pair in h.get("interactions") or []:
-            if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(x in seen for x in pair) and pair[0] != pair[1]:
-                inter.append((pair[0], pair[1]))
+            ab = [_norm_name(x) for x in pair] if isinstance(pair, (list, tuple)) and len(pair) == 2 else []
+            if len(ab) == 2 and all(x in kept for x in ab) and ab[0] != ab[1]:
+                if (ab[0], ab[1]) in inter or (ab[1], ab[0]) in inter:
+                    p.append(f"interaction {pair}: duplicate, dropped")
+                else:
+                    inter.append((ab[0], ab[1]))
             else:
                 p.append(f"interaction {pair}: unknown causes, dropped")
         problems += [f"hypothesis {i}: {s}" for s in p]
@@ -438,6 +455,11 @@ def _agent_facts(hyp: Hypothesis, row: dict, agent: str) -> list[str]:
     return out
 
 
+def _outcome_agent(hyp: Hypothesis) -> str:
+    """The agent who answers the survey (parse_hypotheses sets it; hand-built hypotheses fall back to agents[0])."""
+    return hyp.outcome.agent or (hyp.agents[0] if hyp.agents else "participant")
+
+
 def _persona(hyp: Hypothesis, row: dict, agent: str) -> str:
     facts = _agent_facts(hyp, row, agent)
     return (f"You are the {agent} in this scenario: {hyp.scenario}\n" +
@@ -448,17 +470,19 @@ ANSWER_FORMAT = 'Reply with JSON only: {"answer": <number>}.'
 
 
 def parse_number(text: str | None, lo: float | None = None, hi: float | None = None) -> float:
-    """{"answer": x} or the first number in the text; NaN if none or outside [lo, hi]."""
+    """{"answer": x} or the first number in the text; NaN if none or outside [lo, hi]. A JSON reply whose answer
+    key holds no number (null, "unsure") is NaN, not the first number elsewhere in the text. "1,250" reads as
+    1250 and "3,5" as 3.5, in JSON values and free text alike."""
     obj = json_extract(text, default=None) if text else None
-    v = None
+    v, keyed = None, False
     if isinstance(obj, dict):
         for key in ("answer", "value", "prediction", "estimate"):
             if key in obj:
-                v = _numeric(obj[key])
+                v, keyed = _numeric(obj[key]), True
                 break
-    if v is None and text:
-        m = re.search(r"-?\d+(?:\.\d+)?", str(text).replace(",", ""))
-        v = float(m.group(0)) if m else None
+    if v is None and text and not keyed:
+        m = re.search(_NUM, str(text))
+        v = _to_float(m.group(0)) if m else None
     if v is None or (lo is not None and v < lo) or (hi is not None and v > hi):
         return float("nan")
     return float(v)
@@ -483,7 +507,7 @@ class InterviewSimulator:
     def __call__(self, hyp: Hypothesis, df: pd.DataFrame, log: DecisionLog | None = None) -> np.ndarray:
         log = _log(log)
         rows = df.to_dict("records")
-        prompts = [(_persona(hyp, r, hyp.outcome.agent) + f"\n(Participant {int(r.get('rep', 0)) + 1}.)",
+        prompts = [(_persona(hyp, r, _outcome_agent(hyp)) + f"\n(Participant {int(r.get('rep', 0)) + 1}.)",
                     _survey_user(hyp)) for r in rows]
         resp = self.llm.map(prompts, max_tokens=self.max_tokens, parallel=self.parallel, **self.kw)
         y = np.array([parse_number(r.text, hyp.outcome.lo, hyp.outcome.hi) for r in resp])
@@ -498,17 +522,21 @@ JUDGE_SYSTEM = ("You monitor a conversation between agents in a social science s
 
 class ConversationSimulator:
     """Multi-agent LLM conversation per design row, as in Manning et al. (2024): agents speak in turn
-    (`protocol` "round_robin" or seeded "random"), after every statement from the second one an external LLM judge
-    says whether the conversation is over, it stops at `max_statements` (paper: 20); then the outcome agent answers
-    the survey question with the transcript in view. All rows advance in lockstep, one `llm.map` per step."""
+    (`protocol` "round_robin" = the paper's "ordered", or seeded "random" = random first speaker, nobody twice in a
+    row), after every statement an external LLM judge (the paper's coordinator) says whether the conversation is over
+    (`judge_from` = number of statements before it is first asked; paper: 1, after each agent speaks), it stops at
+    `max_statements` (paper: 20); then the outcome agent answers the survey question with the transcript in view.
+    All rows advance in lockstep, one `llm.map` per step."""
     name = "conversation"
 
     def __init__(self, llm, *, judge_llm=None, protocol: str = "round_robin", max_statements: int = 20,
-                 max_tokens: int = 200, parallel: int = 4, seed: int = 0, keep_transcripts: bool = True, **kw):
+                 judge_from: int = 1, max_tokens: int = 200, parallel: int = 4, seed: int = 0,
+                 keep_transcripts: bool = True, **kw):
         if protocol not in PROTOCOLS:
             raise ValueError(f"protocol must be one of {PROTOCOLS}")
         self.llm, self.judge = llm, judge_llm or llm
         self.protocol, self.max_statements, self.max_tokens = protocol, max_statements, max_tokens
+        self.judge_from = max(1, int(judge_from))
         self.parallel, self.seed, self.keep, self.kw = parallel, seed, keep_transcripts, kw
         self.transcripts: list[list[tuple[str, str]]] = []
 
@@ -538,7 +566,7 @@ class ConversationSimulator:
             for i, r in zip(active, resp):
                 tr[i].append((who[i], (r.text or "").strip()))
                 last[i] = who[i]
-            if step >= 1:
+            if step + 1 >= self.judge_from:
                 jr = self.judge.map([(JUDGE_SYSTEM, f"{hyp.scenario}\n\n{txt(i)}\n\nIs the conversation over?")
                                      for i in active], max_tokens=5, parallel=self.parallel)
                 calls += len(jr)
@@ -546,14 +574,14 @@ class ConversationSimulator:
                 for i in done:
                     ended_by[i] = "judge"
                 active = [i for i in active if i not in done]
-        resp = self.llm.map([(_persona(hyp, rows[i], hyp.outcome.agent), _survey_user(hyp, txt(i)))
+        resp = self.llm.map([(_persona(hyp, rows[i], _outcome_agent(hyp)), _survey_user(hyp, txt(i)))
                              for i in range(n)], max_tokens=self.max_tokens, parallel=self.parallel, **self.kw)
         calls += len(resp)
         y = np.array([parse_number(r.text, hyp.outcome.lo, hyp.outcome.hi) for r in resp])
         if self.keep:
             self.transcripts = tr
         lens = [len(t) for t in tr]
-        log.log("simulate", hypothesis=hyp.id, simulator=self.name, protocol=self.protocol, rows=n, calls=calls,
+        log.log("simulate", hypothesis=hyp.id, simulator=self.name, protocol=self.protocol, judge_from=self.judge_from, rows=n, calls=calls,
                 ended_by_judge=ended_by.count("judge"), mean_statements=float(np.mean(lens)) if lens else 0.0,
                 unparsed=int(np.isnan(y).sum()))
         return y
@@ -629,33 +657,37 @@ PATH_SYSTEM = ("You are an expert social scientist. Your task is to predict the 
                "the SCM as accurately as possible based on the experiment described. Reply with JSON only.")
 
 
-def _describe(hyp: Hypothesis, terms: Sequence[str], n_rows: int) -> str:
+def _describe(hyp: Hypothesis, terms: Sequence[str], n_rows: int, all_cells: bool = True) -> str:
     lines = [f"Scenario: {hyp.scenario}", f"Agents: {', '.join(hyp.agents)}",
              f"Outcome: {hyp.outcome.name} ({hyp.outcome.kind}, {hyp.outcome.units or 'no units'}), measured by "
-             f"asking the {hyp.outcome.agent}: \"{hyp.outcome.question}\"", "Causes (treatment values):"]
+             f"asking the {_outcome_agent(hyp)}: \"{hyp.outcome.question}\"", "Causes (treatment values):"]
     for c in hyp.causes:
         coding = "dummy coded vs " + repr(c.levels[0]) if _code(c) is None else "numeric value"
         lines.append(f"- {c.name} ({c.kind}, {c.units or 'no units'}, {coding}), held by "
                      f"{c.agent or 'the scenario'}: {c.levels}")
-    lines.append(f"Every combination of treatment values was simulated; {n_rows} simulations in total.")
+    lines.append(f"Every combination of treatment values was simulated; {n_rows} simulations in total." if all_cells
+                 else f"A random subset of the combinations of treatment values was simulated; {n_rows} simulations "
+                      "in total.")
     lines.append("The SCM is a linear regression of the outcome on the causes with an intercept. Paths "
                  "(unstandardised coefficients, outcome units per cause unit): " + ", ".join(terms))
     return "\n".join(lines)
 
 
-def path_prediction_prompt(hyp: Hypothesis, terms: Sequence[str], n_rows: int) -> str:
+def path_prediction_prompt(hyp: Hypothesis, terms: Sequence[str], n_rows: int, all_cells: bool = True) -> str:
     fmt = json.dumps({"predictions": {t: 0.0 for t in terms}, "sig": {t: True for t in terms}})
-    return (_describe(hyp, terms, n_rows) + "\n\nPredict each path estimate and whether it is significant at "
+    return (_describe(hyp, terms, n_rows, all_cells) + "\n\nPredict each path estimate and whether it is significant at "
             f"the 5% level. Format: {fmt}")
 
 
 def predict_paths(llm, hyp: Hypothesis, terms: Sequence[str], n_rows: int, *, n_samples: int = 1,
-                  max_tokens: int = 600, log: DecisionLog | None = None, **kw) -> pd.DataFrame:
+                  all_cells: bool = True, max_tokens: int = 600, log: DecisionLog | None = None,
+                  **kw) -> pd.DataFrame:
     """LLM forecast of each path (paper Fig. A.11 task). n_samples > 1 asks the same question with a sample number
     appended (distinct cache keys; pass temperature via **kw) and averages. Returns term, predicted, pred_sd,
-    sig_share, n_valid; the forecast's sha256 is logged before any fit."""
+    sig_share, n_valid; the forecast's sha256 is logged before any fit. all_cells=False tells the forecaster the
+    design is a subsample of the factorial (max_cells cut)."""
     log = _log(log)
-    base = path_prediction_prompt(hyp, terms, n_rows)
+    base = path_prediction_prompt(hyp, terms, n_rows, all_cells)
     users = [base if n_samples == 1 else f"{base}\n(forecast {k + 1} of {n_samples})" for k in range(n_samples)]
     resp = llm.map([(PATH_SYSTEM, u) for u in users], max_tokens=max_tokens, **kw)
     vals = {t: [] for t in terms}
@@ -777,7 +809,9 @@ class AutoSocialScience:
         df = design(hyp, self.replicates, max_cells=self.max_cells, seed=self.seed, log=self.log)
         X, _ = encode(hyp, df)
         terms = [t for t in X.columns if X[t].nunique() > 1]
-        pred = predict_paths(self.pred_llm, hyp, terms, len(df), n_samples=self.n_forecasts, log=self.log)
+        full = math.prod(len(c.levels) for c in hyp.causes)
+        pred = predict_paths(self.pred_llm, hyp, terms, len(df), n_samples=self.n_forecasts,
+                             all_cells=df["cell"].nunique() == full, log=self.log)
         df["y"] = self.simulator(hyp, df, self.log)
         paths, info = estimate(hyp, df, "y", backend=self.backend, alpha=self.alpha, log=self.log)
         comp, summ = compare_paths(paths, pred, self.alpha)
@@ -843,7 +877,9 @@ def forecast_experiment(llm, setting: str, conditions: dict[str, str], question:
     (DataFrame / list of dicts; demographic fields), each prompt = a template from `prompt_bank` + profile + stimulus
     + question and scale; answers averaged per condition. `same_profiles` reuses one draw across conditions (paired,
     less noise; the paper drew independently). mode="direct": ask the LLM `n_samples` times for every condition's
-    mean and average. Effects = condition mean - `control` mean; simulated se = sqrt(sd_t^2/n_t + sd_c^2/n_c)."""
+    mean and average. Effects = condition mean - `control` mean. Simulated se: with `same_profiles` the paired se,
+    sd(y_t - y_c) / sqrt(pairs) over respondents valid in both conditions (respondent j has the same profile and
+    template in every condition); otherwise sqrt(sd_t^2/n_t + sd_c^2/n_c). Direct mode: se = NaN."""
     log = _log(log)
     if control not in conditions:
         raise ValueError(f"control {control!r} not in conditions")
@@ -851,7 +887,7 @@ def forecast_experiment(llm, setting: str, conditions: dict[str, str], question:
     lab = f" ({labels[0]} = {lo:g}, {labels[1]} = {hi:g})" if labels else ""
     rng = np.random.default_rng(seed)
     names = list(conditions)
-    rows = []
+    rows, ys = [], {}
     if mode == "simulate":
         prof = (profiles.to_dict("records") if isinstance(profiles, pd.DataFrame) else list(profiles or [{}]))
         draw = lambda: rng.integers(0, len(prof), n_per_condition)
@@ -872,7 +908,7 @@ def forecast_experiment(llm, setting: str, conditions: dict[str, str], question:
         y = np.array([parse_number(r.text, lo, hi) for r in resp])
         own = np.array(owner)
         for c in names:
-            v = y[own == c]
+            v = ys[c] = y[own == c]
             ok = v[np.isfinite(v)]
             rows.append({"condition": c, "mean": float(ok.mean()) if len(ok) else np.nan,
                          "sd": float(ok.std(ddof=1)) if len(ok) > 1 else np.nan, "n": int(len(ok)),
@@ -911,7 +947,16 @@ def forecast_experiment(llm, setting: str, conditions: dict[str, str], question:
     c0 = cond.set_index("condition").loc[control]
     eff = cond[cond.condition != control].copy()
     eff["effect"] = eff["mean"] - c0["mean"]
-    eff["se"] = np.sqrt(eff.sd ** 2 / eff.n.clip(lower=1) + c0.sd ** 2 / max(c0.n, 1)) if mode == "simulate" else np.nan
+    if mode == "simulate" and same_profiles:
+        def paired_se(c):
+            d = ys[c] - ys[control]
+            d = d[np.isfinite(d)]
+            return float(d.std(ddof=1) / math.sqrt(len(d))) if len(d) > 1 else np.nan
+        eff["se"] = [paired_se(c) for c in eff.condition]
+    elif mode == "simulate":
+        eff["se"] = np.sqrt(eff.sd ** 2 / eff.n.clip(lower=1) + c0.sd ** 2 / max(c0.n, 1))
+    else:
+        eff["se"] = np.nan
     return ExperimentForecast(mode, cond, eff[["condition", "effect", "se", "n"]].reset_index(drop=True), calls)
 
 
@@ -948,17 +993,25 @@ def score_effect_forecasts(pred, true, true_se=None, *, alpha: float = 0.05) -> 
 
 def score_condition_forecasts(df: pd.DataFrame, *, study: str = "study", condition: str = "condition",
                               pred: str = "pred_mean", true: str = "true_mean", true_se: str | None = "true_se",
-                              repeats: int = 16, seed: int = 0, alpha: float = 0.05) -> dict:
+                              outcome: str | None = None, repeats: int = 16, seed: int = 0,
+                              alpha: float = 0.05) -> dict:
     """Hewitt et al. (2024) protocol on condition-level means: per repeat pick one control condition per study at
-    random, form every other condition minus that control (predicted and measured; se of a contrast =
-    sqrt(se_t^2 + se_c^2)), pool across studies and score; report the median of each score over `repeats`
-    (paper: 16). Studies with one condition are skipped."""
+    random (and, with `outcome`, one dependent variable per study, as the paper does when a study has several),
+    form every other condition minus that control (predicted and measured; se of a contrast = sqrt(se_t^2 + se_c^2)),
+    pool across studies and score; report the median of each score over `repeats` (paper: 16). Rows are ordered by
+    `condition` inside a study, so the draw does not depend on row order. Without `outcome`, every row group of
+    `study` is one unit (pass a study x outcome key to pool all outcomes). Units with one condition are skipped."""
     rng = np.random.default_rng(seed)
-    groups = [g for _, g in df.groupby(study, sort=True) if len(g) >= 2]
+    keys = [study] + ([outcome] if outcome else [])
+    units = {k: g.sort_values(condition) for k, g in df.groupby(keys, sort=True) if len(g) >= 2}
+    by_study: dict = {}
+    for k in units:
+        by_study.setdefault(k[0] if isinstance(k, tuple) else k, []).append(k)
     reps = []
     for _ in range(repeats):
         P, T, S = [], [], []
-        for g in groups:
+        for ks in by_study.values():
+            g = units[ks[int(rng.integers(len(ks)))]] if outcome else units[ks[0]]
             c = int(rng.integers(len(g)))
             gp, gt = g[pred].to_numpy(float), g[true].to_numpy(float)
             m = np.arange(len(g)) != c
@@ -975,15 +1028,17 @@ def score_condition_forecasts(df: pd.DataFrame, *, study: str = "study", conditi
         return {"n": 0, "repeats": 0}
     out = {k: float(np.nanmedian([r[k] for r in reps])) if any(np.isfinite(r[k]) for r in reps) else np.nan
            for k in ("r", "r_adj", "spearman", "slope", "sign_acc_sig", "reliability")}
-    out.update(n=int(reps[0]["n"]), n_studies=len(groups), repeats=len(reps))
+    out.update(n=int(np.median([r["n"] for r in reps])), n_sig=int(np.median([r["n_sig"] for r in reps])),
+               n_studies=len(by_study), n_units=len(units), repeats=len(reps))
     return out
 
 
 __all__ = [
-    "Variable", "Hypothesis", "DecisionLog", "VARIABLE_KINDS", "HYPOTHESIS_SYSTEM", "hypothesis_prompt",
+    "Variable", "Hypothesis", "DecisionLog", "VARIABLE_KINDS", "PROTOCOLS", "HYPOTHESIS_SYSTEM", "hypothesis_prompt",
     "parse_hypotheses", "propose_hypotheses", "design", "encode", "estimate", "parse_number",
-    "InterviewSimulator", "ConversationSimulator", "StructuralSimulator", "linear_world", "market_world",
+    "InterviewSimulator", "ConversationSimulator", "JUDGE_SYSTEM", "StructuralSimulator", "linear_world", "market_world",
     "make_simulator", "PATH_SYSTEM", "path_prediction_prompt", "predict_paths", "compare_paths", "predict_outcomes",
     "HypothesisRun", "AutoSocialScienceResult", "AutoSocialScience",
-    "PROMPT_BANK", "ExperimentForecast", "forecast_experiment", "score_effect_forecasts", "score_condition_forecasts",
+    "PROMPT_BANK", "DIRECT_SYSTEM", "profile_text", "ExperimentForecast", "forecast_experiment",
+    "score_effect_forecasts", "score_condition_forecasts",
 ]
