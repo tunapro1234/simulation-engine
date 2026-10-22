@@ -123,7 +123,7 @@ et al. 2024 (arXiv:2305.08845).**
 - *Method:* RFM (recency, frequency, monetary; Hughes 1994, a marketing classic with no arXiv id), extended with
   category affinity, price sensitivity and brand loyalty. It is the non-LLM counterpart of LLM-inferred
   purchase-history personas such as Shi et al. 2025, *You Are What You Bought* (arXiv:2504.17304).
-- *Shi et al. results:* LLM personas improved a graph recommender (LightGCN) by up to 12% in NDCG@K and F1@K. In
+- *Shi et al. results:* LLM personas improved a graph-convolution recommender (LGCN, not LightGCN) by up to 12% in NDCG@K and F1@K. In
   customer segmentation on OnlineRetail they did compare against RFM: 18% of customers kept the same persona
   representation across two six-month halves against 1.3% for RFM (10 quantile bins per dimension), and k-means
   silhouette was 0.451 to 0.788 against 0.366 to 0.445. That is a comparison of representations for clustering,
