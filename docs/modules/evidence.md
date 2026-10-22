@@ -564,7 +564,10 @@ ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipp
   person-weighted (the reported value) and block-equal-weighted. With `aggregate_by=` each group value becomes the
   equal-weighted mean of its per-block means (not computed for `aggregate="sum"`); `balance_col` may vary within the
   aggregate groups (unlike `block_col`). Without `aggregate_by`, per-row metrics (MAE, Brier, 1-TVD, ...) use row
-  weights 1 / n_block and whole-sample metrics (Pearson, Spearman, AUC, ...) the mean of per-block values. An
+  weights 1 / n_block and whole-sample metrics (Pearson, Spearman, AUC, ...) the mean of per-block values. The
+  latter is a within-block value: it leaves out what the method gets right between blocks (an arm that tracks the
+  country gap loses, one that ignores it gains), so read a gap there as "how much rides on between-block signal",
+  not as a reweighting of the same number. An
   explicit `balance_col` writes an "ok" row when no block dominates; the implicit `block_col` check stays silent then.
   ```python
   rep = ev.evaluate(persons, ours="L1_blind", aggregate_by="condName", balance_col="country", split="test")

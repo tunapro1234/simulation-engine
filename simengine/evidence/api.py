@@ -308,7 +308,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         audit warning row and a card note give the primary metric of every method person-weighted (as reported)
         and block-equal-weighted: with aggregate_by, each group's value is the equal-weighted mean of its per-block
         means (not computed for aggregate="sum"); without it, row weights 1/n_block for per-row metrics and the
-        mean of per-block values for whole-sample metrics (rank / correlation / AUC). `report["baskin_blok"]`,
+        mean of per-block values for whole-sample metrics (rank / correlation / AUC; within-block values leave the
+        between-block signal out, so a gap there is not only weighting). `report["baskin_blok"]`,
         `summary()["dominant_block"]`. With an explicit balance_col an "ok" row is written when no block dominates.
     circular: priors trained on the same population's target labels; excluded from "worth N humans".
     unlabeled_baselines: prediction columns that never saw target labels (e.g. persistence) -> baseline rungs.
@@ -834,7 +835,7 @@ def _dominant_block(rep: dict, d: pd.DataFrame, col: str, *, explicit: bool, by:
     pct = f"{100 * top_share:.1f}".replace(".", ",")
     detail = f"{col} = {top}: değerlendirilen satırların %{pct}'i ({n_blocks} blok; eşik %{100 * thr:.0f})"
     kind_tr = {"iki_adim": "grup değeri blok içi ortalamaların eşit ağırlıklı ortalaması",
-               "agirlik_1_n_blok": "satır ağırlığı 1/n_blok", "blok_ortalamasi": "blok değerlerinin ortalaması"}
+               "agirlik_1_n_blok": "satır ağırlığı 1/n_blok", "blok_ortalamasi": "blok içi değerlerin ortalaması; bloklar arası fark dışarıda, yeniden ağırlıklama değil"}
     if dominant and ours in values:
         v = values[ours]
         detail += (f"; {metric} bizim ({ours}) kişi ağırlıklı {f3(v['kisi_agirlikli'])}, blok eşit ağırlıklı "
@@ -972,7 +973,7 @@ def summary(report: dict) -> dict:
             "metric": METRIC_TO_ENGLISH.get(b.get("metrik"), b.get("metrik")),
             "weighting": {"iki_adim": "two-step mean (block means, then equal weights)",
                           "agirlik_1_n_blok": "row weight 1/n_block",
-                          "blok_ortalamasi": "mean of per-block values"}.get(b.get("agirlik")),
+                          "blok_ortalamasi": "mean of within-block values (between-block differences left out; not a reweighting)"}.get(b.get("agirlik")),
             "values": {m: {"person_weighted": v.get("kisi_agirlikli"), "block_equal": v.get("blok_esit")}
                        for m, v in (b.get("degerler") or {}).items()}}
     if report.get("onkayit_belgeleri"):
