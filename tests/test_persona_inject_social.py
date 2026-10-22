@@ -200,7 +200,8 @@ class TestRender(unittest.TestCase):
 
     def test_news_feed(self):
         p = pi.get_injector("news_feed", k=2, context="A new virus is spreading.")(person(), Q)
-        self.assertIn("Relevant memories:\n- A new virus is spreading.\n- You read in the local paper: story 3", p.system)
+        self.assertIn("Relevant memories:\n- A new virus is spreading.\n- You read in the local paper: story 3",
+                      p.system)
         self.assertIn("story 4", p.system)
         self.assertNotIn("story 2", p.system)
         self.assertTrue(p.user.startswith(Q["text"]))

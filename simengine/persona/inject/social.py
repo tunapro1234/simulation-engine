@@ -191,9 +191,9 @@ class PeerMessages(_Social):
     paper = CHUANG
     needs = ("neighbors",)
     description = ("System: 'Role play this person.' + optional persona + 'you have been reading posts from people "
-                   "you follow' + optional "
-                   "confirmation-bias (weak/strong) and closed-world lines; user: the k neighbour messages "
-                   "(recent or seeded random), then the question. Reads neighbors[].message, optional state, fields, text.")
+                   "you follow' + optional initial belief (state) + confirmation-bias (weak/strong) and closed-world "
+                   "lines; user: the k neighbour messages (recent or seeded random), then the question. Reads "
+                   "neighbors[].message, optional state, fields, text.")
 
     def __init__(self, k: int | None = 5, bias: str = "none", closed_world: bool = True, select: str = "recent",
                  persona: bool = True, seed: int = 0, **params: Any):
@@ -233,7 +233,8 @@ class NeighborActivity(_Social):
     needs = ("neighbors",)
     description = ("System: optional persona + current state + 'below is recent activity from accounts you follow'; "
                    "user: '- <who> <action>: \"<message>\"' lines (k, recent or seeded random) and, with action=, "
-                   "'n of your m contacts have <action>.' Reads neighbors[].action/message, optional state, fields, text.")
+                   "'n of your m contacts have <action>.' Reads neighbors[].action/message, optional state, "
+                   "fields, text.")
 
     def __init__(self, k: int | None = 10, action: str | None = None, select: str = "recent",
                  persona: bool = True, seed: int = 0, **params: Any):
