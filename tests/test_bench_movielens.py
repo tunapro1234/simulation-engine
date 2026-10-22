@@ -149,6 +149,64 @@ class TestRating(_Fixture):
         self.assertEqual(sorted(ml.personas(self.data)), sorted(tr.user_id.unique()))
 
 
+class TestReview(_Fixture):
+    """Checks added in review: tie order, Koren 2008 eq. 2-3 against a loop, NaN scores."""
+
+    def test_tie_order_is_hashed_and_row_order_free(self):
+        r, _, _ = ml.read_ml1m(os.path.join(self.root, "movielens-1m"))
+        a = ml.order_by_user_time(r)
+        b = ml.order_by_user_time(r.sample(frac=1, random_state=3))
+        pd.testing.assert_frame_equal(a, b)
+        self.assertTrue((a.groupby("user_id")["timestamp"].diff().dropna() >= 0).all())
+        burst = a[a.duplicated(["user_id", "timestamp"], keep=False)]
+        self.assertGreater(len(burst), 50)                 # the fixture has same-second bursts
+        asc = burst.groupby(["user_id", "timestamp"])["movie_id"].apply(lambda s: s.is_monotonic_increasing)
+        self.assertLess(asc.mean(), 0.9)                   # within a second the order is not by movie id
+
+    def test_item_knn_matches_koren_eq3_loop(self):
+        tr, te = self.data_rating()
+        k, lam, shrink = 5, 5.0, 100.0
+        mu, bu, bi = ml.fit_biases(tr, lam)
+        e = {(u, i): x - mu - bu[u] - bi[i] for u, i, x in zip(tr.user_id, tr.movie_id, tr.rating)}
+        by_item = tr.groupby("movie_id")["user_id"].agg(set)
+        hist = tr.groupby("user_id")["movie_id"].agg(list)
+
+        def s(i, j):                                     # eq. 2 with rho = residual correlation over co-raters
+            co = by_item[i] & by_item[j]
+            num = sum(e[u, i] * e[u, j] for u in co)
+            den = np.sqrt(sum(e[u, i] ** 2 for u in co) * sum(e[u, j] ** 2 for u in co))
+            return len(co) / (len(co) + shrink) * (num / den if den > 0 else 0.0)
+        got = ml.item_knn_ratings(tr, te, k, shrink, lam)
+        for row in list(te.itertuples())[:40]:
+            u, i = row.user_id, row.movie_id
+            want = mu + bu.get(u, 0.0) + bi.get(i, 0.0)
+            if i in by_item.index:
+                # k largest s_ij; equal s -> the more recent train rating (hist is in time order)
+                sims = sorted(((s(i, j), p, j) for p, j in enumerate(hist[u])), reverse=True)[:k]
+                sims = [(x, j) for x, _, j in sims if x > 0]
+                if sims:
+                    want += sum(x * e[u, j] for x, j in sims) / sum(x for x, _ in sims)
+            self.assertAlmostEqual(got[row.Index], float(np.clip(want, 1, 5)), places=4)
+
+    def data_rating(self):
+        d = ml.MovieLens1M().load(self.root)
+        return d.train, d.test
+
+    def test_nan_scores_rank_last(self):
+        task = ml.MovieLens1M(target="next_item", n_candidates=20)
+        d = task.load(self.root)
+        y = d.test["y"].to_numpy(float)
+        fr = task.frame(d, {"nan_target": np.where(y == 1, np.nan, 0.0), "all_nan": np.full(len(y), np.nan)})
+        self.assertEqual(task.score(fr, "nan_target")["value"], 0.0)
+        self.assertAlmostEqual(task.score(fr, "all_nan")["value"], 10 / 20)
+        r = ml.full_ranking(d, lambda us, ms: np.full((len(us), len(ms)), np.nan), B=20)
+        items = set(d.train.movie_id)
+        tgt = d.test[d.test.y == 1].set_index("user_id")["movie_id"]
+        want = [min(10, n) / n if tgt[u] in items else 0.0
+                for u, n in ((u, len(items - set(g))) for u, g in d.train.groupby("user_id")["movie_id"])]
+        self.assertAlmostEqual(r["hit10"]["value"], float(np.mean(want)))
+
+
 class TestPersona(_Fixture):
     def test_train_only_and_content(self):
         data = ml.MovieLens1M().load(self.root)
