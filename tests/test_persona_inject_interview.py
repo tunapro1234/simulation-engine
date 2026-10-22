@@ -146,6 +146,13 @@ class TestRender(unittest.TestCase):
         fb = inj({"id": "z", "interview": "hi", "expert_reflections": {"demographer": "Lives alone."}}, q_pol)
         self.assertTrue(fb.meta["expert_fallback"])
         self.assertIn("Lives alone.", fb.system)
+        # an empty note list counts as missing: no bare header, fall back
+        empty = {"id": "z", "interview": "hi", "expert_reflections": {"political scientist": [" "],
+                                                                       "demographer": ["Lives alone."]}}
+        fb = inj(empty, q_pol)
+        self.assertTrue(fb.meta["expert_fallback"])
+        self.assertEqual(fb.meta["experts"], ["demographer"])
+        self.assertNotIn("political scientist", fb.system)
         with self.assertRaises(TypeError):                         # a memory-style list is refused clearly
             inj({"id": "z", "interview": "hi", "expert_reflections": [{"text": "x"}]}, q_pol)
 
