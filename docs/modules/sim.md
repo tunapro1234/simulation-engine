@@ -24,6 +24,7 @@ signal.
 | component | file | what it does |
 |---|---|---|
 | `survey`, `survey_frame` | `survey.py` | Survey panel. Likert questions get a free-text answer plus a direct 1-5 score, and optionally SSR on the text. Numeric questions (`kind="numeric"`, `min`/`max`, e.g. a 0-100 slider) get a number. Multiple-choice questions get an option letter. `free_text=False` drops the free-text field. Each persona can see its own stimulus (`stimulus_col=` or `context={pid: text}`). Soft refusals are re-asked once and counted apart from parse failures. Control arms run by default. The result has bootstrap CIs per arm, a segment breakdown and quotes. See "Survey options" below. |
+| `interview`, `interview_frame` | `interview.py` | Open-ended interview: one free-text question per persona, with the `no_persona` / `persona_swap` control arms and per-person stimuli, as in `survey`. Per arm: answers `{pid: text}` and refused / empty / error counts and ids. Import from `simengine.sim.interview` (not `simengine.persona.inject.interview`). See "Open-ended interview" below. |
 | `SSR`, `SCALES` | `ssr.py` | Semantic similarity rating (Maier et al. 2025). It embeds the answer text, compares it with 5 anchor sentences, and returns a distribution and an expected score (or `to_probability`). `sentence-transformers` is imported lazily. The model loads offline from a local cache. `encoder=` takes any texts-to-vectors function. |
 | `ab_test`, `ab_frame` | `ab.py` | PAARS-style A/B test on a persona panel. Each persona gives a 1-10 score per variant, a choice and a reason. Half of the panel sees the variants reversed, which gives the position effect. Output: winner, preference share, bootstrap win probability, sign test, control arms, `confidence` (`confidence_check`), and a direction check when `truth` is given. |
 | `paars_decision` | `ab.py` | Forced-choice decision from per-persona A/B scores, with a confidence threshold (0.65). |
@@ -217,6 +218,47 @@ overrides it.
 llm = se.llm.Claude(tag="L1", tag_prefix="d3/", spend_log="spend.tsv", agent="team")
 sim.survey(panel, [q], llm=llm, tag="dev")     # TSV tag column: d3/L1:dev:survey:persona, ...:no_persona, ...
 ```
+
+## Open-ended interview (`interview.py`)
+
+A plain "why?" question had no runner: `survey` asks Likert, numeric and choice questions, so the G6 rehearsal
+(#3) built the persona, no-persona and swap arms by hand with `llm.map`. `interview` asks one open-ended question
+with the same pieces as `survey`: batched panel prompts, `control_personas` / `control_plan` for the control arms,
+`stimulus_col=` or a per-person dict for stimuli (the stimulus is dropped from the profile text in every arm), and
+the soft-refusal and empty-reply re-asks.
+
+```python
+from simengine.sim.interview import interview, interview_frame
+
+res = interview(panel, "Why did you stop ordering last month?", llm=llm, max_chars=400, batch=8)
+res = interview(panel, q, llm=llm, stimulus_col="message")               # each persona sees its own message
+res = interview(panel, q, llm=llm, stimuli={pid: text}, arms=("persona", "swap"))
+res["answers"]                          # {pid: text}, main arm ("persona" when run)
+res["controls"]["answers"]["no_persona"]
+res["refused_ids"], res["empty_ids"], res["error_ids"]     # main arm; every arm in res["arm_stats"]
+interview_frame(res, truth={pid: label})                    # one row per person x arm
+```
+
+- **Buckets.** In each arm every asked persona ends in exactly one bucket. *answered*: a non-blank answer, cut to
+  `max_chars` (the cuts are counted in `truncated` and reported in a warning). *refused*: its batch stayed refused
+  after the research-forecast re-ask. *error*: its batch got no reply (an empty reply after the larger-max_tokens
+  re-ask, or another LLM error). *empty*: the batch replied, but this persona's answer is missing, blank or not
+  text. A refusal written inside the answer field ("I'd rather not say") is the persona's answer, not a refusal.
+  When the main arm has no answer and every failure is an error, the first LLM error is raised.
+- **Control arms.** `arms` takes any of `persona`, `no_persona`, `persona_swap` (aliases as in `survey`). The
+  control arms follow `control_plan`, so `persona_swap` may be a subsample (`res["controls"]["plan"]`). With one
+  persona the swap arm is skipped with a warning. The defaults roughly double the calls.
+- **Ledger tags.** Calls are tagged `<tag>:<arm>`: `interview:persona`, `interview:no_persona`,
+  `interview:persona_swap` by default. `tag` is the whole stem, so `tag="dev:interview"` gives
+  `dev:interview:persona` (survey's `tag="dev"` gives `dev:survey:persona`). The backend tag is joined in front as
+  for `survey`.
+- **Frame.** `interview_frame` columns: `unit` (`<pid>|<arm>`), `truth`, `pred_text`, `status` (answered | refused
+  | empty | error | not_asked; not_asked = outside a subsampled or skipped swap arm), `chars`, `arm`, `segment`,
+  `item` (= arm), `group` (= pid), and `stimulus` when the run had per-person stimuli. Scoring free text against a
+  truth label (coding, embedding similarity) is left to the caller.
+- `simengine.persona.inject.interview` is a different module (interview-transcript persona injectors).
+- Tests: `tests/test_sim_interview.py` (arms and aliases, control prompts, ledger tags, the four buckets, refusal
+  recovery, truncation, stimuli, events, the frame).
 
 ## When it works and when it does not (measured)
 
