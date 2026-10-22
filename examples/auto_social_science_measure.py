@@ -1,7 +1,8 @@
 """Measured numbers of docs/modules/research/auto_social_science.md (no LLM calls, ~10 s).
 
     SIMENGINE_DATA=<data-root> PYTHONPATH=. python examples/auto_social_science_measure.py
-Sections 1-3 are synthetic; section 4 reads <data-root>/socsci210/ham/cond_stats.parquet (skipped if absent).
+Sections 1-3 are synthetic; section 4 reads <data-root>/socsci210/ham/cond_stats.parquet (skipped if absent) and
+scores under the Hewitt protocol (one outcome and one control per study per repeat) and pooled over all outcomes.
 """
 import json, sys, time
 import numpy as np, pandas as pd
@@ -59,11 +60,16 @@ g = c.groupby("exp")
 pooled = np.sqrt(g.apply(lambda x: np.average(x.sd ** 2, weights=x.n), include_groups=False))
 c["z"] = c["mean"] / c.exp.map(pooled)                     # standardised: contrasts become Cohen's d
 c["z_se"] = 1 / np.sqrt(c.n)
-c = c[np.isfinite(c.z)]
+c = c[np.isfinite(c.z)].copy()
 rng = np.random.default_rng(0)
-base = dict(study="exp", condition="condition_num", true="z", true_se="z_se", repeats=16, seed=0)
+# paper protocol: one outcome (task) and one control per study per repeat; "pooled" = every outcome of a study
+base = dict(study="study_id", outcome="task_num", condition="condition_num", true="z", true_se="z_se", repeats=16,
+            seed=0)
+pooled = dict(base, study="exp", outcome=None)
 out["socsci210_rows"] = {"conditions": int(len(c)), "experiments": int(c.exp.nunique()), "studies": int(c.study_id.nunique())}
-out["socsci210_random"] = H.score_condition_forecasts(c.assign(pred_mean=rng.standard_normal(len(c))), **base)
+c["rand"] = rng.standard_normal(len(c))
+out["socsci210_random"] = H.score_condition_forecasts(c.assign(pred_mean=c.rand), **base)
+out["socsci210_random_pooled"] = H.score_condition_forecasts(c.assign(pred_mean=c.rand), **pooled)
 # TF-IDF ridge on the stimulus text, target = standardised deviation from the experiment mean, study-grouped 5-fold OOF
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import Ridge
@@ -77,6 +83,9 @@ for tr, te in GroupKFold(5).split(c, groups=c.study_id):
     m = Ridge(alpha=1.0).fit(X[tr], dev[tr])
     oof[te] = m.predict(X[te])
 out["socsci210_tfidf_ridge_oof"] = H.score_condition_forecasts(c.assign(pred_mean=oof), **base)
+out["socsci210_tfidf_ridge_oof_pooled"] = H.score_condition_forecasts(c.assign(pred_mean=oof), **pooled)
 # length-difference baseline: longer stimulus -> different answer? (sign-agnostic check)
-out["socsci210_stimulus_length"] = H.score_condition_forecasts(c.assign(pred_mean=c.stimuli.str.len().astype(float)), **base)
+ln = c.stimuli.str.len().astype(float)
+out["socsci210_stimulus_length"] = H.score_condition_forecasts(c.assign(pred_mean=ln), **base)
+out["socsci210_stimulus_length_pooled"] = H.score_condition_forecasts(c.assign(pred_mean=ln), **pooled)
 print(json.dumps(out, indent=1, default=float))
