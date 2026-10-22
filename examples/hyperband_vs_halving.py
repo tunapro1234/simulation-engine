@@ -7,7 +7,7 @@ Two fidelity types, both with max_budget R = 81 and eta = 3 (Hyperband budget 19
   larger for configs near the optimum, so low budgets mislead (late bloomers); small noise on top.
 Regret = true full-budget loss of the returned config (the optimum is 0). Lower is better.
 
-    PYTHONPATH=. python examples/hyperband_vs_halving.py --seeds 200 --out /tmp/hb.json
+    PYTHONPATH=. python examples/hyperband_vs_halving.py --seeds 200 --out hb.json
 """
 from __future__ import annotations
 
