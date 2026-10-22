@@ -233,13 +233,21 @@ def hyperband_brackets(max_budget: int, min_budget: int = 1, eta: int = 3) -> li
     return out
 
 
+def _runner_range(runner, max_budget, min_budget) -> tuple[int, int]:
+    """(R, r) for a FidelityRunner; refuses budgets the runner would clamp (nominal budget would be wrong)."""
+    Rr, rr = int(runner.max_budget), int(getattr(runner, "min_budget", 1))
+    R, r = int(max_budget or Rr), int(min_budget or rr)
+    if R > Rr or r < rr:
+        raise ValueError(f"budgets [{r}, {R}] outside the runner's [{rr}, {Rr}]")
+    return R, r
+
+
 def _as_screen(runner, max_budget, min_budget):
-    if hasattr(runner, "screen") and hasattr(runner, "max_budget"):
-        R = int(max_budget or runner.max_budget)
-        r = int(min_budget or getattr(runner, "min_budget", 1))
-        if R != runner.max_budget:          # fidelity is relative to the runner's own max_budget
-            return (lambda cfgs, f: runner.screen(cfgs, f * R / runner.max_budget)), R, r
-        return runner.screen, R, r
+    if hasattr(runner, "max_budget") and callable(runner):         # FidelityRunner: (cfg, budget) -> score
+        R, r = _runner_range(runner, max_budget, min_budget)
+        if hasattr(runner, "screen") and R == runner.max_budget:
+            return runner.screen, R, r
+        return (lambda cfgs, f: [runner(c, int(min(R, max(r, round(f * R))))) for c in cfgs]), R, r
     if callable(runner):
         if max_budget is None:
             raise ValueError("a plain screen callable (configs, fidelity) -> scores needs max_budget=")
@@ -260,12 +268,14 @@ def hyperband(runner, sample, *, higher_is_better: bool, eta: int = 3, max_budge
               repeats: int = 1) -> dict:
     """Hyperband, Algorithm 1: for s = s_max..0 run `successive_halving(..., rounding="floor")` over n fresh configs
     with the bracket's budgets; return the best bracket winner. Every bracket ends at max_budget, so the winners are
-    compared on full-budget scores (the paper returns the smallest intermediate loss; with a fixed max_budget this is
-    the same set). `brackets` restricts the s values (e.g. [s_max] = plain halving with Hyperband's n), `repeats` runs
+    compared on full-budget scores. Deviation: Alg. 1 line 11 returns the config with the smallest intermediate loss
+    seen so far, which includes low-budget rungs; a noisy small-sample (or early-iteration) score would win that
+    minimum by chance, so only max_budget scores are compared here. `brackets` restricts the s values (e.g. [s_max] = plain halving with Hyperband's n), `repeats` runs
     the outer loop again with fresh configs (the paper recommends repeating).
 
-    `runner`: a MultiFidelity / UnitRunner, or a plain screen `(configs, fidelity) -> scores` with `max_budget=`
-    (fidelity = budget / max_budget). `sample`: a Space, a list of configs (drawn without replacement), or
+    `runner`: a FidelityRunner `(cfg, budget) -> score` (MultiFidelity, UnitRunner or any object with max_budget;
+    max_budget= / min_budget= may narrow but not widen its range), or a plain screen `(configs, fidelity) -> scores`
+    with `max_budget=` (fidelity = budget / max_budget). `sample`: a Space, a list of configs (drawn without replacement), or
     `(rng, n) -> configs`. Returns {"winner", "score", "bracket", "brackets": [...], "evaluations", "budget"}; budget =
     nominal resource (sum of budget per evaluation; a resuming UnitRunner charges less, see `runner.spent`)."""
     eta = _check_eta(eta)
@@ -385,10 +395,12 @@ def asha(runner: Callable[[dict, int], float], sample, *, higher_is_better: bool
     n_workers > 1 runs jobs in a thread pool (I/O-bound runners such as LLM calls); completion order then varies, so
     only n_workers=1 is reproducible. Returns {"winner", "score", "rung", "budget", "trials", "jobs", "rungs",
     "budgets", "promotions"}."""
-    R = int(max_budget or getattr(runner, "max_budget", 0) or 0)
+    if hasattr(runner, "max_budget"):
+        R, r = _runner_range(runner, max_budget, min_budget)
+    else:
+        R, r = int(max_budget or 0), int(min_budget or 1)
     if R < 1:
         raise ValueError("asha needs max_budget= (or a runner with .max_budget)")
-    r = int(min_budget or getattr(runner, "min_budget", 1))
     draw = _as_sampler(sample)
     if total_budget is None and max_trials is None and not isinstance(sample, (list, tuple)):
         raise ValueError("asha needs total_budget= or max_trials= (an unbounded sampler never runs out)")
