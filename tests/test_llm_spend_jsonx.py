@@ -112,6 +112,11 @@ class TestSpendSummary(unittest.TestCase):
         self.assertEqual(list(s.groups), ["recete-G2/L1:survey"])
         self.assertEqual(s.total["calls"], 2)
         self.assertAlmostEqual(s.usd, c.spent_usd, places=6)
+        # the backend (or its ledger) stands for its spend_log= file
+        self.assertEqual(spend_summary(c, prefix="recete-G2/").total, s.total)
+        self.assertEqual(spend_summary(c.ledger).total["calls"], 2)
+        with self.assertRaises(ValueError):
+            spend_summary(CostLedger(None, tsv_path=False))
 
 
 class TestTruncation(unittest.TestCase):

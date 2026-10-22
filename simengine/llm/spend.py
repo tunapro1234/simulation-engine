@@ -5,6 +5,7 @@
     print(s)                     # one line per tag + total
     s.total["usd"], s.groups["recete-G2/L1:survey:persona"]["calls"]
     spend_summary("spend.log", by="agent")                # or by="model", by=None (total only), by=callable(row)
+    spend_summary(llm, prefix="recete-G2/")                # a backend or CostLedger: reads its spend_log= file
 
 The log is the one `CostLedger(tsv_path=...)` / `Claude(spend_log=...)` appends to (columns `TSV_COLUMNS`, no
 header; `usd` is the 6th column). The recipe rehearsal G2 (#7) summed that column with awk for its tag prefix.
@@ -57,13 +58,28 @@ class SpendSummary:
         return "\n".join([head, *rows])
 
 
-def spend_summary(log_path: str | os.PathLike | None = None, prefix: str | None = None,
+def _log_of(obj) -> str | os.PathLike | None:
+    """A backend (`.ledger`) or a CostLedger (`.tsv_path`) -> its TSV path; anything else unchanged."""
+    led = getattr(obj, "ledger", obj)
+    if hasattr(led, "tsv_path"):
+        if led.tsv_path is None:
+            raise ValueError("this backend / ledger writes no TSV spend log (pass spend_log= or set "
+                             f"{SPEND_LOG_ENV}); its own spend is llm.spent_usd")
+        return led.tsv_path
+    return obj
+
+
+def spend_summary(log_path=None, prefix: str | None = None,
                   by: str | Callable[[dict], str] | None = "tag") -> SpendSummary:
     """Sum the shared TSV spend log for tags starting with `prefix` (None = every line).
 
+    log_path: a path, a backend built with `spend_log=` (e.g. `Claude`) or a `CostLedger` (its TSV file; the whole
+    shared file, other agents included, so pass `prefix=`), or None -> env SIMENGINE_SPEND_LOG. A missing file gives
+    an empty summary (all zero).
     by: "tag" (default), "agent", "model", any other TSV column name, a callable(row dict) -> key, or None for the
-    total only. log_path None -> env SIMENGINE_SPEND_LOG; a missing file gives an empty summary (all zero).
+    total only.
     """
+    log_path = _log_of(log_path)
     if log_path is None:
         log_path = os.environ.get(SPEND_LOG_ENV, "").strip() or None
     if log_path is None:

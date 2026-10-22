@@ -195,7 +195,11 @@ print(s)                    # tab-separated: one line per tag (most expensive fi
 s.usd, s.total              # {"calls", "input_tokens", "output_tokens", "usd"}
 s.groups["recete-G2/L1:survey:persona"]
 spend_summary("spend.log", by="agent")                    # any TSV column, a callable(row) -> key, or None
+spend_summary(llm, prefix="recete-G2/")                    # a backend built with spend_log= (or a CostLedger)
 ```
+
+- Given a backend or a `CostLedger`, it reads that object's TSV file, which is the whole shared log (other agents
+  too), so pass `prefix=`. A backend without a TSV raises `ValueError`; its own spend is `llm.spent_usd`.
 
 - Only lines whose tag starts with `prefix` are summed (`None` = all lines). The prefix is matched against the TSV
   tag column, which already carries the ledger's `tag_prefix`.
@@ -235,7 +239,16 @@ Why: in the recipe rehearsal G9 (`SIMENGINE-EKSIK.md` #6) Haiku wrote an explana
 st = {}
 data = llm.complete_json("Return JSON only.", prompt, max_tokens=600, stats=st)
 print(st)                   # {"calls": 2, "truncated": 1, "truncation_retries": 1}
+
+# many prompts in parallel (the G9 shape): llm.map returns raw replies and never retries a cut one
+from simengine.llm import parallel_map
+out = parallel_map(lambda u: llm.complete_json("Return JSON only.", u, max_tokens=600, tag="L2"), prompts,
+                   parallel=8, return_exceptions=True)          # failed slots hold the ValueError
+print(llm.stats.get("json_truncated", 0))
 ```
+
+`llm.map(...)` keeps the plain `complete` behaviour; `is_truncated(r)` on its replies counts the cut ones. With
+threads, read the counts from `llm.stats` (locked) rather than one shared `stats={}` dict.
 
 ## Soft refusals: `looks_like_refusal(text)`
 
