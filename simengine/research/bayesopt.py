@@ -24,8 +24,9 @@ Two ways to use it:
 GP: scikit-learn `GaussianProcessRegressor`, Constant * Matern(nu=2.5, one length scale per encoded column) + White
 noise, `normalize_y=True`. EI is the closed form under the Gaussian posterior with incumbent y* = min loss seen
 (Bergstra et al. 2011 §3.1); UCB picks argmax mu + sqrt(beta_t) sigma on the negated loss (Srinivas et al., ICML 2010,
-Algorithm 1), beta_t = 2 log(|D| t^2 pi^2 / (6 delta)) of their Theorem 1 with |D| = number of candidates, scaled by 1/5
-as in their experiments (§6), unless `beta` is given.
+Algorithm 1), beta_t = 2 log(|D| t^2 pi^2 / (6 delta)) of their Theorem 1 with |D| = number of candidates and
+t = observations + 1 (round t uses the posterior after t - 1 points), scaled by 1/5 as in their experiments (§6), unless
+`beta` is given.
 TPE (§4.1-4.2 and §6 of the paper): split the observations at the gamma quantile (gamma = 0.15); l(x) = Parzen density
 of the good part, g(x) of the rest; for a range, an equally weighted mixture of the (uniform) prior and Gaussians at each
 point with sd = the larger distance to the left / right neighbour (the bounds count as neighbours), clipped; for a
@@ -210,14 +211,14 @@ def gp_scores(enc: SpaceEncoder, cfgs: Sequence[dict], losses: np.ndarray, candi
               acquisition: str = "ei", xi: float = 0.01, beta: float | None = None, t: int | None = None,
               seed: int = 0, n_restarts: int = 2) -> dict:
     """Fit the GP on (cfgs, losses) and score candidates. Returns {"acq", "mu", "sigma", "beta"} arrays.
-    `xi` is in units of the loss standard deviation."""
+    `xi` is in units of the loss standard deviation; `t` is the UCB round (default: number of observations + 1)."""
     gp = fit_gp(enc.encode(cfgs), losses, seed=seed, n_restarts=n_restarts)
     mu, sigma = gp.predict(enc.encode(candidates), return_std=True)
     if acquisition == "ei":
         acq = expected_improvement(mu, sigma, float(losses.min()), xi * float(np.std(losses) or 1.0))
         b = None
     elif acquisition == "ucb":
-        b = beta if beta is not None else ucb_beta(t or len(losses), len(candidates))
+        b = beta if beta is not None else ucb_beta(t or len(losses) + 1, len(candidates))
         acq = upper_confidence_bound(mu, sigma, b)
     else:
         raise ValueError(f"acquisition must be 'ei' or 'ucb', got {acquisition!r}")
@@ -378,7 +379,7 @@ class GPProposer(_BOProposer):
         if not cands:
             return None
         sc = gp_scores(enc, cfgs, losses, [c for _, _, c in cands], acquisition=self.acquisition, xi=self.xi,
-                       beta=self.beta, t=len(losses), seed=self.seed + ctx.turn, n_restarts=self.n_restarts)
+                       beta=self.beta, t=len(losses) + 1, seed=self.seed + ctx.turn, n_restarts=self.n_restarts)
         i = int(np.argmax(sc["acq"]))
         k, v, _ = cands[i]
         sign = -1.0 if ctx.higher_is_better else 1.0
@@ -448,7 +449,8 @@ def minimize(objective: Callable[[dict], float], space: Space, *, method: str = 
     method "random" (uniform draws), "gp" (EI / UCB over `n_candidates` = 2000 uniform + 25% local perturbations of the
     5 best), "tpe" (best l/g of `n_candidates` = 100 draws from l). The first `n_init` calls (`x0`, then uniform draws)
     are shared by all methods under the same seed. A call that raises or returns a non-finite value is recorded with
-    value NaN and the worst loss seen. Returns {"best", "best_cfg", "history": [{"cfg", "value", "method"}],
+    value NaN; the surrogate sees it as the worst finite loss seen so far (until a finite loss exists, proposals stay
+    uniform). Returns {"best", "best_cfg", "history": [{"cfg", "value", "method"}],
     "trace": best-so-far value per call}."""
     if method not in ("gp", "tpe", "random"):
         raise ValueError(f"method must be gp, tpe or random, got {method!r}")
@@ -459,7 +461,7 @@ def minimize(objective: Callable[[dict], float], space: Space, *, method: str = 
     if n_init is None:
         n_init = 10 if method == "tpe" else max(3, min(10, 2 * enc.dim + 1))
     sign = -1.0 if higher_is_better else 1.0
-    hist, cfgs, losses, hashes = [], [], [], set()
+    hist, cfgs, raw, hashes = [], [], [], set()      # raw: signed losses, NaN for a crash
 
     def valid(c):
         full, e = space.validate({**base, **c})
@@ -476,17 +478,20 @@ def minimize(objective: Callable[[dict], float], space: Space, *, method: str = 
     for i in range(n_calls):
         cfg, how = None, method
         while queue and cfg is None:
-            cfg, how = valid(queue.pop(0)), "x0"
-        if cfg is None and (method == "random" or len(losses) < n_init):
+            cfg = valid(queue.pop(0))
+            how = "x0" if cfg is not None else method
+        R = np.asarray(raw, float)
+        fin = np.isfinite(R)
+        if cfg is None and (method == "random" or len(raw) < n_init or not fin.any()):
             cfg, how = pick_random()
         elif cfg is None:
-            L = np.asarray(losses)
+            L = np.where(fin, R, R[fin].max())          # crashes = worst finite loss seen so far
             if method == "gp":
                 n = n_candidates or 2000
                 cand = enc.sample(n, rng) + _local(enc, cfgs, L, n // 4, rng)
                 cand = [c for c in (valid(c) for c in cand) if c is not None]
                 if cand:
-                    acq = gp_scores(enc, cfgs, L, cand, acquisition=acquisition, xi=xi, beta=beta, t=len(L),
+                    acq = gp_scores(enc, cfgs, L, cand, acquisition=acquisition, xi=xi, beta=beta, t=len(L) + 1,
                                     seed=seed + i)["acq"]
                     cfg = cand[int(np.argmax(acq))]
             else:
@@ -505,10 +510,7 @@ def minimize(objective: Callable[[dict], float], space: Space, *, method: str = 
         hashes.add(config_hash(cfg))
         hist.append({"cfg": cfg, "value": v, "method": how})
         cfgs.append(cfg)
-        losses.append(sign * v if math.isfinite(v) else float("nan"))
-        fin = [x for x in losses if math.isfinite(x)]
-        if fin:   # crashes take the worst finite loss for the surrogate
-            losses = [x if math.isfinite(x) else max(fin) for x in losses]
+        raw.append(sign * v if math.isfinite(v) else float("nan"))
     vals = np.array([h["value"] for h in hist], float)
     ok = np.isfinite(vals)
     if not ok.any():
