@@ -3,14 +3,15 @@
     llm = FakeLLM()                                        # stable hash text for any prompt
     llm = FakeLLM(lambda system, user: '{"p": 0.5}')       # your own responder
     llm = FakeLLM.survey()                                 # schema-true answers to simengine.sim prompts
-    llm = FakeLLM.survey(lambda pid, qid, spec: 70 if spec["kind"] == "numeric" else None)
+    llm = FakeLLM.survey(lambda pid, qid, spec: 70 if spec["kind"] == "numeric" else None, questions=questions)
     res = se.sim.survey(personas, questions, llm=llm)      # numeric values in range, never all "unparsed"
 
 `survey_responder` answers the panel prompt layout that `sim.survey` / `sim.ask_panel` send ('### <id>' blocks,
 the '"<field>": <spec>' list, '[<field>] <question>' lines with 'a) option' lines): every scored field
 (`<f>_value` "number lo-hi", `<f>_score` "int 1-5", `<f>_choice` "one of a|b") gets a value inside its range,
 from `value_fn(persona_id, question_id, spec)` or a deterministic hash. Other simengine prompts fall through to
-`simengine.sim.schema_responder`. Dry runs and contract tests only, never a measurement.
+`simengine.sim.schema_responder`. Dry runs and contract tests only, never a measurement: a value_fn built from the
+real answers prints real-looking metrics before the pre-registration is locked (G2 #1), so make it synthetic.
 """
 from __future__ import annotations
 
@@ -45,9 +46,9 @@ class FakeLLM:
 
     @classmethod
     def survey(cls, value_fn: Callable[[str, str, dict], Any] | None = None, seed: int = 0,
-               model: str = "fake") -> "FakeLLM":
-        """FakeLLM with `survey_responder(value_fn, seed)`: schema-true offline answers for `sim.survey`."""
-        return cls(survey_responder(value_fn, seed), model=model)
+               model: str = "fake", questions: Any = None) -> "FakeLLM":
+        """FakeLLM with `survey_responder(value_fn, seed, questions)`: schema-true offline answers for `sim.survey`."""
+        return cls(survey_responder(value_fn, seed, questions), model=model)
 
     def complete(self, system: str, user: str, *, max_tokens: int = 256, **kw: Any) -> LLMResponse:
         self.calls.append((system, user))
@@ -95,6 +96,13 @@ def _questions(user: str) -> dict[str, dict]:
     return out
 
 
+def _profiles(user: str) -> dict[str, str]:
+    """{"<pid>": "<profile text shown under '### <pid>'>"} from the People section."""
+    sec = user.split("\nPeople:\n", 1)[-1].split("\n\nFor EACH person", 1)[0]
+    parts = re.split(r"^### (\S+)\s*$", sec, flags=re.M)
+    return {parts[i]: parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
+
+
 def _spec(field: str, raw: str, qs: dict) -> dict | None:
     """Spec dict for a scored field ({"field", "stem", "kind", "text", "spec", + range or options}), None for
     free-text fields."""
@@ -128,11 +136,14 @@ def _coerce(v: Any, d: dict, h: float, strict: bool = False):
         if not letters:
             return v
         j = None
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer():
+        num = isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer()
+        s = str(int(v)) if num else (v.strip() if isinstance(v, str) else None)
+        if s is not None and s in opts:              # option text first: options [1..5] and value 3 mean "3"
+            j = opts.index(s)
+        elif isinstance(v, str) and s.lower() in letters:
+            j = letters.index(s.lower())
+        elif num:
             j = int(v)
-        elif isinstance(v, str):
-            s = v.strip()
-            j = opts.index(s) if s in opts else (letters.index(s.lower()) if s.lower() in letters else None)
         if j is None or not 0 <= j < len(letters):
             if strict:
                 raise ValueError(f"value_fn returned {v!r} for {d['field']}; give an option, its letter or index")
@@ -157,35 +168,52 @@ def _unit(*parts) -> float:
     return int(hashlib.md5("|".join(map(str, parts)).encode()).hexdigest()[:8], 16) / 0x100000000
 
 
-def survey_responder(value_fn: Callable[[str, str, dict], Any] | None = None, seed: int = 0
+def survey_responder(value_fn: Callable[[str, str, dict], Any] | None = None, seed: int = 0, questions: Any = None
                      ) -> Callable[[str, str], str]:
     """FakeLLM responder for `sim.survey` / `sim.ask_panel` prompts with values inside every field's range.
 
-    value_fn(persona_id, question_id, spec) -> value or None. question_id is the field stem the prompt uses (the
-    question id when it is a plain identifier, see `sim._stats.field_name`). spec: {"field", "kind" ("numeric",
-    "likert5", "choice"), "text", "spec"; numeric / likert5: "min", "max", "integer"; choice: "options" (texts),
-    "letters"}. A number is clamped into [min, max] (rounded for int fields); a choice may be the option text,
+    value_fn(persona_id, question_id, spec) -> value or None. question_id is the question's own id when
+    `questions` (the list given to sim.survey) is passed, otherwise the field stem the prompt uses (the id cut to a
+    plain identifier of at most 20 characters, see `sim._stats.field_name`: 'q-price' -> 'q_price', '1' -> 'x0_1').
+    spec: {"field", "stem", "kind" ("numeric", "likert5", "choice"), "text", "spec", "arm", "profile"; numeric /
+    likert5: "min", "max", "integer"; choice: "options" (texts), "letters"}. A number is clamped into [min, max]
+    (rounded for int fields); a choice may be the option text (tried first, so options [1, 2, 3] and 3 give "3"),
     its letter or its index. None (or no value_fn) -> `sim.schema_responder(seed)`'s deterministic hashed value,
     clamped the same way. Free text comes from schema_responder too, and so does every non-panel prompt.
+
+    Control arms keep the real persona ids. The no_persona arm (arm "no_persona": the prompt shows only a neutral
+    adult) never calls value_fn and gets the hashed default, so a pid-keyed value_fn cannot leak the person into
+    it. persona_swap (arm "persona") shows the slot's pid with another persona's profile; key on spec["profile"]
+    (the text the LLM sees) if that control should follow the profile, as an LLM would.
     """
     from ..sim.panel import schema_responder          # lazy: simengine.sim imports this module
+    from ..sim.personas import NEUTRAL_TEXT
     fallback = schema_responder(seed)
+    neutral = set(NEUTRAL_TEXT.values())
+    qid_of: dict[str, str] = {}
+    if questions is not None:
+        from ..sim.survey import _questions as norm_questions
+        qid_of = {d["field"]: d["id"] for d in norm_questions(questions)}
 
     def respond(system: str, user: str) -> str:
         ids = re.findall(r"^### (\S+)\s*$", user, re.M)
         if not (ids and "with fields:" in user):
             return fallback(system, user)
-        specs, qs = _field_specs(user), _questions(user)
+        specs, qs, prof = _field_specs(user), _questions(user), _profiles(user)
         rows = {str(r.get("id")): r for r in json.loads(fallback(system, user)) if isinstance(r, dict)}
         out = []
         for pid in ids:
             row = dict(rows.get(pid) or {"id": pid})
+            text = prof.get(pid, "")
+            arm = "no_persona" if text.split("\n", 1)[0].strip() in neutral else "persona"
             for f, raw in specs.items():
                 d = _spec(f, raw, qs)
                 if d is None:      # free text / list: schema_responder's placeholder
                     row.setdefault(f, f"(fake) {f} {pid}")
                     continue
-                v = value_fn(pid, d["stem"], dict(d)) if value_fn is not None else None
+                d.update(arm=arm, profile=text)
+                v = (value_fn(pid, qid_of.get(d["stem"], d["stem"]), dict(d))
+                     if value_fn is not None and arm != "no_persona" else None)
                 row[f] = _coerce(row.get(f) if v is None else v, d, _unit(seed, pid, f), strict=v is not None)
             out.append(row)
         return json.dumps(out)

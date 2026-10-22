@@ -239,26 +239,36 @@ free persona speech, false positives only skip caching (the reply is still retur
   `tag`, `sample`, `validate` and `cache_if` work as for `Claude`; `spend_log=`/`agent=`/`tag_prefix=` as for `Claude`. Other keyword
   arguments raise `TypeError`.
 
-## `FakeLLM` for survey dry runs: `FakeLLM.survey(value_fn=None, seed=0)`
+## `FakeLLM` for survey dry runs: `FakeLLM.survey(value_fn=None, seed=0, questions=None)`
 
 `FakeLLM()` with no responder returns hash text, so every `sim.survey` answer is `unparsed`;
 `FakeLLM(lambda s, u: "{}")` gives the same (G2 #1: 400/400 numeric answers unparsed). `FakeLLM.survey()` uses
-`survey_responder(value_fn, seed)` from `fake.py`. It reads the panel prompt (`### <id>` blocks, the
+`survey_responder(value_fn, seed, questions)` from `fake.py`. It reads the panel prompt (`### <id>` blocks, the
 `"<field>": <spec>` list, `[<field>] question` lines with `a) option` lines) and fills every scored field with a value
 in range: `<f>_value` ("number lo-hi"), `<f>_score` ("int 1-5") and `<f>_choice` ("one of a|b|c").
 
 ```python
 llm = se.llm.FakeLLM.survey()                                  # hashed values, deterministic per seed
-llm = se.llm.FakeLLM.survey(lambda pid, qid, spec: 70 if qid == "wtp" else None)
+llm = se.llm.FakeLLM.survey(lambda pid, qid, spec: 70 if qid == "wtp" else None, questions=questions)
 res = se.sim.survey(personas, questions, llm=llm)              # res["unparsed"] == 0
 ```
 
-- **value_fn(persona_id, question_id, spec).** `question_id` is the field stem the prompt uses, which is the question
-  id when that id is a plain identifier (`sim._stats.field_name`). `spec` has `field`, `kind` (`numeric`, `likert5`,
-  `choice`), `text` and `spec`. Numeric and Likert specs add `min`, `max` and `integer`; choice specs add `options`
-  (texts) and `letters`. A number is clamped into `[min, max]` and rounded for int fields. A choice can be given as the
-  option text, its letter or its index. A value that cannot be used (an unknown option, a non-number) raises
-  `ValueError`. `None` keeps the default.
+- **value_fn(persona_id, question_id, spec).** Pass `questions=` (the list you give `sim.survey`) and `question_id`
+  is the question's own id. Without it, `question_id` is the field stem the prompt uses: the id cut to a plain
+  identifier of at most 20 characters (`sim._stats.field_name`: `q-price` -> `q_price`, `1` -> `x0_1`), so a
+  value_fn keyed on other ids silently returns `None` and gets the hashed default. `spec` has `field`, `stem`, `kind`
+  (`numeric`, `likert5`, `choice`), `text`, `spec`, `arm` and `profile` (the text the prompt shows for that person).
+  Numeric and Likert specs add `min`, `max` and `integer`; choice specs add `options` (texts) and `letters`. A number
+  is clamped into `[min, max]` and rounded for int fields. A choice can be given as the option text, its letter or its
+  index; the text is tried first, so for options `[1, 2, 3, 4, 5]` the value `3` means "3", not the fourth option. A
+  value that cannot be used (an unknown option, a non-number) raises `ValueError`. `None` keeps the default.
+- **Control arms.** They keep the real persona ids. The `no_persona` arm shows only a neutral adult, so it never calls
+  value_fn and gets the hashed default; a pid-keyed value_fn cannot leak the person into that control.
+  `persona_swap` shows the slot's id with the next persona's profile; key on `spec["profile"]` if that control should
+  follow the profile, as an LLM would.
+- **No real answers in value_fn before the lock.** A value_fn built from the human answers prints real-looking
+  metrics, which is the G2 #1 leak (the real ladder values seen before the pre-registration commit). Keep it
+  synthetic until `prereg` is locked.
 - **Default.** The value `sim.schema_responder(seed)` gives (deterministic hash), clamped the same way. Free text
   and every non-panel prompt (distribution, prediction, A/B) also come from `schema_responder`, so `FakeLLM.survey()`
   can stand in for `FakeLLM(schema_responder())` anywhere.

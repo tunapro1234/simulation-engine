@@ -89,6 +89,48 @@ class TestValueFn(unittest.TestCase):
             run(FakeLLM.survey(lambda pid, qid, spec: "lots" if spec["kind"] == "numeric" else None), controls=[])
 
 
+    def test_numeric_option_texts_win_over_index(self):
+        qs = [{"id": "kids", "text": "How many?", "options": [1, 2, 3, 4, 5]}]
+        truth = {"p0": 1, "p1": 3, "p2": 5.0}
+        res = survey(panel(3), qs, llm=FakeLLM.survey(lambda pid, qid, spec: truth[pid]), controls=[], B=10)
+        ch = survey_frame(res, kind="choice").set_index("group")["pred_choice"]
+        self.assertEqual([ch[p] for p in ("p0", "p1", "p2")], ["1", "3", "5"])
+
+    def test_questions_maps_field_stems_back_to_ids(self):
+        qs = [{"id": "q-price long question id", "text": "Pay?", "kind": "numeric", "min": 0, "max": 100},
+              {"id": "1", "text": "Pick", "options": ["x", "y"]}]
+        seen = set()
+
+        def fn(pid, qid, spec):
+            seen.add(qid)
+            return 42 if qid == "q-price long question id" else None
+
+        res = survey(panel(2), qs, llm=FakeLLM.survey(fn, questions=qs), controls=[], B=10)
+        self.assertEqual(seen, {"q-price long question id", "1"})
+        num = survey_frame(res, kind="numeric")
+        self.assertTrue((num["pred_value"] == 42).all())
+        stems = set()
+        survey(panel(2), qs, llm=FakeLLM.survey(lambda pid, qid, spec: stems.add(qid)), controls=[], B=10)
+        self.assertEqual(stems, {"q_price_long_questio", "x1_1"})      # without questions=: the prompt's stem
+
+    def test_no_persona_arm_never_sees_the_person(self):
+        calls = []
+
+        def fn(pid, qid, spec):
+            calls.append((pid, spec["arm"], spec["profile"]))
+            return 0.25 + 0.1 * int(pid[1:]) if qid == "q_num" else None
+
+        res = run(FakeLLM.survey(fn), controls=["no_persona", "persona_swap"])
+        self.assertEqual(res["unparsed"], 0)
+        self.assertEqual({a for _, a, _ in calls}, {"persona"})        # no_persona prompts skip value_fn
+        self.assertIn(("p1", "persona", "p1\nperson 1"), calls)
+        self.assertIn(("p1", "persona", "p1\nperson 2"), calls)        # persona_swap: slot pid, next profile
+        num = survey_frame(res, kind="numeric")
+        v = num[num["item"] == "q_num"].set_index("group")
+        self.assertEqual(round(v.loc["p1", "pred_value"], 4), 0.35)
+        self.assertFalse(v["pred_no_persona"].round(4).equals(v["pred_value"].round(4)))
+
+
 class TestResponder(unittest.TestCase):
     def test_deterministic_and_seeded(self):
         a = run(FakeLLM.survey(seed=1), controls=[])
