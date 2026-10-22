@@ -78,6 +78,12 @@ class TestPrepare(unittest.TestCase):
         ts = S.situation_split(d, 2)
         self.assertTrue((d[ts].groupby("respondent").size() == 2).all())
         self.assertTrue((d[ts].situation >= 7).all())
+        for bad in (0.0, 1.0, 0.001):
+            with self.assertRaises(ValueError):
+                S.respondent_split(d, bad)
+        for bad in (0, 9):
+            with self.assertRaises(ValueError):
+                S.situation_split(d, bad)
 
 
 class TestEstimators(unittest.TestCase):
@@ -170,6 +176,8 @@ class TestTask(unittest.TestCase):
             self.task.frame(d, {"bad": np.ones((len(d.test), 2))})
         with self.assertRaises(ValueError):
             self.task.frame(d, {"bad": -np.ones((len(d.test), 3))})
+        with self.assertRaises(ValueError):
+            self.task.frame(d, {"bad": np.full((len(d.test), 3), np.inf)})
 
     def test_metrics_by_hand(self):
         fr = self.frame
@@ -234,6 +242,13 @@ class TestText(unittest.TestCase):
         np.testing.assert_allclose(S.parse_choice('{"Swissmetro": 1}'), [0, 1, 0])
         np.testing.assert_allclose(S.parse_choice("I would take the car."), [0, 0, 1])
         self.assertIsNone(S.parse_choice("no idea"))
+        # percent strings, key: number pairs, trailing comma
+        np.testing.assert_allclose(S.parse_choice('{"train": "20%", "sm": "50%", "car": "30%"}'), [20, 50, 30])
+        np.testing.assert_allclose(S.parse_choice("train: 0.3, Swissmetro: 0.7"), [0.3, 0.7, 0])
+        np.testing.assert_allclose(S.parse_choice('{"train": 0.2, "sm": 0.5, "car": 0.3,}'), [0.2, 0.5, 0.3])
+        # an object without a usable value is not read as its first key
+        for t in ('{"train": 0, "sm": 0, "car": 0}', '{"car": Infinity}', '{"train": "?", "car": -1}'):
+            self.assertIsNone(S.parse_choice(t), t)
 
     def test_llm_method_with_fake(self):
         data = TaskData(train=self.d.iloc[:90], test=self.d.iloc[90:].reset_index(drop=True))
@@ -250,6 +265,13 @@ class TestText(unittest.TestCase):
         self.assertEqual(m.last_unparsed, len(data.test) // 2)
         self.assertEqual(len(llm.calls), len(data.test))
         self.assertTrue(all("survey" in s for s, _ in llm.calls))
+        # all mass on an unavailable car -> uniform over available, counted as unparsed
+        no_car = data.test[data.test.av_car == 0].reset_index(drop=True)
+        self.assertGreater(len(no_car), 0)
+        m2 = S.llm_method(FakeLLM(lambda s, u: '{"car": 1}'), smooth=0.1)
+        P2 = m2(TaskData(train=data.train, test=no_car))
+        np.testing.assert_allclose(P2, S.availability(no_car) / S.availability(no_car).sum(1, keepdims=True))
+        self.assertEqual(m2.last_unparsed, len(no_car))
 
 
 @unittest.skipUnless(os.environ.get("SIMENGINE_DATA"), "needs $SIMENGINE_DATA with swissmetro/")
@@ -265,10 +287,16 @@ class TestRealData(unittest.TestCase):
         for k, v in {"asc_train": -0.701187, "asc_car": -0.154633, "b_time": -1.277859, "b_cost": -1.083790}.items():
             self.assertAlmostEqual(f.coef[k], v, places=4)
         self.assertAlmostEqual(f.robust_se["b_time"], 0.104254, places=4)
+        for k, v in {"asc_train": 0.082562, "asc_car": 0.058163, "b_cost": 0.068225}.items():
+            self.assertAlmostEqual(f.robust_se[k], v, places=4)
         g = S.fit_nested(d)
-        # Biogeme b09_nested: LL -5236.9, nest parameter 2.053862
+        # Biogeme b09_nested (plot_b09_nested): LL -5236.9, value (robust SE)
         self.assertAlmostEqual(g.loglik, -5236.9, places=1)
-        self.assertAlmostEqual(g.coef["mu_existing"], 2.053862, delta=2e-3)
+        ref = {"asc_train": (-0.511953, 0.079114), "asc_car": (-0.167141, 0.054528), "b_time": (-0.898716, 0.107108),
+               "b_cost": (-0.856701, 0.060033), "mu_existing": (2.053862, 0.164154)}
+        for k, (v, se) in ref.items():
+            self.assertAlmostEqual(g.coef[k], v, delta=2e-3)
+            self.assertAlmostEqual(g.robust_se[k], se, delta=1e-3)
 
 
 if __name__ == "__main__":
