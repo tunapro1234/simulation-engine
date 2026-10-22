@@ -161,9 +161,11 @@ def reflection_memories(person: dict, question: dict, now: float) -> tuple[list[
     drop = {str(x) for x in (question.get("exclude") or ())} | {str(question.get("id"))}
     out, dropped = [], 0
     for i, r in enumerate(person.get("reflections") or ()):
-        if isinstance(r, str) or "seen" not in r:
-            raise ValueError(f"reflection {i} of person {person.get('id')!r} has no 'seen' list, so leakage cannot "
-                             "be checked; build reflections with memory.reflect()")
+        # a bare string `seen` would iterate characters and silently pass the leak check
+        seen_ok = isinstance(r, Mapping) and isinstance(r.get("seen"), (list, tuple, set, frozenset))
+        if not seen_ok or "text" not in r:
+            raise ValueError(f"reflection {i} of person {person.get('id')!r} needs 'text' and a 'seen' list of qids, "
+                             "so leakage can be checked; build reflections with memory.reflect()")
         seen = tuple(str(s) for s in r["seen"])
         if drop & set(seen):
             dropped += 1
