@@ -25,6 +25,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from ..llm.fake import FakeLLM
 from ._stats import (ALL, Emitter, bootstrap_ci, bootstrap_distribution, field_name, pick_quotes, to_jsonable,
                      to_number)
 from .panel import Usage, _collect, _panel_max_tokens, ask_many, build_prompts
@@ -32,7 +33,9 @@ from .personas import as_personas, choose_lang, control_personas, control_plan, 
 from .ssr import SSR, anchor_sets
 
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
-NUMERIC_KINDS = ("numeric", "number", "slider", "scale", "sayisal", "kaydirici")
+LIKERT_KINDS = ("likert5", "likert")
+NUMERIC_KINDS = ("numeric", "number", "numerical", "slider", "scale", "sayisal", "kaydirici")
+CHOICE_KINDS = ("choice", "coktan", "mc", "multiple")
 STIMULUS_BATCHING = ("group", "inline")
 _EPS = 1e-9
 
@@ -52,10 +55,20 @@ def _questions(questions, options=None, free_text: bool = True) -> list[dict]:
     for i, q in enumerate(questions or []):
         if isinstance(q, str):
             q = {"text": q}
-        kind = q.get("kind", q.get("tur", "likert5"))
-        kind = ("choice" if kind in ("choice", "coktan", "mc", "multiple") else
-                "numeric" if kind in NUMERIC_KINDS else "likert5")
         qid = str(q.get("id", f"q{i + 1}"))
+        kind = q.get("kind", q.get("tur"))
+        if kind is None:            # no kind: options make it a choice question, else Likert
+            kind = "choice" if (q.get("options") or q.get("secenekler")) else "likert5"
+        kind = str(kind).strip().lower()
+        if kind in CHOICE_KINDS:
+            kind = "choice"
+        elif kind in NUMERIC_KINDS:
+            kind = "numeric"
+        elif kind in LIKERT_KINDS:
+            kind = "likert5"
+        else:
+            raise ValueError(f"question {qid}: unknown kind {q.get('kind', q.get('tur'))!r}; use one of "
+                             f"{', '.join(LIKERT_KINDS + NUMERIC_KINDS + CHOICE_KINDS)}")
         d = {"id": qid, "text": q.get("text", q.get("metin", "")), "kind": kind, "field": field_name(qid, i)}
         if kind == "choice":
             opts = [str(x) for x in (q.get("options") or q.get("secenekler") or [])][:len(LETTERS)]
@@ -400,6 +413,29 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
     per question the arm summaries (persona + controls), segment breakdown and quotes; raw answers; control
     plan; usage; warnings; refusal accounting.
 
+    Question dict (Turkish key aliases in brackets):
+        id: str, default "q<n>" (1-based position).
+        text [metin]: the question.
+        kind [tur]: "likert5" (alias "likert"); "numeric" (aliases number, numerical, slider, scale, sayisal,
+            kaydirici); "choice" (aliases coktan, mc, multiple). Default: "choice" when the dict has options,
+            else "likert5". Any other value raises ValueError.
+        options [secenekler]: choice only, 2-26 option strings (answered as letters a, b, ...).
+        min, max: numeric only, numbers with min < max (default 0, 100); a reply outside is unparsed.
+        labels: numeric only, optional [label at min, label at max].
+        scale [olcek], anchors [capalar]: Likert only; scale "agreement" (default) | intent | satisfaction |
+            likelihood | liking, or anchors = 5 sentences for SSR.
+        free_text: Likert / numeric only, overrides the survey-wide `free_text`.
+    Other keys are ignored.
+
+    controls: control arms run after the persona arm. None (default) = ("no_persona", "persona_swap"); pass a
+        subset (aliases: "swap", "personasiz", "persona_yok") or controls=[] to turn them off. no_persona asks a
+        neutral "typical adult" in batches of up to 20; persona_swap asks the personas with shuffled profiles.
+        `control_plan` keeps the two together near the persona arm's call count (persona_swap gets the budget
+        no_persona leaves, at least one pass at 20 per prompt), so the defaults roughly double the calls:
+        about 2 x ceil(n_personas / batch) x ceil(n_questions / question_group) per survey, plus re-asks.
+        Each arm repeats the persona arm's questions, so the upper bound is (1 + n_controls) x the persona arm's
+        calls; controls=[] is the cheapest run. The plan actually used is in result["controls"]["plan"].
+
     context: one text shown to everyone, or {persona_id: text} (a per-person stimulus).
     stimulus_col: name of a persona field / table column holding each persona's own stimulus (e.g. the message
         or condition it saw); `context` (a string) is then still shown to everyone.
@@ -473,8 +509,12 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
     unparsed_ids = [p for p in missing if p not in mi["refused_ids"]]
     n_refused, n_unparsed = len(refused_ids), len(unparsed_ids)
     if missing:
+        hint = ""
+        if not main and isinstance(llm, FakeLLM) and llm.responder is None:
+            # a bare FakeLLM replies with hex hashes, which never parse
+            hint = "; FakeLLM has no responder; use FakeLLM(simengine.sim.schema_responder())"
         warnings.append(f"{len(missing)} personas unanswered ({n_refused} refused after the reframed re-ask, "
-                        f"{n_unparsed} unparsed or missing)")
+                        f"{n_unparsed} unparsed or missing){hint}")
     if mi["refused_calls"]:
         warnings.append(f"{mi['refused_calls']}/{mi['calls']} persona-arm batches refused at the first ask "
                         f"(refusal_rate {mi['refusal_rate']:.2f}); {mi['recovered_calls']} recovered by the "
@@ -544,7 +584,9 @@ def survey_frame(result: dict, truth: dict | None = None, level: str = "person",
     Likert columns: pred_ssr (SSR expected score, NaN when SSR was off), pred_score (direct 1-5), and per control
     arm pred_<arm> (SSR) and pred_<arm>_score. Numeric: pred_value and pred_<arm> (person value; item level the
     mean). Choice: person level the chosen option, item level the option distribution (list in `options` order).
-    With per-person stimuli the person-level frame has a `stimulus` column."""
+    With per-person stimuli the person-level frame has a `stimulus` column.
+    Keys: person level `unit` is "<pid>|<question_id>", the persona id is in `group` and the question id in
+    `item`; item level `unit` is "<question_id>|<segment>" and `group` is the question id."""
     truth = truth or {}
     qs = result.get("questions", [])
     if kind is None:
