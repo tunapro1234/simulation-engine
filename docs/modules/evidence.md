@@ -789,3 +789,36 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
   per-cell ratios is not used: it explodes on small groups whose truth entropy is ~0. `ayrisma_orani` is the
   between-cell divergence ratio: within each item, sd across cells (groups) of E[position] for the prediction over
   the same for the truth (pooled; < 1 = groups pulled together). The collapse audit row prints both with CIs.
+
+## Card rules from the recipe rehearsals: information level, post-hoc rows, shuffle scope, filled share (G1 #10, G5 #10, G6 #7 #8, G7 #6 #7 #9)
+
+No new `evaluate()` arguments: these rules run on the inputs the report already has.
+
+- **Information level of the marginal baseline.** On distribution tasks `taban_marjinal` (item-wide leave-one-out)
+  reads the target question's answers in the *other* cells: setting B in bench terms, information ours does not see
+  (setting A: other questions only). With overlapping segment schemes (age / income / household) the held-out cell's
+  people can sit inside those other cells. The ladder row carries `bilgi: "B"` and a "setting B" label, the
+  "item mean" audit row says so, and the strongest-baseline headline, gap closed and badge use the strongest
+  setting-A baseline only. When the setting-B rung beats it, an audit row "bilgi düzeyi (ayar A / ayar B)" and a card
+  flag say so; the card's baseline row gets a note. `report["bilgi_duzeyi"]` = `{"B", "B_ustte", "rozet_tabani"}`.
+  Other task types are unchanged.
+- **Registered vs post hoc.** When pre-registration text exists (seal descriptions, `prereg=` text files / registry
+  texts), each `compare=` row's a and b names are looked up in it: a row counts as registered when one text names both
+  (b None: a alone) or contains the row's own label. Two-character names (`L3`, `T3`) match without the `pred_`
+  prefix here, since both have to occur together. A row that is not found gets `tur="posthoc"`, `kayit="sonradan"`, a
+  "post hoc (not in the pre-registration)" label suffix, `kind: "posthoc"` in `summary()["comparisons"]`, a
+  "sonradan ·" prefix on the dashboard and a card flag. Without any text the rows stay as before (`tur="kayitli"`,
+  no `kayit` key). `degerlendir(kiyaslar=)` also takes `(a, b, label, posthoc)` or `{"a", "b", "label", "posthoc"}`
+  to set it explicitly; `evaluate(compare=)` still takes 2- or 3-tuples.
+- **Weak baseline in a compare row.** If b is a baseline weaker than the strongest (setting-A) baseline, the row
+  gets `zayif_taban = {"b", "b_deger", "en_guclu", "en_guclu_etiket", "en_guclu_deger"}`, an audit warning names the
+  strongest one, and the card flags it: register against the strongest single baseline, not a weaker combination.
+- **Shuffle-control scope.** When ours is constant across units within every item (an arm without person
+  information, for example a direct item-level guess), the shuffle control is not built: the audit row is
+  `atlandi` with "predictions constant within item (no person information)". On multiclass tasks the control is
+  labelled a *prediction* shuffle, not a persona swap (audit "tahmin karıştırma (persona takası değil)"); pass a real
+  swap arm via `compare=(ours, swap, "persona swap")`.
+- **Filled share.** Numeric `filled_<method>` columns (from `sim.distribution_frame`: the share of a cell's answers
+  that were invalid and replaced by a uniform vector) give one audit row per arm with the mean share. Above 5 %
+  (`cekirdek.DOLGU_ESIK`) the row warns and the card flags "dolgu payı yüksek". `report["dolgu"]["kollar"]` holds
+  mean, max and cell counts per arm.
