@@ -102,6 +102,12 @@ class TestTreeSearchConfig(unittest.TestCase):
             self.assertLess(fin["test"]["winner"]["score"], fin["test"]["reference"]["score"])
             self.assertLess(fin["test_diff"]["winner-reference"]["ci95"]["hi"], 0)
             self.assertIsNotNone(fin["winner_test_minus_dev"])
+            # gap decomposition: reference gap = dev -> test shift, excess = winner gap - reference gap
+            self.assertEqual(fin["reference_dev"], nodes[0].score)
+            self.assertAlmostEqual(fin["reference_test_minus_dev"],
+                                   fin["test"]["reference"]["score"] - nodes[0].score)
+            self.assertAlmostEqual(fin["excess_test_minus_dev"],
+                                   fin["winner_test_minus_dev"] - fin["reference_test_minus_dev"])
             ts.finalize()
             self.assertEqual(sum(c["split"] == "test" for c in CALLS), n_test)   # idempotent
             for f in ("state.json", "JOURNAL.md", "results.tsv"):
@@ -143,6 +149,8 @@ class TestTreeSearchConfig(unittest.TestCase):
             b.run()
             self.assertEqual([n.payload for n in a.nodes], [n.payload for n in b.nodes])
             self.assertEqual([n.op for n in a.nodes], [n.op for n in b.nodes])
+            self.assertEqual(a.state["policy"]["steps"], 15)
+            self.assertEqual(a.state["policy_history"][0]["steps"], 8)
 
     def test_resume_refuses_other_direction(self):
         with tempfile.TemporaryDirectory() as d:
@@ -360,6 +368,36 @@ class TestMCTS(unittest.TestCase):
     def test_bad_keys(self):
         with self.assertRaises(ValueError):
             MCTSSearch(self.run_ab([]), self.sp(), keys=["zz"])
+
+    def test_higher_is_better_and_extra_test(self):
+        base = self.run_ab([])
+        neg = lambda c: {"per_unit": {u: -v for u, v in base(c)["per_unit"].items()}}
+        m = MCTSSearch(neg, self.sp(), primary="v", higher_is_better=True, budget=30, seed=2)
+        out = m.run()
+        self.assertEqual({k: out["best_payload"][k] for k in "abc"}, {"a": 3, "b": 1, "c": "q"})
+        fin = m.finalize(extra_test={"b4": {"a": 3, "b": 4, "c": "q"}})["final"]
+        self.assertEqual(fin["bonferroni_k"], 2)
+        d = fin["test_diff"]["winner-b4"]
+        self.assertGreater(d["ci95"]["lo"], 0)                     # winner higher = better here
+        self.assertLessEqual(d["bonferroni"]["lo"], d["ci95"]["lo"])
+
+    def test_no_searchable_key_stops(self):
+        calls = []
+        sp = Space({"a": [1, 2]}, defaults={"a": 1}, fixed=["a"])
+        out = MCTSSearch(lambda c: calls.append(c) or {"per_unit": {"u0": 1.0}}, sp, budget=5).run()
+        self.assertEqual((out["stopped"], out["n_nodes"], len(calls)), ("search space exhausted", 1, 1))
+
+    def test_resume_refuses_other_grid(self):
+        sp = Space({"a": [0, 1, 2, 3], "x": (0.0, 1.0)}, defaults={"a": 0, "x": 0.5})
+        r = lambda c: {"per_unit": {"u0": c["a"] + c["x"], "u1": 1.0}}
+        with tempfile.TemporaryDirectory() as d:
+            MCTSSearch(r, sp, budget=4, n_grid=5, workdir=d).run()
+            with self.assertRaises(RuntimeError):             # tree indices would point at other x values
+                MCTSSearch(r, sp, budget=8, n_grid=3, workdir=d)
+            with self.assertRaises(RuntimeError):
+                MCTSSearch(r, sp, budget=8, n_grid=5, keys=["x", "a"], workdir=d)
+            m = MCTSSearch(r, sp, budget=8, n_grid=5, workdir=d)  # a larger budget is fine
+            self.assertEqual(m.state["policy"]["budget"], 8)
 
 
 if __name__ == "__main__":
