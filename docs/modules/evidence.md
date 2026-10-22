@@ -103,9 +103,13 @@ cluster-sum path with B = 1000. Aggregate metrics (AUC, F1, correlations) are re
   cluster gets its own item code (`Resampler.satirlar(b, item_codes)`), so item-grouped aggregate metrics
   (`pair_sign`, `winner_top1`, `within_spearman`) never pair A1 with B2 and the cluster weighs k, not k².
   Items spread over several clusters (person × question) stay shared. This holds for cluster = item, a group
-  column equal to the item, `block_col`, `paired_ci` and `compare`. Before the fix a 400-test A/B card
-  showed a 0.147-wide pair-accuracy CI with group = item and 0.319 with 20 blocks (binomial: 0.092); now 0.090
-  and 0.157 (the two-way block bootstrap is wider by design) [rehearsal G3 #3].
+  column equal to the item, `block_col`, `paired_ci`, `compare` and the per-segment rows. Before the fix a
+  400-test A/B card showed a 0.147-wide pair-accuracy CI with group = item and 0.319 with 20 blocks (binomial:
+  0.092); now 0.090 and 0.157 [rehearsal G3 #3]. Simulated coverage of the 95 % CI (1000 synthetic 400-test
+  A/Bs, true accuracy 0.70): 0.952 with group = item (was 0.997), paired difference to a baseline 0.946 (was
+  0.997); per-segment rows (200 tests, 100 resamples) 0.93 (was 0.998). With `block_col` and no real block
+  effect the CI over-covers (1.000, width 0.149 against binomial 0.09): the two-way bootstrap multiplies block
+  and cluster draws, so read it as conservative.
 - *Limit:* the CI generalises to **new people, not new questions**. On Twin the gap closed is [16–19] with
   person clusters and [2–35] with task clusters [kanit RECETE 5, RAPOR §6]. A two-way (person × item)
   bootstrap is not written. If the event brings new questions, read the item axis separately.
