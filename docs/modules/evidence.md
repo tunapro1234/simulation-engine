@@ -532,6 +532,42 @@ rep = ev.evaluate(pairs, ours="stack", offset_col="um", aggregate_by="movie_id",
 ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipped
 ```
 
+## Pre-registration documents, declared split, dominant block (G1 #9 #11, G4 #7 #10, G5 #4 #5)
+
+- **Pre-registration document linked to the seals.** `prereg=` also takes a text file or a list/tuple mixing
+  registry directories, text files and seal records (a `zincir.jsonl` / `chain.jsonl` path stands for its
+  directory); `prereg_doc=` names the document(s) separately (missing file: `FileNotFoundError`). The selection-bias
+  audit searches these texts for the ours name like the registry's own text files. A text counts only when it is not
+  newer than the latest seal, and its time is, in order: the `research.lock_prereg` lock (`<doc>.lock.json`) when the
+  lock's sha256 matches the file; the earliest seal that recorded the document's sha256; the file mtime. A git
+  checkout or copy resets the mtime, so lock or seal the document. A lock whose sha256 no longer matches raises a
+  `UserWarning`, adds a card limit and falls back to the mtime. The card lists every document with its sha256 and
+  time source (`summary(rep)["prereg_docs"]`).
+  ```python
+  research.lock_prereg("ONKAYIT.md")                          # ONKAYIT.md.lock.json: sha256 + locked_at
+  ev.seal(test_preds, "ours: pred_S", registry=".onkayit", prereg_doc="ONKAYIT.md")
+  rep = ev.evaluate(df, ours="S", prereg=[".onkayit", "ONKAYIT.md"])   # or prereg=".onkayit" alone, see below
+  ```
+  `seal(..., prereg_doc=)` (CLI `muhurle --belge`) writes `"onkayit_belgesi": {"dosya", "sha256"}` (file name only)
+  into the chain record and appends `[ön kayıt belgesi <name> sha256:<hash>]` to the description. `evaluate(prereg=
+  <registry>)` then picks the document up from the registry's parent directory on its own.
+- **Declared split.** `split="test"` (or `"holdout"`, `"deger"`, `"degerlendirme"`) writes a constant split column
+  when the frame has none: TEST-only frames and `sim.distribution_frame` cells (all held out) then run the split
+  audit instead of skipping it ("bölme bilgisi" no longer flags leakage as unproven), and an audit row "bölme beyanı
+  (split=)" says the split was declared by the caller, not derived. A frame that already has a split column keeps it
+  (warning). Other labels raise `ValueError`.
+- **Dominant block.** `balance_col="country"` (default: `block_col` when given) checks the shares of the scored
+  rows. When one block holds more than max(`dominance_share`=0.20, 1.5 / n_blocks), an audit warning row, a card
+  note and `report["baskin_blok"]` / `summary(rep)["dominant_block"]` give the primary metric of every method both
+  person-weighted (the reported value) and block-equal-weighted. With `aggregate_by=` each group value becomes the
+  equal-weighted mean of its per-block means (not computed for `aggregate="sum"`); `balance_col` may vary within the
+  aggregate groups (unlike `block_col`). Without `aggregate_by`, per-row metrics (MAE, Brier, 1-TVD, ...) use row
+  weights 1 / n_block and whole-sample metrics (Pearson, Spearman, AUC, ...) the mean of per-block values. An
+  explicit `balance_col` writes an "ok" row when no block dominates; the implicit `block_col` check stays silent then.
+  ```python
+  rep = ev.evaluate(persons, ours="L1_blind", aggregate_by="condName", balance_col="country", split="test")
+  ```
+
 ## When not to trust a number
 - Few items (< 20): only PPI++ is shown. Bayes shrinkage and "simulation alone" depend on hitting a single mean.
 - A method above the human ceiling: check leakage first.
@@ -641,3 +677,76 @@ ev.seal("teslim/tahmin.csv", "final", registry="teslim/onkayit")      # records 
   `n_configs=` is written into the row and counts toward the "ours is the best of >= 4" optimism note.
 - **Seal hashes.** `seal(path)` also stores `dosya_sha256` (raw file bytes, what `sha256sum` prints) next to the
   canonical CSV `sha256` (what `verify`/`grade` check); the card's seal table shows both columns, labelled.
+
+## 'Why' recognition and person-level distribution bootstrap (G6 #1, G5 #3)
+
+**`why_match(generated, candidates, truth_idx, *, encoder="tfidf", ids=None, seed=0)`** (`why.py`) asks whether a
+generated reason is closer to the person's own real reason than to other people's. One row per unit; `candidates[i]`
+holds N real reasons, `truth_idx[i]` marks the person's own (one int is accepted, but shuffle positions). Each arm
+"chooses" the most similar candidate (cosine); ties are broken at random with `seed` and the reciprocal rank averages
+over tied positions, so an empty text scores chance rather than candidate 0. Output is an EvalFrame: `truth`,
+`pred_<arm>` (chosen index), `rr_<arm>`, `n_candidates`, `chance` (1/N), `unit`/`group` from `ids` (pass person ids
+when a person has several rows). Chance: accuracy 1/N, MRR H_N/N.
+```python
+f = ev.why_match({"persona": gen_p, "no_persona": gen_0, "swap": gen_s}, candidates, truth_idx, ids=person_ids)
+rep = ev.evaluate(f, task="multiclass", primary="accuracy", ours="persona", raw="no_persona")
+ev.why_summary(f)          # {"arms": {arm: {accuracy, mrr}}, "chance_accuracy", "chance_mrr", "n"}
+f = ev.why_match(gen, candidates, truth_idx, encoder=sim.SSR(model).embed)   # any texts -> (n, d) callable
+```
+Distractor recipe: N-1 reasons written by *other* people about the *same product* with the *same rating*. Holding
+product and rating fixed leaves only reason content, so a text cannot win by guessing sentiment or naming the product.
+Draw and seal the candidate sets (with truth positions) before generating. The default encoder is word 1-2 gram +
+char_wb 2-5 gram TF-IDF fit on the candidate texts, in pure numpy with sklearn-compatible defaults (`TfidfEncoder`;
+fit it on a larger corpus and pass it as `encoder=` if wanted). `encoder="bge"` is not built in: pass an embedding
+callable.
+
+**`evaluate_distribution_persons(person_frame, segment_cols, items, pred_cols, *, B=1000, seed=0, metric="1-tvd",
+id_col="unit", options=None, hold_truth=False, alpha=0.05, min_n=1, pairs=None)`** (`persons.py`) scores segment x
+item distributions from the holdout *people* instead of ready cells. One row per person, one segment column per
+scheme (`["age", "income"]` or `{name: column}`; schemes are scored jointly and per scheme), one answer column per
+item. The bootstrap draws people with replacement (clustered on `id_col`), rebuilds every cell's truth and every
+person-level arm from the same draw (paired across arms) and scores the mean metric over cells. Arms are fixed cell
+tables (`{(scheme, segment, item): vector}` or a DataFrame `scheme?, segment, item, pred|pred_<arm>`, e.g.
+`sim.distribution_frame`) or person-level columns `{item: column}` (probability vector or label per person).
+Metrics: `1-tvd`, `tvd`, `1-w1`, `w1`, or a callable.
+
+1-TVD between a small segment's empirical distribution and any prediction is biased down, and the bootstrap repeats
+the noise, so the percentile CI sits below the point and can exclude it (the G5 rehearsal saw this). Each arm and each
+paired difference reports `point`, `ci` (percentile), `ci_basic` (2·point − quantiles), `ci_bc` (percentile − bias),
+`bias` (bootstrap mean − point) and `point_bc` (point − bias); differences also give `p_two_sided`. `hold_truth=True`
+keeps truth at the full-sample distributions and resamples only person-level predictions (fixed-cell arms then have
+zero width; `note` says so). `cells` lists the per-cell scores and counts; cells with fewer than `min_n` answering
+people are dropped.
+
+## Card rules from the recipe rehearsals: information level, post-hoc rows, shuffle scope, filled share (G1 #10, G5 #10, G6 #7 #8, G7 #6 #7 #9)
+
+No new `evaluate()` arguments: these rules run on the inputs the report already has.
+
+- **Information level of the marginal baseline.** On distribution tasks `taban_marjinal` (item-wide leave-one-out)
+  reads the target question's answers in the *other* cells: setting B in bench terms, information ours does not see
+  (setting A: other questions only). With overlapping segment schemes (age / income / household) the held-out cell's
+  people can sit inside those other cells. The ladder row carries `bilgi: "B"` and a "setting B" label, the
+  "item mean" audit row says so, and the strongest-baseline headline, gap closed and badge use the strongest
+  setting-A baseline only. When the setting-B rung beats it, an audit row "bilgi düzeyi (ayar A / ayar B)" and a card
+  flag say so; the card's baseline row gets a note. `report["bilgi_duzeyi"]` = `{"B", "B_ustte", "rozet_tabani"}`.
+  Other task types are unchanged.
+- **Registered vs post hoc.** When pre-registration text exists (seal descriptions, `prereg=` text files / registry
+  texts), each `compare=` row's a and b names are looked up in it: a row counts as registered when one text names both
+  (b None: a alone) or contains the row's own label. Two-character names (`L3`, `T3`) match without the `pred_`
+  prefix here, since both have to occur together. A row that is not found gets `tur="posthoc"`, `kayit="sonradan"`, a
+  "post hoc (not in the pre-registration)" label suffix, `kind: "posthoc"` in `summary()["comparisons"]`, a
+  "sonradan ·" prefix on the dashboard and a card flag. Without any text the rows stay as before (`tur="kayitli"`,
+  no `kayit` key). `degerlendir(kiyaslar=)` also takes `(a, b, label, posthoc)` or `{"a", "b", "label", "posthoc"}`
+  to set it explicitly; `evaluate(compare=)` still takes 2- or 3-tuples.
+- **Weak baseline in a compare row.** If b is a baseline weaker than the strongest (setting-A) baseline, the row
+  gets `zayif_taban = {"b", "b_deger", "en_guclu", "en_guclu_etiket", "en_guclu_deger"}`, an audit warning names the
+  strongest one, and the card flags it: register against the strongest single baseline, not a weaker combination.
+- **Shuffle-control scope.** When ours is constant across units within every item (an arm without person
+  information, for example a direct item-level guess), the shuffle control is not built: the audit row is
+  `atlandi` with "predictions constant within item (no person information)". On multiclass tasks the control is
+  labelled a *prediction* shuffle, not a persona swap (audit "tahmin karıştırma (persona takası değil)"); pass a real
+  swap arm via `compare=(ours, swap, "persona swap")`.
+- **Filled share.** Numeric `filled_<method>` columns (from `sim.distribution_frame`: the share of a cell's answers
+  that were invalid and replaced by a uniform vector) give one audit row per arm with the mean share. Above 5 %
+  (`cekirdek.DOLGU_ESIK`) the row warns and the card flags "dolgu payı yüksek". `report["dolgu"]["kollar"]` holds
+  mean, max and cell counts per arm.
