@@ -77,5 +77,118 @@ class TestConstantGrowth(unittest.TestCase):
         np.testing.assert_allclose(b.predict(b.fit(hist, "a", 1995), [1])["y_pred"], [64.0])
 
 
+SMALL = dict(n_sim=300, n_agents=300)
+ORIGINS = (1994, 1995, 1996)
+
+
+def panel():
+    """Six early series (cross 1% in the 1980s) plus "late" (Bass start 1993: ~0.2% in 1994, 1% only in 1996)."""
+    rng = np.random.default_rng(0)
+    t = np.arange(1980, 2001, dtype=float)
+    rows = []
+    for i in range(6):
+        y = A.bass_curve(t, 60 + 5 * i, 0.01, 0.3 + 0.05 * i, 1980 + i) + rng.normal(0, 0.3, len(t))
+        rows += [dict(series=f"s{i}", t=a, y=float(np.clip(b, 0, 100))) for a, b in zip(t, y)]
+    y = A.bass_curve(t, 60, 0.003, 0.4, 1993)
+    rows += [dict(series="late", t=a, y=float(b)) for a, b in zip(t, y)]
+    return pd.DataFrame(rows)
+
+
+class TestThreshold(unittest.TestCase):
+    def test_bank_aligned_at_level(self):
+        i0 = int(np.flatnonzero(np.isclose(AD.GRID, 0.0))[0])
+        for level in (1.0, 0.1):
+            B = A.simulation_bank(200, seed=2, n_agents=200, align=level)
+            self.assertGreater(len(B["C"]), 0)
+            np.testing.assert_allclose(B["C"][:, i0], level, atol=1e-3)
+        self.assertIsNot(A.simulation_bank(200, seed=2, n_agents=200),
+                         A.simulation_bank(200, seed=2, n_agents=200, align=0.1))
+
+    def test_threshold_validated_and_default(self):
+        self.assertEqual(A.AdoptionABC().threshold, 0.01)
+        self.assertEqual(A.AdoptionABC().level, 1.0)
+        for bad in (0, 1.0, 5):
+            with self.assertRaises(ValueError):
+                A.AdoptionABC(threshold=bad)
+
+    def test_low_threshold_aligns_early_series(self):
+        df = panel()
+        late = df[df.series == "late"].set_index("t")["y"]
+        self.assertTrue(0.1 <= late[1994] < 1.0 and late[1995] < 1.0)      # precondition of the fixture
+        hist = df[df.t <= 1994]
+        m1, m01 = A.AdoptionABC(**SMALL), A.AdoptionABC(threshold=0.001, **SMALL)
+        self.assertFalse(m1.eligible(hist, "late", 1994))
+        self.assertTrue(m01.eligible(hist, "late", 1994))
+        with self.assertRaises(AD.IneligibleSeries) as cm:
+            m1.fit(hist, "late", 1994)
+        self.assertIsInstance(cm.exception, ValueError)                      # old except ValueError still works
+        self.assertEqual(cm.exception.series, "late")
+        p = m01.predict(m01.fit(hist, "late", 1994), [1, 2, 3])
+        self.assertTrue(np.isfinite(p["y_pred"]).all())
+        a = A.AdoptionABCAnalogy(threshold=0.001, **SMALL)
+        self.assertTrue(np.isfinite(a.predict(a.fit(hist, "late", 1994), [1, 2])["y_pred"]).all())
+
+
+class TestCalendarBacktest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.df = panel()[lambda d: d.t <= 1999]
+        cls.methods = {"abm": A.AdoptionABC(**SMALL), "growth": A.CurveBaseline("growth")}
+
+    def test_calendar_origins_and_relative_default(self):
+        ev = A.adoption_backtest(self.df, {"growth": A.CurveBaseline("growth")}, calendar_origins=ORIGINS, horizon=3)
+        self.assertEqual(sorted(ev.cutoff.unique()), [1994.0, 1995.0, 1996.0])
+        self.assertIn("late", set(ev.series))                         # calendar mode: every series by default
+        self.assertTrue((ev.t <= ev.cutoff + 3).all() and (ev.t > ev.cutoff).all())
+        t0 = A.adoption_t0(self.df)
+        r = ev[ev.series == "s0"]
+        np.testing.assert_allclose(r.cutoff_rel, r.cutoff - t0["s0"])
+        late = ev[ev.series == "late"]
+        np.testing.assert_allclose(late.cutoff_rel, late.cutoff - 1996)      # label only; negative = before t0
+        never = A.adoption_backtest(self.df.assign(y=lambda d: np.where(d.series == "late", 0.2, d.y)),
+                                    {"naive": A.CurveBaseline("naive")}, calendar_origins=ORIGINS, horizon=3)
+        self.assertTrue(never[never.series == "late"].cutoff_rel.isna().all())
+        self.assertEqual(ev.attrs["n_ineligible"], 0)
+        rel = A.adoption_backtest(self.df, {"growth": A.CurveBaseline("growth")}, cutoffs=(3, 5))
+        self.assertEqual(set(rel.cutoff_rel), {3, 5})
+
+    def test_on_ineligible_raise_is_default(self):
+        with self.assertRaises(AD.IneligibleSeries):
+            A.adoption_backtest(self.df, self.methods, calendar_origins=ORIGINS, horizon=3)
+        with self.assertRaises(ValueError):
+            A.adoption_backtest(self.df, self.methods, calendar_origins=ORIGINS, on_ineligible="drop")
+
+    def test_on_ineligible_skip_counts_and_drops_blocks(self):
+        ev = A.adoption_backtest(self.df, self.methods, calendar_origins=ORIGINS, horizon=3, on_ineligible="skip")
+        self.assertEqual(ev.attrs["n_ineligible"], 1)
+        self.assertEqual(ev.attrs["ineligible_series"], ["late"])
+        self.assertEqual(sorted(b["cutoff"] for b in ev.attrs["ineligible"]), [1994.0, 1995.0])
+        self.assertEqual({b["method"] for b in ev.attrs["ineligible"]}, {"abm"})
+        late = ev[ev.series == "late"]
+        self.assertEqual(sorted(late.cutoff.unique()), [1996.0])             # 1% reached in 1996
+        self.assertFalse(ev[["pred_abm", "pred_growth", "lo80_abm"]].isna().any().any())
+
+    def test_on_ineligible_nan_keeps_rows(self):
+        ev = A.adoption_backtest(self.df, self.methods, calendar_origins=ORIGINS, horizon=3, on_ineligible="nan")
+        late = ev[(ev.series == "late") & (ev.cutoff < 1996)]
+        self.assertGreater(len(late), 0)
+        self.assertTrue(late.pred_abm.isna().all() and late.lo80_abm.isna().all())
+        self.assertTrue(late.pred_growth.notna().all())
+        self.assertEqual(ev.attrs["n_ineligible"], 1)
+
+
+class TestFitMany(unittest.TestCase):
+    def test_skip_and_raise(self):
+        df = panel()
+        fm = AD.fit_many(A.AdoptionABC(**SMALL), df, cutoff=1994)
+        self.assertEqual(fm.ineligible, ["late"])
+        self.assertEqual(fm.n_ineligible, 1)
+        self.assertEqual(sorted(fm.models), [f"s{i}" for i in range(6)])
+        fm01 = AD.fit_many(A.AdoptionABC(threshold=0.001, **SMALL), df, cutoff=1994)
+        self.assertEqual(fm01.n_ineligible, 0)
+        with self.assertRaises(AD.IneligibleSeries):
+            AD.fit_many(A.AdoptionABC(**SMALL), df, cutoff=1994, on_ineligible="raise")
+
+
 if __name__ == "__main__":
     unittest.main()

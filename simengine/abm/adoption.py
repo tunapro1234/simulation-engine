@@ -12,9 +12,22 @@ Methods (all share `fit(history, series, cutoff)` / `predict(model, horizons)` /
 * :class:`BassABC`, :class:`BassABCAnalogy` : the same ABC procedure with a closed-form Bass simulator (control to
   separate "ABM structure" from "calibration + prior").
 
-Alignment: each simulation's 1% crossing time tau1 is found. In the data, t0 = first observed year with y >= 1%; the
-true crossing lies in (t0 - d, t0], d = gap to the previous observation (at most 10 years). Calendar year t maps to
-simulation time tau1 + (t - t0) + delta, with delta on a 0.25-year grid in [0, d).
+Alignment: each simulation's crossing time tau1 of the alignment level (`threshold`, a fraction, default 0.01 = 1%)
+is found. In the data, t0 = first observed year with y >= that level; the true crossing lies in (t0 - d, t0],
+d = gap to the previous observation (at most 10 years). Calendar year t maps to simulation time tau1 + (t - t0) +
+delta, with delta on a 0.25-year grid in [0, d). A series that has not reached the level by the cutoff cannot be
+aligned: `fit` raises :class:`IneligibleSeries` (a ValueError). `threshold=0.001` keeps more early series in, but
+only the 1% default was measured.
+
+Backtests: `adoption_backtest` cuts at t0(s) + k (relative, research task M1) or at fixed calendar years
+(`calendar_origins=[1991, ..., 1996]`, one origin for every series). `on_ineligible="skip"` drops the
+(series, origin) blocks a method cannot align and lists them in `frame.attrs`; `fit_many` does the same for one
+cutoff.
+
+    frame = adoption_backtest(df, {"abm": AdoptionABCAnalogy(threshold=0.001), "growth": CurveBaseline("growth")},
+                              calendar_origins=range(1991, 1997), horizon=5, on_ineligible="skip")
+    frame.attrs["n_ineligible"], frame.attrs["ineligible_series"]
+    fm = fit_many(AdoptionABCAnalogy(), history, cutoff=1997)          # fm.models, fm.ineligible, fm.n_ineligible
 
 Leakage: a fit only sees `history` (all series, t <= cutoff). m is never fixed; it comes from the prior.
 
@@ -26,6 +39,7 @@ seed-averaged series bootstrap -1.32, 95% CI [-1.83, -0.82]), linear trend 10.72
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +56,16 @@ BASS_PRIOR = {"m": (0.02, 1.0), "p": (0.001, 0.05), "q": (0.1, 0.8)}   # m as AD
 ENGINE_VERSION = "motor-2026-10-20"
 
 _BANKS: dict = {}
+ON_INELIGIBLE = ("raise", "skip", "nan")
+
+
+class IneligibleSeries(ValueError):
+    """The series has not reached the alignment level by the cutoff (ABC methods cannot align it)."""
+
+    def __init__(self, series, cutoff, threshold):
+        self.series, self.cutoff, self.threshold = series, cutoff, threshold
+        super().__init__(f"series {series!r} has not reached {100 * threshold:g}% by cutoff {cutoff}; cannot align "
+                         f"(lower threshold=, or on_ineligible='skip' in adoption_backtest / fit_many)")
 
 
 def _norm(df: pd.DataFrame) -> pd.DataFrame:
@@ -68,18 +92,18 @@ def adoption_t0(df: pd.DataFrame, threshold=1.0, max_first=20.0, min_points=8) -
 
 
 # ------------------------------------------------------------------ simulation banks
-def _crossing(z0, path):
+def _crossing(z0, path, level=1.0):
     tau = np.full(len(path), np.nan)
     for b in range(len(path)):
-        k = np.argmax(path[b] >= 1.0)
-        if path[b, k] >= 1.0 and k > 0:
+        k = np.argmax(path[b] >= level)
+        if path[b, k] >= level and k > 0:
             y0, y1 = path[b, k - 1], path[b, k]
-            tau[b] = z0[k - 1] + (1.0 - y0) / max(y1 - y0, 1e-9) * (z0[k] - z0[k - 1])
+            tau[b] = z0[k - 1] + (level - y0) / max(y1 - y0, 1e-9) * (z0[k] - z0[k - 1])
     return tau
 
 
-def _to_grid(theta, z0, path, inn):
-    tau = _crossing(z0, path)
+def _to_grid(theta, z0, path, inn, level=1.0):
+    tau = _crossing(z0, path, level)
     ok = np.isfinite(tau) & (tau <= TAU_MAX)
     theta, path, inn, tau = theta[ok], path[ok], inn[ok], tau[ok]
     st = tau[:, None] + GRID[None, :]
@@ -90,16 +114,20 @@ def _to_grid(theta, z0, path, inn):
     return dict(theta=theta, C=C.astype(np.float32), Y=Y.astype(np.float32), tau1=tau)
 
 
-def simulation_bank(n_sim=2000, seed=0, n_agents=2000, simulator="abm", chunk=250, cache_dir=None):
+def simulation_bank(n_sim=2000, seed=0, n_agents=2000, simulator="abm", chunk=250, cache_dir=None, align=1.0):
     """Prior simulation bank: dict theta (B, 8), C (B, G) curve on GRID (%), Y (B, G) innovator part (%), tau1 (B,).
-    Only simulations crossing 1% before TAU_MAX are kept. Cached in memory; on disk too if `cache_dir` is given."""
+    Curves are aligned at their crossing of `align` percent (default 1%); only simulations crossing it before
+    TAU_MAX are kept. Cached in memory; on disk too if `cache_dir` is given."""
     key = (simulator, n_sim, n_agents if simulator == "abm" else 0, seed)
+    if align != 1.0:                                      # default key unchanged: existing disk caches stay valid
+        key = key + (float(align),)
     if key in _BANKS:
         return _BANKS[key]
     path = None
     if cache_dir is not None:
         tag = hashlib.md5(repr((key, ENGINE_VERSION)).encode()).hexdigest()[:8]
-        path = Path(cache_dir) / f"adoption_bank_{simulator}_n{n_sim}_a{key[2]}_s{seed}_{tag}.npz"
+        lv = "" if align == 1.0 else f"_l{align:g}"
+        path = Path(cache_dir) / f"adoption_bank_{simulator}_n{n_sim}_a{key[2]}_s{seed}{lv}_{tag}.npz"
         if path.exists():
             d = np.load(path)
             _BANKS[key] = {k: d[k] for k in d.files}
@@ -131,7 +159,7 @@ def simulation_bank(n_sim=2000, seed=0, n_agents=2000, simulator="abm", chunk=25
                       np.zeros(n_sim), np.zeros(n_sim)]
     else:
         raise ValueError(f"unknown simulator {simulator!r} (abm | bass)")
-    out = _to_grid(theta, z0, P, Inn)
+    out = _to_grid(theta, z0, P, Inn, align)
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(path, **out)
@@ -202,21 +230,35 @@ class AdoptionABC:
     kind = "method"
     simulator = "abm"
 
-    def __init__(self, n_sim=2000, n_agents=2000, accept=0.01, recent_weight=1.0, seed=0, cache_dir=None):
+    def __init__(self, n_sim=2000, n_agents=2000, accept=0.01, recent_weight=1.0, seed=0, cache_dir=None,
+                 threshold=0.01):
+        if not 0 < threshold < 1:
+            raise ValueError(f"threshold is a fraction of the population (0.01 = 1%), got {threshold!r}")
         self.n_sim, self.n_agents, self.accept, self.recent_weight = n_sim, n_agents, accept, recent_weight
-        self.seed, self.cache_dir = seed, cache_dir
+        self.seed, self.cache_dir, self.threshold = seed, cache_dir, threshold
         self._last = None
+
+    @property
+    def level(self) -> float:
+        """Alignment level in percent (y units)."""
+        return 100.0 * self.threshold
 
     def bank(self):
         return simulation_bank(self.n_sim, self.seed, self.n_agents, simulator=self.simulator,
-                               cache_dir=self.cache_dir)
+                               cache_dir=self.cache_dir, align=self.level)
+
+    def eligible(self, history, series, cutoff) -> bool:
+        """True if the series reached the alignment level by the cutoff (fit will not raise IneligibleSeries)."""
+        history = _norm(history)
+        g = history[(history["series"] == series) & (history["t"] <= cutoff)]
+        return _first_cross(g, self.level) is not None
 
     def _target(self, history, series, cutoff):
         history = _norm(history)
         g = history[(history["series"] == series) & (history["t"] <= cutoff)]
-        t0 = _first_cross(g)
+        t0 = _first_cross(g, self.level)
         if t0 is None:
-            raise ValueError(f"series {series!r} has not reached 1% by cutoff {cutoff}; cannot align")
+            raise IneligibleSeries(series, cutoff, self.threshold)
         rel, y, deltas = _series_info(g, t0, cutoff)
         return history, t0, rel, y, deltas
 
@@ -279,8 +321,8 @@ class AdoptionABC:
             vals = []
             for i in range(k):
                 yb = np.r_[0.0, y1[i]]
-                kk = np.argmax(yb >= 1.0)
-                tau1 = z0[kk] if yb[kk] >= 1.0 else z0[-1]
+                kk = np.argmax(yb >= self.level)
+                tau1 = z0[kk] if yb[kk] >= self.level else z0[-1]
                 st = tau1 + (ts - m["t0"]) + m["delta"][sel[i]]
                 vals.append(np.interp(st, z0, np.r_[0.0, Y[i]], left=0.0))
             q = np.quantile(np.array(vals), [0.1, 0.5, 0.9], axis=0)
@@ -338,7 +380,8 @@ class AdoptionABCAnalogy(AdoptionABC):
     def _build_prior(self, history, cutoff):
         B = self.bank()
         h = history[history["t"] <= cutoff]
-        key = (cutoff, self.seed, self.n_sim, self.n_agents, len(h), tuple(sorted(map(str, h["series"].unique()))))
+        key = (cutoff, self.seed, self.n_sim, self.n_agents, self.threshold, len(h),
+               tuple(sorted(map(str, h["series"].unique()))))
         if key in self._priors:
             return self._priors[key]
         nB = len(B["theta"])
@@ -346,7 +389,7 @@ class AdoptionABCAnalogy(AdoptionABC):
         for s2, g in h.groupby("series"):
             if len(g) < self.min_points or g["y"].max() < 5 or g.sort_values("t")["y"].iloc[0] > 20:
                 continue
-            t0 = _first_cross(g)
+            t0 = _first_cross(g, self.level)
             if t0 is None:
                 continue
             rel, y, deltas = _series_info(g, t0, cutoff)
@@ -399,20 +442,72 @@ class BassABCAnalogy(AdoptionABCAnalogy):
 
 
 # ------------------------------------------------------------------ backtest runner
-def adoption_backtest(df, methods, cutoffs=(3, 5, 8), horizon=10, series=None, t0=None):
-    """Calendar-cutoff backtest (research task M1). For every series s and relative cutoff k, c = t0(s) + k; each
-    method sees ALL series' data with t <= c and forecasts the observed points in (c, c + horizon].
-    Requires >= 3 points up to c and >= 1 after. Returns a long EvalFrame: series, group, cutoff, cutoff_rel,
-    horizon, t, truth, pred_<name> (and lo80_/hi80_ when a method gives bands)."""
+@dataclass
+class FitMany:
+    """`fit_many` result: fitted models by series, and the series the method could not align."""
+    models: dict = field(default_factory=dict)
+    ineligible: list = field(default_factory=list)
+
+    @property
+    def n_ineligible(self) -> int:
+        return len(self.ineligible)
+
+
+def _check_on_ineligible(on_ineligible):
+    if on_ineligible not in ON_INELIGIBLE:
+        raise ValueError(f"on_ineligible must be one of {ON_INELIGIBLE}, got {on_ineligible!r}")
+
+
+def fit_many(method, history, cutoff, series=None, on_ineligible="skip") -> FitMany:
+    """Fit `method` on every series (default: all series with data up to the cutoff). Series the method cannot align
+    (IneligibleSeries) are skipped and listed (on_ineligible="skip") or re-raised ("raise")."""
+    _check_on_ineligible(on_ineligible)
+    history = _norm(history)
+    hist = history[history["t"] <= cutoff]
+    series = list(series) if series is not None else sorted(hist["series"].unique(), key=str)
+    out = FitMany()
+    for s in series:
+        try:
+            out.models[s] = method.fit(hist, s, cutoff)
+        except IneligibleSeries:
+            if on_ineligible == "raise":
+                raise
+            out.ineligible.append(s)
+    return out
+
+
+def adoption_backtest(df, methods, cutoffs=(3, 5, 8), horizon=10, series=None, t0=None, calendar_origins=None,
+                      on_ineligible="raise"):
+    """Cutoff backtest. Relative (default, research task M1): for every series s and k in `cutoffs`, c = t0(s) + k
+    (t0 = first year >= 1%, `adoption_t0` selection). Calendar: `calendar_origins=[1991, ..., 1996]` replaces the
+    relative cutoffs with the same fixed years for every series (default series: all of them); concatenate two
+    calls for both. Each method sees ALL series' data with t <= c and forecasts the observed points in
+    (c, c + horizon]. Requires >= 3 points up to c and >= 1 after.
+
+    on_ineligible: what to do when a method cannot align a series at c (IneligibleSeries, e.g. ABC below its
+    threshold): "raise" (default), "skip" (drop the whole (series, c) block so every method is scored on the same
+    rows) or "nan" (keep the block, NaN predictions for that method; fill with a fallback yourself). Either way
+    frame.attrs gets "ineligible" (list of {series, cutoff, method}), "ineligible_series" and "n_ineligible"
+    (distinct series).
+
+    Returns a long EvalFrame: series, group, cutoff, cutoff_rel (c - t0(s); in calendar mode a label only, NaN when
+    s is not in t0), horizon, t, truth, pred_<name> (and lo80_/hi80_ when a method gives bands)."""
+    _check_on_ineligible(on_ineligible)
     df = _norm(df)
     t0 = t0 or adoption_t0(df)
-    series = list(series) if series is not None else sorted(t0)
+    if calendar_origins is not None:
+        series = list(series) if series is not None else sorted(df["series"].unique(), key=str)
+    else:
+        series = list(series) if series is not None else sorted(t0)
     methods = methods if isinstance(methods, dict) else {m.name: m for m in methods}
-    rows = []
+    rows, bad = [], []
     for s in series:
         g = df[df["series"] == s]
-        for k in cutoffs:
-            c = t0[s] + k
+        if calendar_origins is not None:
+            cuts = [(float(c), float(c) - t0[s] if s in t0 else np.nan) for c in calendar_origins]
+        else:
+            cuts = [(t0[s] + k, k) for k in cutoffs]
+        for c, k in cuts:
             before, after = g[g["t"] <= c], g[(g["t"] > c) & (g["t"] <= c + horizon)]
             if len(before) < 3 or len(after) < 1:
                 continue
@@ -420,11 +515,26 @@ def adoption_backtest(df, methods, cutoffs=(3, 5, 8), horizon=10, series=None, t
             h = (after["t"].to_numpy(float) - c)
             out = pd.DataFrame(dict(series=s, group=s, cutoff=c, cutoff_rel=k, horizon=h, t=c + h,
                                     truth=after["y"].to_numpy(float)))
+            keep = True
             for name, meth in methods.items():
-                p = meth.predict(meth.fit(hist, s, c), h)
+                try:
+                    p = meth.predict(meth.fit(hist, s, c), h)
+                except IneligibleSeries:
+                    if on_ineligible == "raise":
+                        raise
+                    bad.append(dict(series=s, cutoff=c, method=name))
+                    if on_ineligible == "skip":
+                        keep = False
+                        break
+                    out[f"pred_{name}"] = np.nan
+                    continue
                 out[f"pred_{name}"] = p["y_pred"].to_numpy()
                 if "lo80" in p:
                     out[f"lo80_{name}"] = p["lo80"].to_numpy()
                     out[f"hi80_{name}"] = p["hi80"].to_numpy()
-            rows.append(out)
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+            if keep:
+                rows.append(out)
+    frame = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    ids = sorted({b["series"] for b in bad}, key=str)
+    frame.attrs.update(ineligible=bad, ineligible_series=ids, n_ineligible=len(ids))
+    return frame
