@@ -62,7 +62,9 @@ def constant_growth(t, y, target, last=3, phi=0.8, offset=0.1, upper=UPPER):
 
     g = log((y_T + offset) / (y_b + offset)) / (t_T - t_b), b = the earliest point within `last` years before T;
     forecast (y_T + offset) * exp(g * sum_{i=1..h} phi^i) - offset, clipped to [0, upper]. `offset` (pp) keeps
-    zeros finite. With phi = 1 it grows exponentially and overshoots near saturation; upper / phi < 1 hold it back."""
+    zeros finite. With phi = 1 it grows exponentially and overshoots near saturation; upper / phi < 1 hold it back.
+    Rehearsal D7: strongest simple baseline on the low-level dev origins, behind linear on the test origin
+    (docs/modules/abm.md)."""
     t, y = np.asarray(t, float), np.asarray(y, float)
     if len(t) < 2:
         return naive(t, y, target)

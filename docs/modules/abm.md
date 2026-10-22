@@ -21,6 +21,7 @@ are unchanged. Shorthand used below:
 - **[M1 NOTLAR]** = `uretim/makro/abm/m1/NOTLAR.md`
 - **[RECETE]** = `uretim/makro/RECETE.md`
 - **[prova D7 NOTLAR]** = `uretim/prova/d7/NOTLAR.md` (rehearsal D7, fixed-origin adoption forecast; added with the calendar-origin backtest)
+- **[prova D7 SONUC]** = `uretim/prova/d7/SONUC-MAIN.md` (the same rehearsal scored on the held-out 1998-2002 truth) and its sealed test card `uretim/prova/d7/teslim/simengine-test-kart.md`
 - **[yayilim24 SONUC]** = `uretim/makro/abm/yayilim24/SONUC.md` (pre-registration `makro/onkayit/yayilim-24s.md`, commit 06224f7; run 21-22 Oct, added by the integrator after this module was written)
 
 Every number below comes from those files. This port did not re-measure anything.
@@ -45,11 +46,12 @@ m.scenario(fit, {"imitation": 1.2}); m.personas(fit)                # model-impl
 frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(), "bass_ctrl": abm.BassABCAnalogy(),
                                    "linear": abm.CurveBaseline("linear")})   # EvalFrame: truth, pred_<m>, group
 # then: simengine.evidence.evaluate(frame, ours="abm", ...)
-# fixed calendar origins (one cut year for every series), low alignment level, ineligible series counted
-frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(threshold=0.001),
+# fixed calendar origins (one cut year for every series); 1% alignment where it works, 0.1% / growth as fallback
+frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(), "abm01": abm.AdoptionABCAnalogy(threshold=0.001),
                                    "growth": abm.CurveBaseline("growth", upper=200)},
-                              calendar_origins=range(1991, 1997), horizon=5, on_ineligible="skip")
-frame.attrs["n_ineligible"], frame.attrs["ineligible_series"]   # series the ABC could not align
+                              calendar_origins=range(1991, 1997), horizon=5, on_ineligible="nan")
+frame.attrs["n_ineligible"], frame.attrs["ineligible"]          # series / (series, cutoff, method) not aligned
+frame["pred_abm_fb"] = frame["pred_abm"].fillna(frame["pred_abm01"]).fillna(frame["pred_growth"])
 
 # --- opinion drift (one row per respondent, wave A / wave B columns per item, coded 1..k)
 panel = abm.OpinionPanel(df, {"econ": ("econ_20", "econ_22", 5)}, group="segment", weight="w", homophily="party")
@@ -116,8 +118,14 @@ later than year 28 and stores each curve on a 0.25-year grid aligned at its 1% c
 - **Series below the alignment level.** A series must have reached `threshold` (a fraction, default 0.01 = 1%) by
   the cutoff; otherwise `fit` raises `IneligibleSeries` (a `ValueError`). With fixed calendar origins this can be
   most of the panel: in rehearsal D7 (country x technology, origin 1997) 198 of 361 series were below 1%.
-  `threshold=0.001` aligns the bank at the 0.1% crossing instead (one extra bank per level, cached separately);
-  only the 1% default was measured. `eligible(history, series, cutoff)` tells you in advance.
+  `threshold=0.001` aligns the bank at the 0.1% crossing instead (one extra bank per level, cached separately).
+  It is **worse where 1% works** *(this port, synthetic check)*: on 25 synthetic Bass series (5% noise) that had
+  observed both crossings, cutoff t0(1%) + 4, h = 1..5, aligning at 0.1% raised MAE from 7.73 to 9.01 (ABM, bank
+  600 x 2,000; paired diff +1.28 [+0.57, +2.04]) and from 3.83 to 4.23 (Bass control), and the ABM's 80% band
+  coverage fell from 0.50 to 0.26. A 10,000-agent bank gave the same picture, so it is not agent granularity. Use
+  0.1% only as the fallback for the series 1% cannot align (`on_ineligible="nan"`, then fill, as in the usage
+  above), and report how many rows the fallback covers. `threshold` is a fraction: 0.1 means 10% and warns.
+  `eligible(history, series, cutoff)` tells you in advance.
 - **Series far past the alignment level.** Bank curves end 32 years (`R_MAX`) after the crossing. A cutoff or
   forecast beyond that (calendar origins on a technology that crossed 1% decades earlier) raises `IneligibleSeries`
   too; before this check it returned a flat value at the grid end. Use the curve baselines for those series.
@@ -127,9 +135,12 @@ M1). `calendar_origins=[1991, ..., 1996]` uses the same fixed calendar years for
 series by default; concatenate two calls for both kinds); `cutoff_rel` is then only a label. `on_ineligible`
 decides what happens when a method cannot align a (series, origin) block: `"raise"` (default, the old behaviour),
 `"skip"` (drop the whole block, so every method is scored on the same rows) or `"nan"` (keep the rows, NaN for that
-method, fill with your fallback). Either way `frame.attrs` lists `ineligible` ({series, cutoff, method}),
-`ineligible_series` and `n_ineligible`. `adoption.fit_many(method, history, cutoff, on_ineligible="skip")` does
-the same for one cutoff and returns `models`, `ineligible`, `n_ineligible`. `fit_many`, `IneligibleSeries` and
+method, fill with your fallback). Either way `frame.attrs` lists `ineligible` ({series, cutoff, method}, every
+method that cannot align the block), `ineligible_series` and `n_ineligible` (distinct series, any method).
+"skip" scores the methods only on series the ABC can align, which is the easier, already-adopting part of the panel:
+say so next to the numbers, or use "nan" with a fallback to keep every series.
+`adoption.fit_many(method, history, cutoff, on_ineligible="skip")` does the same for one cutoff ("skip" or
+"raise") and returns `models`, `ineligible`, `n_ineligible`. `fit_many`, `IneligibleSeries` and
 `FitMany` live in `simengine.abm.adoption` (not re-exported from `simengine.abm` yet).
 
 ## Adoption baselines
@@ -146,8 +157,12 @@ NLS. The S-curve fits use multi-start least squares with m bounded below by the 
   keeps zeros finite (this port's choice). In rehearsal D7 (361 country x technology series, fixed origins
   1991-1996, h=1..5, per 100 people) a hand-written version (last 3 years, phi 0.8) was the strongest simple
   baseline on dev: 1.731 MAE vs Gompertz 1.783, linear 1.885,
-  Bass 1.950, naive 2.610 **[prova D7 NOTLAR]**. The library version was not re-measured. Near saturation it
-  overshoots (a pooled log-growth model took 42 to 150 there), so keep `upper` and do not drop `phi` to 1 lightly.
+  Bass 1.950, naive 2.610 **[prova D7 NOTLAR]**. **It did not hold on the test origin:** at 1997 -> 1998-2002 the
+  same rule scored 4.571 MAE, behind the ABM arm with fallback (4.435) and the organiser's simple linear rule
+  (4.271), and some of its forecasts hit that run's 150 clip **[prova D7 SONUC]**. The dev origins (1991-1996)
+  had low levels; from a higher level, 5 years of held log growth overshoots even with phi 0.8. The library
+  version was not re-measured. Keep `upper` at the real ceiling, put `linear` and `gompertz` next to it, and
+  check the test-origin forecast range before trusting a dev win.
 
 Measured on the internet dev set (122 series) **[makro RAPOR M1]**: naive 20.42, linear 12.75, damped 13.69,
 logistic 16.96, Gompertz 12.39, Bass 15.97, Bass + analogy 15.94. On US households: linear 8.70 is the best
