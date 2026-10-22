@@ -20,12 +20,14 @@ texts (all rows; generated texts are only transformed) and concatenates the two 
 numpy, sklearn-compatible defaults; `TfidfEncoder` can also be fit on a larger corpus and passed in). Any
 callable ``texts -> (n, d) array`` works, e.g. ``sim.SSR(model).embed`` for a sentence encoder; tests pass a toy
 callable so no model is downloaded. Ties (e.g. an empty generated text) are broken at random with ``seed`` and the
-reciprocal rank uses the average rank over ties, so a blank text scores chance, not candidate 0.
+reciprocal rank uses the average rank over ties, so a blank text scores chance, not candidate 0. TF-IDF rewards
+shared wording (a person's own vocabulary and style) as much as the reason; report an embedding row next to it.
 """
 from __future__ import annotations
 
 import math
 import re
+import warnings
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -130,14 +132,16 @@ def _choose(scores: np.ndarray, rng: np.random.Generator) -> int:
 
 
 def why_match(generated, candidates: Sequence[Sequence[str]], truth_idx: Sequence[int] | int, *,
-              encoder: str | Encoder = "tfidf", ids: Sequence | None = None, seed: int = 0) -> pd.DataFrame:
+              encoder: str | Encoder = "tfidf", ids: Sequence | None = None, groups: Sequence | None = None,
+              seed: int = 0) -> pd.DataFrame:
     """Score each arm's generated reason against N candidate real reasons -> EvalFrame (task 'multiclass').
 
     generated: {arm: [text per row]} (or a DataFrame with one column per arm, or one list -> arm "gen").
     candidates: per row, the N candidate texts (N may differ across rows). truth_idx: index of the true candidate per
     row (or one int for all rows; shuffle positions so it is not constant). encoder: "tfidf" or a callable
-    texts -> (n, d) array (an object with ``.embed`` also works). ids: person / unit id per row -> ``unit`` and
-    ``group`` (bootstrap clusters; pass person ids when a person has several rows).
+    texts -> (n, d) array (an object with ``.embed`` also works). ids: id per row -> ``unit`` (repeats get a
+    ``#k`` suffix so units stay unique) and, unless ``groups`` is given, ``group``. groups: bootstrap cluster per
+    row (the person id when a person has several rows, e.g. person x product units).
 
     Columns: unit, group, truth (true index), n_candidates, chance (1/N), pred_<arm> (chosen index), rr_<arm>
     (reciprocal rank of the true candidate, average rank over ties). ``frame.attrs["why"]`` holds the encoder name
@@ -157,8 +161,12 @@ def why_match(generated, candidates: Sequence[Sequence[str]], truth_idx: Sequenc
         raise ValueError("why_match: every row needs at least 2 candidates")
     if ((truth < 0) | (truth >= sizes)).any():
         raise ValueError("why_match: truth_idx out of range for its candidate list")
-    if ids is not None and len(ids) != n:
-        raise ValueError(f"why_match: ids has {len(ids)} entries, candidates has {n} rows")
+    for nm, v in (("ids", ids), ("groups", groups)):
+        if v is not None and len(v) != n:
+            raise ValueError(f"why_match: {nm} has {len(v)} entries, candidates has {n} rows")
+    if n >= 10 and len(np.unique(truth)) == 1:
+        warnings.warn("why_match: truth_idx is the same position in every row; evaluate's majority-class baseline "
+                      "then scores 1.0. Shuffle candidate positions when building the sets", stacklevel=2)
 
     if isinstance(encoder, str):
         if encoder != "tfidf":
@@ -181,8 +189,9 @@ def why_match(generated, candidates: Sequence[Sequence[str]], truth_idx: Sequenc
         sim_rows = lambda G: [Cv[start[i]:start[i + 1]] @ G[i] for i in range(n)]
         embed = lambda texts: _unit(enc(texts))
     rng = np.random.default_rng(seed)
-    unit = list(ids) if ids is not None else list(range(n))
-    out = pd.DataFrame({"unit": unit, "group": unit, "truth": truth, "n_candidates": sizes, "chance": 1.0 / sizes})
+    unit = _unique(list(ids)) if ids is not None else list(range(n))
+    group = list(groups) if groups is not None else (list(ids) if ids is not None else unit)
+    out = pd.DataFrame({"unit": unit, "group": group, "truth": truth, "n_candidates": sizes, "chance": 1.0 / sizes})
     for a, g in arms.items():
         texts = [str(t) if t is not None and t == t else "" for t in g]
         rows = sim_rows(embed(texts)) if n else []
@@ -197,6 +206,17 @@ def why_match(generated, candidates: Sequence[Sequence[str]], truth_idx: Sequenc
         out[RR_PREFIX + a] = rr
     out.attrs["why"] = {"encoder": enc_name, "arms": list(arms), "chance_accuracy": float(np.mean(1.0 / sizes)) if n
                         else None, "chance_mrr": float(np.mean([_harmonic(k) / k for k in sizes])) if n else None}
+    return out
+
+
+def _unique(ids: list) -> list:
+    """Repeated ids -> "<id>#<k>" from the second occurrence on (evaluate audits repeated units)."""
+    seen: dict = {}
+    out = []
+    for u in ids:
+        k = seen.get(u, 0)
+        seen[u] = k + 1
+        out.append(u if k == 0 else f"{u}#{k}")
     return out
 
 

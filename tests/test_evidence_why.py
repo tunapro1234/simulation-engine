@@ -90,6 +90,20 @@ class TestWhyMatch(unittest.TestCase):
         self.assertEqual(list(f["pred_m1"]), [0, 0])
         self.assertEqual(list(f["pred_m2"]), [1, 1])
 
+    def test_repeated_ids_groups_and_constant_truth(self):
+        cands, truth, good, _ = _panel(n=12, seed=6)
+        person = [f"p{i // 3}" for i in range(12)]                  # person x product: 3 rows per person
+        f = why_match({"good": good}, cands, truth, ids=person)
+        self.assertTrue(f["unit"].is_unique)
+        self.assertEqual(list(f["group"]), person)
+        g = why_match({"good": good}, cands, truth, ids=list(range(12)), groups=person)
+        self.assertEqual(list(g["unit"]), list(range(12)))
+        self.assertEqual(list(g["group"]), person)
+        with self.assertWarns(UserWarning):
+            why_match({"good": good}, cands, 0)
+        with self.assertRaises(ValueError):
+            why_match({"good": good}, cands, truth, groups=person[:3])
+
     def test_errors(self):
         with self.assertRaises(ValueError):
             why_match(["a"], [["x", "y"], ["x", "y"]], 0)
