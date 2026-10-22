@@ -63,10 +63,13 @@ Outbreak Detection in Networks*, KDD 2007 (cs.cmu.edu/~jure/pubs/detect-kdd07.pd
   picks the expensive cell and ends with 10.
 - **Lazy evaluation.** Stale marginal gains are upper bounds, by submodularity. A heap re-evaluates only its top
   entry. The output is the same as the plain greedy: ties go to the lowest cell index, and gains are rounded to
-  1e-9 before comparison.
+  1e-9 before comparison, with one formula for single gains and arrays (Python `round(x, 9)` and `np.round(x, 9)`
+  disagree on some halfway values, which made lazy and plain pick different cells on such ties).
+- **Input matrix.** `M` is copied to float CSC with duplicate `(user, cell)` entries summed and stored zeros
+  dropped. Without this, a duplicate entry was credited twice under the cap and a stored zero counted as a visitor.
 - **`Placement.bound`** is their Theorem 4: `OPT <= F(A) + the best fractional knapsack of single-cell gains
   delta_s given A`. It holds for any placement, so `online_bound(M, top_visited(M, k), k=k)` also bounds OPT for a
-  baseline's cells.
+  baseline's cells. With `candidates`, the bound is for the optimum over those cells only.
 - **Zero gain.** Greedy stops when no cell adds value. With `fill=True` it spends the rest of the budget on cells
   ranked by distinct visitors. `holdout` uses `fill=True`, so every method places exactly `k` cells.
 
@@ -115,7 +118,9 @@ run = pl.adoption(freq, pl.home_cells(traj, grid, ex.users), grid, runs=50)   # 
 - `lazy_greedy`;
 - `top_visits` and `top_visitors`;
 - `random`: the mean of `random_seeds` draws among cells visited in train;
-- `oracle_test`: greedy fitted on the **test** days. This is an in-sample ceiling, not a method.
+- `oracle_test`: greedy fitted on the **test** days. This is an in-sample reference, not a method. It is greedy,
+  not the optimum, so it is not a strict ceiling: with `r = 3` (500 m, `k = 10`) its test reach is 0.424 against
+  0.428 for the train-fitted greedy.
 
 The audience is the users with at least one test exposure. `diff_lo` / `diff_hi` are the 95% paired
 user-bootstrap CI of `test_reach_share(lazy_greedy) - test_reach_share(method)`.
@@ -171,7 +176,7 @@ What the tables show:
 
 - **Greedy against the baselines.** Coverage greedy beats top-k-visited by 7-20 points of test reach from `k = 10`
   on, at both grid sizes. At `k = 5` on 500 m cells it ties, with a CI that includes 0. Random is far behind.
-- **Cost of the temporal shift.** The in-sample oracle is 1-9 points above greedy, with the gap growing with `k`.
+- **Cost of the temporal shift.** The in-sample oracle is 0-9 points above greedy, with the gap growing with `k`.
   Train reach overstates test reach: at 500 m and `k = 50`, train reach is 0.954 while test reach is 0.739.
 - **Frequency.** Top-k cells deliver about 2x the frequency of greedy. At 500 m and `k = 50`, test frequency is
   9.04 for top_visits against 3.92 for greedy. The effective reach at 3+ is about the same: 0.390 against 0.384.
@@ -200,17 +205,34 @@ Paired CIs (real-train greedy minus simulated source):
 
 Every source beats the top-k baseline. A stochastic simulator (Markov sample, EPR) is about as good as the raw
 history for this purpose. It may be a little better at coarse cells, where sampling smooths over the user's whole
-60-day history. This is a single seed, and the query timing leak noted above applies.
+60-day history. This is a single seed.
+
+**Without the timing leak** (review re-run, same data and seed): the query rows were the last 15 train days
+(45-59) shifted by 15 days, so the simulators saw nothing from the test days. Test reach share:
+
+| grid, k | real train | slot_mode | markov_sample | EPR |
+|---|---|---|---|---|
+| 500 m, 10 | 0.431 | 0.390 | 0.429 | 0.419 |
+| 500 m, 50 | 0.739 | 0.698 | 0.749 | 0.741 |
+| 2 km, 10 | 0.681 | 0.664 | 0.689 | 0.680 |
+| 2 km, 50 | 0.923 | 0.922 | 0.949 | 0.937 |
+
+The picture does not change: slot_mode is worse at both `k` on 500 m cells ([+0.028, +0.053] and [+0.027,
++0.055]), and at 2 km and `k = 50` Markov sample and EPR are better than the real history ([-0.034, -0.018] and
+[-0.023, -0.006]). The other CIs include 0. The leak was not what made the simulators look good.
 
 ### Speed (32-core box shared with other jobs, 3 repeats, `size=1`, 767,420 non-zeros)
 
 | k | lazy greedy | plain greedy | evaluations (lazy / plain) |
 |---|---|---|---|
 | 50 | 0.30-0.40 s | 0.61-0.82 s | 63,040 / 2,000,000 |
-| 200 (stops at 104 cells, full coverage) | 0.47-0.56 s | 1.26-1.33 s | 88,115 / 4,160,000 |
+| 200 (stops at 103 cells, full coverage) | 0.47-0.56 s | 1.26-1.33 s | 88,115 / 4,160,000 |
 
-The lazy count includes one full pass over the 40,000 cells. The first call in a fresh process was slower: 2.4 s
-lazy against 1.0 s plain, which is not understood. The load average was about 70 at the time. The holdout over 5 values of `k` took 6-10 s per grid.
+The lazy count includes one full pass over the 40,000 cells. The plain count is 104 passes: the 104th finds no
+gain. In the first measurement the first call in a fresh process was slower: 2.4 s lazy against 1.0 s plain, at a
+load average of about 70. A review re-run did not reproduce it (load average 22-55, three fresh processes,
+`k = 50`): the first call took 0.32-0.36 s when lazy went first and 0.73 s when plain went first. The holdout over
+5 values of `k` took 6-10 s per grid.
 
 ### Adoption illustration (uncalibrated, no ground truth)
 
@@ -241,6 +263,6 @@ against brute force on small random instances.
   direction or dwell time. With `unit="day"`, one sighting per day per cell is counted.
 - **Cell costs are the caller's.** No price data is included.
 - **Lazy greedy keeps a Python heap.** It needs far fewer gain evaluations, but the plain greedy is one vectorised
-  pass per pick. See the timing below for this scale.
+  pass per pick. See the timing above for this scale.
 - **The adoption step is a mechanism sketch, not a fitted model.** `p_exposure`, `q` and the kernel are
   uncalibrated.
