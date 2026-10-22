@@ -169,6 +169,8 @@ def _calls(llm, prompts: Sequence[tuple[str, str]], max_tokens: int, llm_kw: dic
     from ...llm.parallel import parallel_map
 
     kw = dict(llm_kw or {})
+    if samples is not None and "sample" in kw:
+        raise ValueError("llm_kw must not set 'sample' here (the builder numbers the samples; use start=)")
     jobs = [(s, u, {"sample": samples[i]} if samples is not None else {}) for i, (s, u) in enumerate(prompts)]
     return [r.text for r in parallel_map(lambda j: llm.complete(j[0], j[1], max_tokens=max_tokens, **j[2], **kw),
                                          jobs, parallel=parallel)]
@@ -248,7 +250,7 @@ def estimate_demographics(llm, stories: Sequence[dict], questions: Sequence[dict
 
 def _story_prob(story: dict, key: str, value: Any) -> float:
     d = (story.get("demographics") or {}).get(key)
-    if d is None:
+    if d is None or value is None:                          # no estimate, or the person lacks the trait
         return 0.0
     want = _norm(value)
     if isinstance(d, Mapping):
@@ -304,6 +306,12 @@ def match_backstories(people: Sequence[dict], pool: Sequence[dict], keys: Sequen
     hungarian: one-to-one maximum weight matching (scipy; needs len(pool) >= len(people))."""
     pool = _check_pool(pool)
     keys = list(keys)
+    ids = [str(p["id"]) for p in people]
+    if len(set(ids)) != len(ids):
+        raise ValueError("person ids must be unique")
+    lacking = [i for i, p in zip(ids, people) if any(_trait(Injector.person_fields(p), k) is None for k in keys)]
+    if lacking:                                           # weight 0 everywhere would hand them an arbitrary story
+        raise MissingPersonField(f"people {lacking[:5]}{' ...' if len(lacking) > 5 else ''} lack a trait in {keys}")
     if method == "greedy":
         return {str(p["id"]): _greedy_pick(Injector.person_fields(p), pool, keys, seed, str(p["id"]))[0]
                 for p in people}
@@ -490,6 +498,16 @@ class AnthologyGreedy(_BackstoryParams):
         if not self.keys:
             raise ValueError("anthology_greedy needs keys= (traits to match on)")
         self._pool: list[dict] | None = None
+
+    @property
+    def label(self) -> str:
+        """A list pool shows as its size and a content hash, not its full text."""
+        params = dict(self.params)
+        if not isinstance(params.get("pool", ""), str):
+            stories = list(params["pool"])
+            digest = _stable(*(f"{s.get('id')}\x01{s.get('text')}" if isinstance(s, Mapping) else s for s in stories))
+            params["pool"] = f"<{len(stories)} stories {digest[:8]}>"
+        return f"{self.name}({','.join(f'{k}={v}' for k, v in sorted(params.items()))})" if params else self.name
 
     def pool(self) -> list[dict]:
         if self._pool is None:
