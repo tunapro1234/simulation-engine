@@ -170,6 +170,38 @@ class TestHyperband(unittest.TestCase):
         self.assertGreaterEqual(out["winner"]["x"], 0.5)
         self.assertFalse(math.isnan(out["score"]))
 
+    def test_protocol_runner_without_screen(self):
+        class Runner:                                                   # FidelityRunner, not a MultiFidelity
+            max_budget, min_budget, unit = 27, 1, "llm_calls"
+
+            def __init__(self):
+                self.budgets = []
+
+            def __call__(self, cfg, budget):
+                self.budgets.append(budget)
+                return (cfg["x"] - 0.3) ** 2
+
+        run = Runner()
+        self.assertIsInstance(run, FidelityRunner)
+        out = hyperband(run, space_sampler(Space({"x": (0.0, 1.0)})), higher_is_better=False)
+        self.assertEqual(sorted(set(run.budgets)), [1, 3, 9, 27])
+        self.assertEqual(out["budget"], sum(run.budgets))
+        out = asha(Runner(), space_sampler(Space({"x": (0.0, 1.0)})), higher_is_better=False, max_trials=12)
+        self.assertEqual(out["trials"], 12)
+
+    def test_budget_range_narrow_ok_widen_refused(self):
+        run = UnitRunner(score_units, N)
+        out = hyperband(run, space(), higher_is_better=False, max_budget=27)
+        self.assertEqual(out["max_budget"], 27)
+        self.assertEqual(max(b for _, b, _ in run.log), 27)
+        self.assertEqual(out["budget"], sum(b for _, b, _ in run.log))
+        mf = MultiFidelity(lambda c, b: c["x"], 27, min_budget=3)
+        for kw in ({"max_budget": 81}, {"min_budget": 1}):
+            with self.assertRaises(ValueError):                         # would be clamped: nominal budget wrong
+                hyperband(mf, space(), higher_is_better=False, **kw)
+            with self.assertRaises(ValueError):
+                asha(mf, space(), higher_is_better=False, max_trials=3, **kw)
+
     def test_deterministic(self):
         a = hyperband(UnitRunner(score_units, N), space(), higher_is_better=False, seed=4)
         b = hyperband(UnitRunner(score_units, N), space(), higher_is_better=False, seed=4)
