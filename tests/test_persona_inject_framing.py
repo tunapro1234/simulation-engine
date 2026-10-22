@@ -57,6 +57,18 @@ class TestNeeds(unittest.TestCase):
         with self.assertRaises(pi.MissingPersonField):     # keys select nothing present
             pi.get_injector("framed", keys=["income"])(person(), Q)
 
+    def test_pandas_missing_values_omitted(self):
+        try:
+            import numpy as np
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed")
+        row = pd.Series({"age": 30, "income": pd.NA, "when": pd.NaT, "score": np.float32("nan"), "tags": ["a", None]})
+        p = pi.get_injector("argyle_backstory")({"id": "x", "fields": row.to_dict()}, Q)
+        self.assertEqual(p.meta["keys"], ["age", "tags"])
+        self.assertNotIn("nan", p.user.lower())
+        self.assertIn("My tags is a.", p.user)
+
     def test_empty_fragment_omitted(self):
         p = pi.get_injector("argyle_backstory")({"id": "x", "fields": {"age": 30, "income": None}}, Q)
         self.assertIn("My age is 30.", p.user)
@@ -70,7 +82,7 @@ class TestRender(unittest.TestCase):
             self.assertTrue(p.user.rstrip().endswith('{"answer": "<your choice>"}'), inj.label)
             self.assertIn("north", every_text(p), inj.label)
             self.assertEqual(p.meta["injector"], inj.name)
-            self.assertEqual(pi.parse_option('{"answer": "yes"}', Q), "yes")
+            self.assertEqual(every_text(p).count(Q["text"]), 2, inj.label)   # once in user, once more in flatten()
 
     def test_placement(self):
         s = pi.get_injector("framed", placement="system")(person(), Q)
@@ -100,16 +112,45 @@ class TestRender(unittest.TestCase):
 
     def test_presets(self):
         hc = pi.get_injector("hu_collier_profile")(person(), Q)
-        self.assertTrue(hc.system.startswith("Your Profile:\nYour likes cars is yes."))
+        self.assertEqual(hc.system, "Your Profile: Your likes cars is yes. Your age is 21. Your region is north.")
         lt = pi.get_injector("lutz_third_person")(person(), Q)
         self.assertTrue(lt.user.startswith("Think of a person"))
-        li = pi.get_injector("lutz_interview")(person(), Q)
-        self.assertTrue(li.system.startswith("You are an interviewee."))
-        self.assertEqual(len(li.history), 6)                     # 3 attributes x (question, answer)
-        self.assertEqual(li.history[-1], ("assistant", "My region is north."))
+        self.assertIn("\n\nHow would this person answer the following question: Do you own a car?", lt.user)
+        self.assertNotIn("Answer as", lt.user)
+        lit = pi.get_injector("lutz_interview", placement="turns")(person(), Q)
+        self.assertTrue(lit.system.startswith("You are an interviewee."))
+        self.assertEqual(len(lit.history), 6)                    # 3 attributes x (question, answer)
+        self.assertEqual(lit.history[-1], ("assistant", "My region is north."))
         ab = pi.get_injector("argyle_backstory", phrases={"age": "In terms of my age, I am {value}."})(person(), Q)
         self.assertIn("In terms of my age, I am 21.", ab.user)
         self.assertEqual(pi.get_injector("argyle_backstory", voice="third").voice, "third")   # knobs still work
+
+    def test_lutz_interview_is_one_user_prompt(self):
+        """Paper Table 3: all in the user prompt, the task is the last interviewer line."""
+        li = pi.get_injector("lutz_interview")(person(), Q)
+        self.assertEqual((li.system, li.history), ("", []))
+        lines = li.user.splitlines()
+        self.assertEqual(lines[0], "You are an interviewee. Based on your previous answers, provide an answer to "
+                                   "the last question.")
+        self.assertEqual(lines[1:7:2], ["Interviewer: What is your likes cars?", "Interviewer: What is your age?",
+                                        "Interviewer: What is your region?"])
+        self.assertEqual(lines[6], "Interviewee: My region is north.")
+        self.assertEqual(lines[7], "Interviewer: How would you answer the following question: Do you own a car?")
+
+    def test_wording_params(self):
+        p = pi.get_injector("framed", placement="user", closing="", lead="Q:", header="Profile -", header_sep=" ")
+        u = p(person(), Q).user
+        self.assertTrue(u.startswith("Profile - - likes cars: yes"))
+        self.assertNotIn("Answer as", u)
+        self.assertIn("\n\nQ: Do you own a car?", u)
+        ab = pi.get_injector("argyle_backstory", phrases={"age": "{literal} braces, age {value}."})(person(), Q)
+        self.assertIn("{literal} braces, age 21.", ab.user)
+
+    def test_unknown_param_rejected(self):
+        with self.assertRaises(TypeError):
+            pi.get_injector("framed", fromat="json")
+        with self.assertRaises(TypeError):
+            grid(voices=("first",), formats=("prose",), oder="sorted")
 
     def test_order_and_keys(self):
         f = {"b": 1, "a": 2, "c": 3}
@@ -118,6 +159,7 @@ class TestRender(unittest.TestCase):
         self.assertEqual(keys(order="sorted"), ["a", "b", "c"])
         self.assertEqual(keys(order="reversed"), ["c", "a", "b"])
         self.assertEqual(keys(keys=["c", "b"]), ["c", "b"])
+        self.assertEqual(keys(keys=["c", "b", "c"]), ["c", "b"])  # duplicates once
 
     def test_shuffle_deterministic_with_seed(self):
         f = {f"k{i}": i for i in range(12)}
@@ -142,7 +184,7 @@ class TestLeakage(unittest.TestCase):
 
     def test_target_and_excluded_fields_dropped(self):
         p = person(q0="LEAK_TARGET", q1="LEAK_EXCL")
-        for inj in grid():
+        for inj in grid() + [pi.get_injector(n) for n in NAMES]:
             txt = every_text(inj(p, {**Q, "exclude": ["q1"]}))
             self.assertNotIn("LEAK_TARGET", txt, inj.label)
             self.assertNotIn("LEAK_EXCL", txt, inj.label)
