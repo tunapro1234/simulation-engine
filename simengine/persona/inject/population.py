@@ -37,17 +37,17 @@ from ._base import REGISTRY, Injector, MissingPersonField, Prompt, get_injector,
 
 FAMILY = "population"
 MEISTER = "Meister, Guestrin & Hashimoto 2024, Benchmarking Distributional Alignment of LLMs (arXiv:2411.05403)"
-SUBPOP = "Suh et al. 2025, SubPOP (arXiv:2502.16761)"
 ARGYLE = "Argyle et al. 2023, Out of One, Many: silicon sampling (arXiv:2209.06899)"
 
 
 # ---------------------------------------------------------------- cells
 
 def cell_fields(person: dict, keys: Sequence[str] | None) -> dict:
-    """The person's cell attributes (all fields when keys is None); a missing key raises MissingPersonField."""
+    """The person's cell attributes (all fields, sorted by name, when keys is None; keys=[] is one cell for
+    everyone); a missing key raises MissingPersonField."""
     f = Injector.person_fields(person)
-    if keys is None:
-        return {k: v for k, v in f.items() if v not in (None, "")}
+    if keys is None:                            # sorted: the cell id must not depend on field insertion order
+        return {k: f[k] for k in sorted(f, key=str) if f[k] not in (None, "")}
     missing = [k for k in keys if f.get(k) in (None, "")]
     if missing:
         raise MissingPersonField(f"cell keys {missing} missing from person {person.get('id')!r} fields "
@@ -82,13 +82,13 @@ def _draw(seed: int, pid: Any, draws: int) -> int:
 
 
 class _Cell(Injector):
-    """Shared constructor: `keys` = the fields that define the cell (None = all fields)."""
+    """Shared constructor: `keys` = the fields that define the cell (None = all fields, [] = everyone)."""
     family = FAMILY
     needs = ("fields",)
 
     def __init__(self, keys: Sequence[str] | None = None, **params: Any):
-        super().__init__(**({"keys": list(keys)} if keys else {}), **params)
-        self.keys = list(keys) if keys else None
+        super().__init__(**({"keys": list(keys)} if keys is not None else {}), **params)
+        self.keys = list(keys) if keys is not None else None
 
     def group_system(self, person: dict) -> tuple[str, dict]:
         cf = cell_fields(person, self.keys)
