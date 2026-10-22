@@ -1,6 +1,7 @@
 """Otomatik baseline'lar (çapraz uydurmalı) ve kontrol sütunları.
 
-rastgele    bilgi yok (ikili 0,5 · tekdüze dağılım · madde içi rastgele gerçek değer · ab'de hep beraberlik)
+rastgele    bilgi yok (ikili 0,5 · tekdüze dağılım · madde içi rastgele gerçek değer · ab'de hep beraberlik);
+            sürekli görevde tek satırlı madde değerini başka maddelerin satırlarından çeker (kendi gerçeği değil)
 marjinal    madde başına ortalama/medyan/sınıf payı (eğitim katlarından); "herkes aynı" tahmini
 demografi   madde × segment ortalaması, maddeye doğru büzülmüş (k=10); segment varsa
 karistir:Y  Y'nin tahminleri madde içinde birimler arasında karıştırılır: kişiye özgü bilgi silinir,
@@ -133,7 +134,9 @@ def baselineler(veri, ozet_surekli: str = "mean", rastgele_tohum: int = 0) -> di
         if seg:
             out["demografi"] = (f"Demografi sınıf payları ({veri.segmentler[0]})", _sinif_baseline(veri, True))
     elif g == "surekli":
-        out["rastgele"] = ("Rastgele (madde içi gerçek değer)", _rastgele_surekli(veri, rastgele_tohum))
+        tek = "madde" in d and not (d.groupby("madde").size() > 1).any()
+        out["rastgele"] = ("Rastgele (başka maddenin gerçek değeri; madde başına tek satır)" if tek
+                           else "Rastgele (madde içi gerçek değer)", _rastgele_surekli(veri, rastgele_tohum))
         ad = "Madde medyanı" if ozet_surekli == "median" else "Madde ortalaması"
         out["marjinal"] = (ad if "madde" in d else ad.replace("Madde", "Genel"), _skaler_baseline(veri, ozet_surekli, False))
         if seg:
@@ -164,15 +167,29 @@ def _ab_kol(d, K: int = 5):
 
 
 def _rastgele_surekli(veri, tohum):
-    """Madde içinde başka bir birimin gerçek değeri: marjinali korur, bilgiyi siler."""
+    """Madde içinde başka bir birimin gerçek değeri: marjinali korur, bilgiyi siler.
+
+    Tek satırlı maddede madde içi permütasyon gerçeği kopyalar (MAE 0, en güçlü taban olur, oranlar sıfıra
+    bölünür); o satırlar başka maddelerin satırlarından (bir-dışarıda havuz) rastgele bir gerçek değer alır."""
     d = veri.df
     y = d["gercek"].to_numpy(float)
     rng = np.random.default_rng(tohum)
     if "madde" not in d:
         return rng.permutation(y)
     out = np.empty(len(y))
+    tekler = []
     for _, idx in d.groupby("madde").indices.items():
-        out[idx] = rng.permutation(y[idx]) if len(idx) > 1 else y[idx]
+        if len(idx) > 1:
+            out[idx] = rng.permutation(y[idx])
+        else:
+            tekler.append(idx[0])
+    n = len(y)
+    for i in tekler:
+        if n < 2:  # havuz boş: başka satır yok
+            out[i] = y[i]
+            continue
+        j = int(rng.integers(n - 1))
+        out[i] = y[j + (j >= i)]  # i dışındaki satırlardan tekdüze (i tek satırlı, yani kendi maddesi yalnız i)
     return out
 
 
