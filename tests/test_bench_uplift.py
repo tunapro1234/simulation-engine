@@ -80,6 +80,10 @@ class TestMetrics(unittest.TestCase):
         top = s >= self.n - int(0.3 * self.n)
         want = self.y[top & (self.t == 1)].mean() - self.y[top & (self.t == 0)].mean()
         self.assertAlmostEqual(U.uplift_at_k(self.y, self.t, s, 0.3), want)
+        # k n not an integer: the first int(k n) rows (scikit-uplift `uplift_at_k`, strategy "overall")
+        o = np.argsort(s, kind="mergesort")[::-1][: int(self.n * 0.333)]
+        yo, to = self.y[o], self.t[o]
+        self.assertAlmostEqual(U.uplift_at_k(self.y, self.t, s, 0.333), yo[to == 1].mean() - yo[to == 0].mean())
 
     def test_task_score_has_ci(self):
         fr = pd.DataFrame({"truth": self.y.astype(int), "treatment": self.t.astype(int), "pred_m": self.s})
@@ -170,6 +174,7 @@ def _x5(root, n=3000):
     issue = pd.Timestamp("2017-03-01") + pd.to_timedelta(rng.integers(0, 600, n), unit="D")
     redeem = (issue + pd.to_timedelta(rng.integers(0, 90, n), unit="D")).astype(str).to_numpy(object)
     redeem[rng.random(n) < 0.1] = None
+    redeem[5:15] = "2019-04-02 10:00:00"  # after the SMS: post-treatment, must be masked
     pd.DataFrame({"client_id": ids, "treatment_flg": t, "target": y}).to_csv(
         os.path.join(d, "uplift_train.csv.gz"), index=False)
     pd.DataFrame({"client_id": ids[::-1], "first_issue_date": issue.astype(str)[::-1], "first_redeem_date": redeem[::-1],
@@ -239,6 +244,9 @@ class TestTasks(unittest.TestCase):
         self.assertEqual(int(allx.age.isna().sum()), 2)        # -5 and 1500 masked
         self.assertTrue((allx.redeem_delay.dropna() >= 0).all())
         self.assertGreater(allx.redeem_day.isna().mean(), 0.05)
+        cut = (U.X5Uplift.CUTOFF - pd.Timestamp("2017-01-01")).days
+        self.assertTrue((allx.redeem_day.dropna() < cut).all())
+        self.assertEqual(int(allx.redeem_day.isna().sum()) - int((allx.redeem_delay.isna()).sum()), 0)
 
 
 DATA = os.environ.get("SIMENGINE_DATA")
