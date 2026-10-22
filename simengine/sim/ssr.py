@@ -12,17 +12,33 @@ Turkish answers the runners also ask for a one-sentence English paraphrase and S
     P = s.distribution(["I'd probably buy it if it went on sale."], "intent")   # (1, 5)
     SSR.expected(P)                                   # [~3.6]
     s = SSR(encoder=my_fn)                            # any texts -> (n, d) array; no model download
+    s = SSR(max_chars=2000, cache_dir="emb-cache", progress=True)   # long texts: cut, cache on disk, report rate
+    E = s.embed(texts, max_chars=800)                 # per-call override of the cut
 
 The embedding model loads offline by default (HF_HUB_OFFLINE=1 unless already set); point SIMENGINE_HF_CACHE at
-a local Hugging Face cache, or pass `cache_folder`. Default model bge-base: on 10 hand-labelled intent
-sentences, expected score vs label Spearman 0.97 (all-MiniLM-L6-v2: 0.62; sahne branch, ssr.py comment and
-RAPOR.md "Mimari", 21 Oct).
+a local Hugging Face cache, or pass `cache_folder`. A model missing from the cache raises an OSError that names
+SIMENGINE_HF_CACHE, `cache_folder`, HF_HOME and `offline=False`.
+
+Long texts: each text is cut to `max_chars` characters (default 2000; None = no cut, the old behaviour) before
+encoding. bge-base reads at most 512 tokens (all-MiniLM-L6-v2: 256) and English runs at roughly 4 characters per
+token, so the cut sits near what bge-base reads anyway and skips tokenising the rest. `cache_dir=` keeps one .npy per text,
+keyed by sha256(model name + text) and written atomically, so a rerun or a second process re-uses embeddings
+(with `encoder=` the key is the encoder's qualified name, or `cache_key=`). `progress=True` prints one stderr line
+per `progress_every` new texts with texts/s; a callable gets (done, total, texts_per_s) instead. Each text is
+still embedded once per SSR object (in-memory cache).
+
+Default model bge-base: on 10 hand-labelled intent sentences, expected score vs label Spearman 0.97
+(all-MiniLM-L6-v2: 0.62; sahne branch, ssr.py comment and RAPOR.md "Mimari", 21 Oct).
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import sys
+import tempfile
 import threading
-from typing import Callable, Sequence
+import time
+from typing import Callable, Sequence, Union
 
 import numpy as np
 
@@ -71,6 +87,24 @@ SCALE_ALIASES = {"niyet": "intent", "katilim": "agreement", "memnuniyet": "satis
                  "olasilik": "likelihood", "begeni": "liking"}
 
 
+Progress = Union[bool, Callable[[int, int, float], None], None]
+
+
+def _sentence_transformer(name: str, **kw):
+    """Load a SentenceTransformer (optional dependency). A module function so tests can replace it."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(name, **kw)
+
+
+def _missing_model_error(model: str, cache_folder: str | None, offline: bool, err: Exception) -> OSError:
+    where = f"cache_folder={cache_folder!r}" if cache_folder else "no cache_folder (SIMENGINE_HF_CACHE unset)"
+    return OSError(
+        f"SSR: could not load embedding model {model!r} ({type(err).__name__}: {err}). Looked in {where}, "
+        f"HF_HOME={os.environ.get('HF_HOME')!r}, HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE')!r} "
+        f"(offline={offline}). Point SIMENGINE_HF_CACHE (or SSR(cache_folder=...), or HF_HOME) at a local Hugging "
+        f"Face cache that holds the model, or pass offline=False to allow a download, or encoder= to skip it.")
+
+
 def anchor_sets(anchors) -> list[list[str]]:
     """Scale name, one 5-sentence list, or a list of such lists -> list of anchor sets."""
     if anchors is None:
@@ -85,7 +119,9 @@ def anchor_sets(anchors) -> list[list[str]]:
 class SSR:
     def __init__(self, model: str = DEFAULT_MODEL, temperature: float = 1.0, eps: float = 0.0,
                  cache_folder: str | None = None, device: str = "cpu",
-                 encoder: Callable[[list[str]], np.ndarray] | None = None, offline: bool = True):
+                 encoder: Callable[[list[str]], np.ndarray] | None = None, offline: bool = True,
+                 max_chars: int | None = 2000, cache_dir: str | None = None, progress: Progress = False,
+                 progress_every: int = 256, batch_size: int = 64, cache_key: str | None = None):
         self.model_name = model
         self.temperature = temperature
         self.eps = eps
@@ -93,9 +129,28 @@ class SSR:
         self.device = device
         self.encoder = encoder
         self.offline = offline
+        self.max_chars = max_chars
+        self.cache_dir = cache_dir
+        self.progress = progress
+        self.progress_every = max(1, int(progress_every))
+        self.batch_size = batch_size
+        self.cache_key = cache_key
         self._m = None
         self._lock = threading.Lock()
         self.cache: dict[str, np.ndarray] = {}
+
+    def _load(self):
+        if self.offline:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        kw = {"device": self.device}
+        if self.cache_folder:
+            kw["cache_folder"] = self.cache_folder
+        try:
+            return _sentence_transformer(self.model_name, **kw)
+        except ImportError:
+            raise
+        except (OSError, ValueError) as e:  # HF raises OSError / LocalEntryNotFoundError on an offline miss
+            raise _missing_model_error(self.model_name, self.cache_folder, self.offline, e) from e
 
     def _encode(self, texts: list[str]) -> np.ndarray:
         if self.encoder is not None:
@@ -103,23 +158,76 @@ class SSR:
             n = np.linalg.norm(E, axis=1, keepdims=True)
             return E / np.where(n > 0, n, 1)
         if self._m is None:
-            if self.offline:
-                os.environ.setdefault("HF_HUB_OFFLINE", "1")
-            from sentence_transformers import SentenceTransformer  # optional dependency
-            kw = {"device": self.device}
-            if self.cache_folder:
-                kw["cache_folder"] = self.cache_folder
-            self._m = SentenceTransformer(self.model_name, **kw)
-        return np.asarray(self._m.encode(texts, batch_size=64, normalize_embeddings=True,
+            self._m = self._load()
+        return np.asarray(self._m.encode(texts, batch_size=self.batch_size, normalize_embeddings=True,
                                          show_progress_bar=False), dtype=np.float32)
 
-    def embed(self, texts: Sequence[str]) -> np.ndarray:
-        """Normalised embeddings (n, d); a text is embedded once."""
-        texts = [str(t or "").strip() or "-" for t in texts]
+    # --- disk cache: <cache_dir>/<sha256[:2]>/<sha256>.npy, key = sha256(model key + NUL + text) ---
+    def _model_key(self) -> str:
+        if self.cache_key:
+            return self.cache_key
+        if self.encoder is None:
+            return self.model_name
+        f = self.encoder
+        return "encoder:" + getattr(f, "__module__", "") + "." + getattr(f, "__qualname__", type(f).__qualname__)
+
+    def _disk_path(self, text: str) -> str:
+        h = hashlib.sha256((self._model_key() + "\0" + text).encode("utf-8")).hexdigest()
+        return os.path.join(self.cache_dir, h[:2], h + ".npy")
+
+    def _disk_get(self, text: str) -> np.ndarray | None:
+        try:
+            return np.load(self._disk_path(text))
+        except (OSError, ValueError):
+            return None
+
+    def _disk_put(self, text: str, v: np.ndarray) -> None:
+        path = self._disk_path(text)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                np.save(f, np.asarray(v, dtype=np.float32))
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+
+    def _report(self, done: int, total: int, t0: float) -> None:
+        rate = done / max(time.perf_counter() - t0, 1e-9)
+        if callable(self.progress):
+            self.progress(done, total, rate)
+        elif self.progress:
+            print(f"SSR embed: {done}/{total} texts, {rate:.1f} texts/s", file=sys.stderr, flush=True)
+
+    def _cut(self, t, max_chars: int | None) -> str:
+        t = str(t or "").strip() or "-"
+        return t[:max_chars] if max_chars else t
+
+    def embed(self, texts: Sequence[str], max_chars: int | None = -1) -> np.ndarray:
+        """Normalised embeddings (n, d); a text is embedded once. Texts are cut to `max_chars` characters first
+        (default: the constructor's; None = no cut). Misses are looked up in `cache_dir`, then encoded in chunks of
+        `progress_every`, each chunk written to disk before the next one starts."""
+        mc = self.max_chars if max_chars == -1 else max_chars
+        texts = [self._cut(t, mc) for t in texts]
         with self._lock:
             new = [t for t in dict.fromkeys(texts) if t not in self.cache]
+            if new and self.cache_dir:
+                hit = {t: v for t in new if (v := self._disk_get(t)) is not None}
+                self.cache.update(hit)
+                new = [t for t in new if t not in hit]
             if new:
-                self.cache.update(zip(new, self._encode(new)))
+                t0, step = time.perf_counter(), self.progress_every
+                for i in range(0, len(new), step):
+                    chunk = new[i:i + step]
+                    E = self._encode(chunk)
+                    self.cache.update(zip(chunk, E))
+                    if self.cache_dir:
+                        for t, v in zip(chunk, E):
+                            self._disk_put(t, v)
+                    if self.progress:
+                        self._report(i + len(chunk), len(new), t0)
             return np.stack([self.cache[t] for t in texts])
 
     def _one_set(self, E: np.ndarray, anchors: list[str], T: float) -> np.ndarray:
