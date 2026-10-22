@@ -14,8 +14,8 @@ cell costs one call (the LLM disk cache serves the rest). The JSON keeps an "ans
     truth = pop.empirical_distribution(people, question, keys=["age_band", "region"])
     pop.tvd(res.overall, truth.overall)                             # Meister et al.'s metric
     lab = people[:50]                                               # the few people with a real answer
-    pop.ppi_distribution([p["answers"][question["id"]] for p in lab], [res.per_person[p["id"]] for p in lab],
-                         [res.per_person[p["id"]] for p in people[50:]], question["options"])
+    pop.ppi_distribution([p["answers"][question["id"]] for p in lab], [res.per_person[str(p["id"])] for p in lab],
+                         [res.per_person[str(p["id"])] for p in people[50:]], question["options"])
 
 Estimators: `ensemble` (linear pool across injectors / models), `calibrate` (Platt or isotonic for individual
 probabilities) and `ppi_mean` / `ppi_distribution` (PPI and PPI++: few real labels + many simulated ones,

@@ -14,9 +14,9 @@ truth = pop.empirical_distribution(people, question, keys=["age_band", "region"]
 pop.tvd(res.overall, truth.overall)              # Meister et al.'s metric
 
 lab, unl = people[:50], people[50:]              # few real labels, many simulated
-pop.ppi_distribution([p["answers"][question["id"]] for p in lab],
-                     [res.per_person[p["id"]] for p in lab],
-                     [res.per_person[p["id"]] for p in unl], question["options"])   # PPI++ estimate + CI per option
+pop.ppi_distribution([p["answers"][question["id"]] for p in lab],      # per_person is keyed by str(id) and
+                     [res.per_person[str(p["id"])] for p in lab],       # lacks unparsed people: drop those first
+                     [res.per_person[str(p["id"])] for p in unl], question["options"])   # PPI++ estimate + CI per option
 
 arms = [("cell_verbalized", {"keys": ["region"]}), ("cell_sample", {"keys": ["region"], "seed": 1})]
 pi.compare_injectors(llm, people, questions, "answers", arms, parse=pop.parse_modal, dry_run=True)
@@ -24,11 +24,13 @@ pi.compare_injectors(llm, people, questions, "answers", arms, parse=pop.parse_mo
 
 All four injectors need `fields`, and every `keys` entry must be present in it. A missing field or key raises
 `MissingPersonField`, and the message names both the field and the cell keys. With `keys=None` the cell is made of
-all of the person's fields. The distribution injectors only accept choice questions with at least 2 options;
+all of the person's fields (sorted by name, so the cell id does not depend on field order); `keys=[]` puts everyone
+in one cell ("the general population"). The distribution injectors only accept choice questions with at least 2 options;
 `cell_sample` also takes numeric questions. Members of a cell get the same distribution prompt, so a cell costs
 one call; `simulate_population` sends each distinct prompt only once. The reply JSON keeps an `"answer"` field
 (the modal option). As a result, `compare_injectors` can score per person with the default parser, and
-`parse_modal` reads the distribution directly.
+`parse_modal` reads the distribution directly. `parse_distribution` maps a distribution keyed by option text before
+trying option numbers, so numeric-coded options such as `0`/`1`/`2` or a reversed `5`..`1` scale are not shifted.
 
 | injector | what goes in the prompt | params |
 |---|---|---|
@@ -68,7 +70,14 @@ Distributional Alignment of Large Language Models* (arXiv:2411.05403).**
     JSON
 - *Few-shot selection* (their A.8): the 10 questions most similar to the target by SimCSE embedding, then the 5
   whose distributions differ most. `cell_fewshot` follows this as 2k by word overlap, then k by max-min TVD.
-  Word overlap stands in for embeddings, which is a deviation.
+  Word overlap stands in for embeddings, which is a deviation. The paper does not say what the 5 are "most
+  distinct" from; its reason (stop the model copying an example's distribution) may mean distinct from the
+  target's true distribution, which would use the target's answers in the selection. `cell_fewshot` picks the k
+  most distinct from each other (max-min TVD), so the selection never looks at the target question's answers.
+- *Output formats:* the paper's verbalized output is an option-to-percent JSON map and its sequence output is 30
+  answer letters. Here the JSON also carries an `"answer"` field (the modal option) and the sequence is a JSON list
+  of option texts, so the prompts are close to, not identical with, the paper's (its exact prompts are in its
+  repository, not the paper).
 - *Published effect* (Table 1a, mean TV over datasets, steering methods and groups; lower is better):
 
   | model | verbalized | sequence (30) | log-p |
@@ -121,6 +130,9 @@ synthetic data. They are not an effect size.
   by the cell's majority share. Use TVD on `simulate_population` for the population claim.
 - **Overlapping labels:** `calibrate` and PPI need labelled people that are not reused elsewhere. The PPI CI
   assumes the labelled people are a random subset of the population.
+- **`overall` weights:** `simulate_population` weights each cell by all its people (`n`), while
+  `empirical_distribution` pools the people who have a real answer. When missing answers vary by cell, compare
+  per-cell `dist` or pass the same answered subset of people to both.
 - **`ppi_distribution` CIs:** they are marginal per option, not simultaneous, and the point shares need not sum
   to 1.
 - **Public data:** public panels such as OpinionQA may be in a model's training data. Memorisation is not tested.
