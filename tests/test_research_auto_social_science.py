@@ -309,6 +309,94 @@ class TestExperimentForecast(unittest.TestCase):
         self.assertEqual(s["n_studies"], 4)
 
 
+class TestReviewRegressions(unittest.TestCase):
+    def test_interactions_after_cause_cut(self):
+        obj = {"agents": ["a"], "outcome": {"name": "y", "question": "?"},
+               "causes": [{"name": n, "levels": [0, 1]} for n in ("p", "q", "r", "s")],
+               "interactions": [["p", "s"], ["P", "Q"], ["q", "p"]]}
+        hyps, problems = H.parse_hypotheses(obj, SCENARIO, max_causes=3)
+        h = hyps[0]
+        self.assertEqual([c.name for c in h.causes], ["p", "q", "r"])
+        self.assertEqual(h.interactions, [("p", "q")])         # s was cut; "P","Q" normalised; q:p duplicate
+        self.assertIn("duplicate", " | ".join(problems))
+        self.assertEqual(list(H.encode(h, H.design(h))[0].columns), ["p", "q", "r", "p:q"])
+
+    def test_levels_dedup_after_conversion(self):
+        obj = {"agents": ["a"], "outcome": {"name": "y", "question": "?"},
+               "causes": [{"name": "x", "levels": [10, "10", "$20"]}]}
+        hyps, _ = H.parse_hypotheses(obj, SCENARIO)
+        self.assertEqual(hyps[0].cause("x").levels, [10.0, 20.0])
+        obj["causes"][0]["levels"] = [5, "5"]
+        self.assertEqual(H.parse_hypotheses(obj, SCENARIO)[0], [])
+
+    def test_number_parsing_consistent(self):
+        self.assertEqual(H.parse_number('{"answer": "1,250"}'), 1250.0)
+        self.assertEqual(H.parse_number("about 1,250 dollars"), 1250.0)
+        self.assertEqual(H.parse_number('{"answer": "3,5"}'), 3.5)
+        self.assertTrue(np.isnan(H.parse_number('{"answer": null, "confidence": 3}')))
+
+    def test_judge_after_first_statement(self):
+        llm = FakeLLM(lambda s, u: "yes" if s == H.JUDGE_SYSTEM else '{"answer": 1}')
+        h = _hyp()
+        d = H.design(h).head(2)
+        log = H.DecisionLog()
+        H.ConversationSimulator(llm, max_statements=5)(h, d, log)
+        self.assertEqual(log.events("simulate")[0]["mean_statements"], 1.0)
+        log2 = H.DecisionLog()
+        H.ConversationSimulator(llm, max_statements=5, judge_from=3)(h, d, log2)
+        self.assertEqual(log2.events("simulate")[0]["mean_statements"], 3.0)
+
+    def test_outcome_agent_fallback_and_subsample_prompt(self):
+        h = H.Hypothesis(SCENARIO, ["bidder"], [H.Variable("x", "continuous", [0, 1, 2])], H.Variable("y", question="?"))
+        llm = FakeLLM(lambda s, u: '{"answer": 1}')
+        H.InterviewSimulator(llm)(h, H.design(h))
+        self.assertTrue(all(s.startswith("You are the bidder") for s, _ in llm.calls))
+        self.assertIn("Every combination", H.path_prediction_prompt(h, ["x"], 3))
+        self.assertIn("random subset", H.path_prediction_prompt(h, ["x"], 2, all_cells=False))
+        llm2 = FakeLLM(lambda s, u: json.dumps({"predictions": {"x": 1.0}}) if s == H.PATH_SYSTEM
+                       else '{"answer": 1}')
+        H.AutoSocialScience(llm2, SCENARIO, max_cells=2).run(hypotheses=[h])
+        self.assertIn("random subset", next(u for s, u in llm2.calls if s == H.PATH_SYSTEM))
+
+    def test_paired_se(self):
+        # same profile and template -> the paired difference is exactly 1 for every respondent -> se 0
+        llm = FakeLLM(lambda s, u: json.dumps({"answer": (5.0 if "STRONG" in u else 4.0)
+                                                + (1.0 if "party: Democrat" in u else 0.0)}))
+        prof = pd.DataFrame({"party": ["Democrat", "Republican"]})
+        conds = {"control": "note", "strong": "A STRONG appeal."}
+        fc = H.forecast_experiment(llm, "s", conds, "q", control="control", profiles=prof, n_per_condition=30)
+        self.assertAlmostEqual(fc.effects.se[0], 0.0)
+        fc2 = H.forecast_experiment(llm, "s", conds, "q", control="control", profiles=prof, n_per_condition=30,
+                                    same_profiles=False)
+        self.assertGreater(fc2.effects.se[0], 0.0)
+
+    def test_one_outcome_per_study(self):
+        # study s1 has two outcomes; o1 is perfectly forecast, o2 is reversed. Pooling uses both every repeat,
+        # the paper's protocol draws one per study, so per-repeat r is +1 or lower and n is one outcome's contrasts.
+        rows = []
+        for st in ("s1", "s2", "s3"):
+            for o in ("o1", "o2"):
+                for k, v in enumerate([0.0, 1.0, 3.0]):
+                    rows.append({"study": st, "dv": o, "condition": k, "true_mean": v + (st == "s2"),
+                                 "pred_mean": -v if o == "o2" else v, "true_se": 0.01})
+        df = pd.DataFrame(rows)
+        one = H.score_condition_forecasts(df, outcome="dv", repeats=16)
+        self.assertEqual(one["n"], 6)                           # 3 studies x 2 contrasts
+        self.assertEqual(one["n_units"], 6)
+        pooled = H.score_condition_forecasts(df.assign(study=df.study + ":" + df.dv), repeats=16)
+        self.assertEqual(pooled["n"], 12)
+        # row order does not change the draw
+        shuf = df.sample(frac=1, random_state=1)
+        self.assertEqual(H.score_condition_forecasts(shuf, outcome="dv", repeats=4),
+                         H.score_condition_forecasts(df, outcome="dv", repeats=4))
+
+    def test_log_numpy_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = H.DecisionLog(Path(tmp) / "d.jsonl")
+            log.log("x", arr=np.array([1.0, np.nan]), s=pd.Series([1, 2]))
+            self.assertEqual(json.loads((Path(tmp) / "d.jsonl").read_text())["arr"], [1.0, None])
+
+
 @unittest.skipUnless(os.environ.get("SIMENGINE_DATA"), "set $SIMENGINE_DATA for real-data checks")
 class TestRealData(unittest.TestCase):
     def test_socsci210_condition_protocol(self):
@@ -330,6 +418,10 @@ class TestRealData(unittest.TestCase):
         self.assertGreater(s["n"], 100)
         self.assertAlmostEqual(s["r"], 1.0)
         self.assertTrue(0 < s["reliability"] <= 1)
+        s1 = H.score_condition_forecasts(c.assign(pred_mean=c["mean"]), study="study_id", outcome="task_num",
+                                         condition="condition_num", true="mean", repeats=2)
+        self.assertLess(s1["n"], s["n"])                       # one outcome per study per repeat
+        self.assertGreater(s1["n_studies"], 100)
 
 
 if __name__ == "__main__":
