@@ -7,12 +7,23 @@ Output for every person x item: probability (0-1) that the event happens in the 
 
     spec = PredictionSpec()                                    # generic wording; AMAZON = the measured prompts
     res = predict_people(llm, people, ["BOOKS", "COFFEE"], level="L1", spec=spec)
+    res = predict_people(people, ["BOOKS", "COFFEE"], llm=llm, level="L1")   # same, keyword form
     frame = prediction_frame(res, truth={"u1": {"BOOKS": 1, "COFFEE": 0}, ...})
-    frame = batch_calibrate(frame, prior_rates={"BOOKS": 0.3, "COFFEE": 0.1}, col="pred_L1")
+    frame = batch_calibrate(frame, prior_rates={"BOOKS": 0.3, "COFFEE": 0.1}, col="pred_L1", out_col="pred_L1_cal")
 
-`people`: {person_id: profile} where profile is a rendered string or a mapping {question: answer}
-(rendered by `profile_text`), or a list of persona-like objects (simengine.sim.personas.as_personas).
-Profiles must hold only what is known before the prediction window.
+`people` (accepted types):
+  * list[Persona] (e.g. simengine.persona.from_history(level="L1")) or other persona-like items
+    (simengine.sim.personas.as_persona forms): the persona's answers dict (`.answers` or extra["answers"])
+    rendered by `profile_text`, else its profile text (authored.consumer_profile; otherwise name/traits/
+    narrative) without the id line and without the survey header. history_data is left out: pass `histories=`.
+  * {pid: {column: answer}}: rendered by `profile_text` (with `questions` / spec.questions).
+  * {pid: text}: used as is, minus a leading id line or survey header (spec.profile_intro is added anyway).
+Anything else raises TypeError. Profiles must hold only what is known before the prediction window.
+`histories` (L2) may also be a persona.summarize_purchases frame (see `histories_from_summary`).
+
+AMAZON.labels covers 10 of the 20 measured categories (books, health & personal care, portable device covers,
+phone cases, electronic cables, charging adapters, nutritional supplements, writing instruments, drinking cups,
+cleaning agents); other item keys are described by their key name and predict_people warns, listing them.
 
 Measured (talp73, Open e-commerce 1.0, 400 people x 20 categories x 3 seeds, claude-haiku-5-5): L1 accuracy
 0.689-0.698, below "always no" (0.764) and a survey-feature model (0.771); L2 0.792-0.802 beats always-no but
@@ -23,6 +34,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import warnings
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
@@ -32,10 +44,15 @@ import pandas as pd
 from ._stats import to_jsonable
 from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many
 from .parse import parse_item_probs, parse_text_fields
-from .personas import as_personas
+from .personas import PersonaView, as_persona
 from .ssr import SCALES, SSR
 
 RETRY_SUFFIX = "\n\n(Attempt {n}: reply with the JSON object only.)"
+SURVEY_HEADERS = ("Survey answers of this person:",)  # simengine.persona.history.PROFILE_HEADER
+# summarize_purchases column -> history_text key
+SUMMARY_TO_HISTORY = {"items": "count", "days": "days", "last_purchase": "last", "items_recent": "count_recent"}
+_SUMMARY_COLS = {"category", "quantity", *SUMMARY_TO_HISTORY}
+PEOPLE_TYPES = "people must be list[Persona], {pid: {column: answer}} or {pid: text}"
 
 
 @dataclass
@@ -72,9 +89,16 @@ class PredictionSpec:
     def label(self, key: str) -> str:
         return self.labels.get(key, str(key).replace("_", " ").capitalize())
 
+    def unlabeled(self, items: Sequence[str]) -> list[str]:
+        """Items with no explicit entry in `labels` (described by their key name)."""
+        return [str(k) for k in items if k not in self.labels]
+
 
 # talp73 v1.0 protocol, verbatim (window 2022-H2). AMAZON_QUESTIONS/LABELS are the public field labels of the
 # Open e-commerce 1.0 survey and Amazon category codes; no respondent data.
+# AMAZON.labels covers 10 of the 20 measured categories: books, health & personal care, portable device covers,
+# phone cases, electronic cables, charging adapters, nutritional supplements, writing instruments, drinking
+# cups, cleaning agents. Other keys are described by their key name and predict_people warns.
 AMAZON = PredictionSpec(
     system=("You simulate the Amazon shopping behavior of one specific real person, a US Amazon customer. "
             "Give your best calibrated probability estimates. Reply with a JSON object only."),
@@ -173,7 +197,9 @@ def history_text(summary: Mapping[str, Any], items: Sequence[str], *, recent_per
                  ) -> str:
     """Per-item past-behaviour summary -> L2 history lines (talp73 kos.gecmis_metinleri).
     summary[item]: a string (used as is), 0/None/missing ("never purchased"), or a mapping with
-    count, days, last, count_recent."""
+    count, days, last, count_recent (`histories_from_summary` builds these from a summarize_purchases frame).
+    Lines use the item key; for display names use simengine.persona.purchase_history_text(rows, labels=...)
+    and pass its text per person."""
     out = []
     for k in items:
         r = summary.get(k)
@@ -224,15 +250,110 @@ def prompt_ssr(profile: str, items: Sequence[str], spec: PredictionSpec | None =
     return spec.system_ssr, f"{spec.profile_intro}\n{profile}\n\n" + _task(spec, items, spec.subject, ssr=True)
 
 
+def _is_llm(x: Any) -> bool:
+    return callable(getattr(x, "complete", None))
+
+
+def _clean_profile(text: str, pid: str | None, spec: PredictionSpec) -> str:
+    """Drop leading id lines ("u1", "### u1", "id: u1") and survey headers: the prompt adds spec.profile_intro
+    itself and the raw id is not something the person said about themselves."""
+    heads = {h.strip() for h in (*SURVEY_HEADERS, spec.profile_intro) if h}
+    ids = set() if not pid else {pid, f"id: {pid}", f"pid: {pid}", f"persona_id: {pid}"}
+    lines = str(text).strip("\n").splitlines()
+    while lines and (not lines[0].strip() or lines[0].strip() in heads or lines[0].strip().lstrip("#").strip() in ids):
+        lines.pop(0)
+    return "\n".join(lines).strip()
+
+
+def _get(obj, key: str):
+    return obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
+
+
+def _persona_answers(x) -> Mapping | None:
+    ans = _get(x, "answers")
+    if not isinstance(ans, Mapping):
+        extra = _get(x, "extra")
+        ans = extra.get("answers") if isinstance(extra, Mapping) else None
+    return ans if isinstance(ans, Mapping) and ans else None
+
+
+def _persona_profile(x, i: int, spec: PredictionSpec, q) -> tuple[str, str]:
+    """One persona-like item -> (pid, profile): its answers dict (profile_text), else authored.consumer_profile,
+    else the persona text (name/traits/narrative) without the id line and without history_data."""
+    if not (isinstance(x, (str, Mapping, PersonaView)) or callable(getattr(x, "to_dict", None))
+            or callable(getattr(x, "text", None)) or callable(getattr(x, "metin", None))):
+        raise TypeError(f"{PEOPLE_TYPES}; item {i} is {type(x).__name__}")
+    v = as_persona(x, i)
+    ans = _persona_answers(x)
+    if ans is not None:
+        return v.pid, profile_text(ans, q, none_fields=spec.none_fields, comma_fields=spec.comma_fields)
+    a = _get(x, "authored")
+    if a is None and not isinstance(x, Mapping) and callable(getattr(x, "to_dict", None)):
+        a = (x.to_dict() or {}).get("authored")
+    cp = _get(a, "consumer_profile") if a is not None else None
+    if cp:
+        return v.pid, _clean_profile(cp, v.pid, spec)
+    hist = _get(a, "history_data") if a is not None else None
+    name = v.name if v.name and v.name != v.pid else ""
+    head = ", ".join(t for t in (name, *v.attrs) if t)
+    body = [b for b in v.body if b and b != hist]
+    return v.pid, _clean_profile("\n".join([head, *body] if head else body), v.pid, spec)
+
+
 def _profiles(people, spec: PredictionSpec, questions=None) -> dict[str, str]:
+    """`people` (see module docstring) -> {pid: profile text}. Unsupported types raise TypeError."""
+    q = questions if questions is not None else spec.questions
+    if isinstance(people, pd.DataFrame) or isinstance(people, (str, bytes)):
+        raise TypeError(f"{PEOPLE_TYPES}, got {type(people).__name__}")
+    out: dict[str, str] = {}
     if isinstance(people, Mapping):
-        q = questions if questions is not None else spec.questions
-        out = {}
         for pid, v in people.items():
-            out[str(pid)] = (profile_text(v, q, none_fields=spec.none_fields, comma_fields=spec.comma_fields)
-                             if isinstance(v, Mapping) else str(v))
+            pid = str(pid)
+            if isinstance(v, Mapping) and _persona_answers(v) is None and "identity" not in v:
+                out[pid] = profile_text(v, q, none_fields=spec.none_fields, comma_fields=spec.comma_fields)
+            elif isinstance(v, str):
+                out[pid] = _clean_profile(v, pid, spec)
+            elif v is not None and not isinstance(v, (int, float, bool, list, tuple)):
+                out[pid] = _persona_profile(v, 0, spec, q)[1]     # {pid: Persona}: the key is the id
+            else:
+                raise TypeError(f"{PEOPLE_TYPES}; value for {pid!r} is {type(v).__name__}")
         return out
-    return {p.pid: p.text("en") for p in as_personas(people)}
+    if not isinstance(people, (list, tuple)) and not hasattr(people, "__iter__"):
+        raise TypeError(f"{PEOPLE_TYPES}, got {type(people).__name__}")
+    for i, x in enumerate(people):
+        pid, text = _persona_profile(x, i, spec, q)
+        if pid in out:
+            raise ValueError(f"duplicate persona id {pid!r}")
+        out[pid] = text
+    empty = [k for k, t in out.items() if not t.strip()]
+    if empty:
+        warnings.warn(f"{len(empty)} of {len(out)} people have an empty profile (e.g. {empty[0]!r}): the prompt "
+                      "holds no persona; build personas with a survey table or answers (from_history level L1)",
+                      stacklevel=3)
+    return out
+
+
+def histories_from_summary(summary: pd.DataFrame, id_col: str | None = None) -> dict[str, dict]:
+    """`persona.summarize_purchases` frame -> {pid: {category: {count, days, last, count_recent}}} for
+    `history_text` / predict_people(histories=...). Mapping (SUMMARY_TO_HISTORY): items -> count, days -> days,
+    last_purchase -> last (str, None when never purchased), items_recent -> count_recent; quantity is unused.
+    `id_col`: default the one column that is not a summary column."""
+    if id_col is None:
+        rest = [c for c in summary.columns if c not in _SUMMARY_COLS]
+        if len(rest) != 1:
+            raise ValueError(f"cannot tell the id column of the purchase summary (candidates {rest}); pass id_col")
+        id_col = rest[0]
+    need = {id_col, "category", *SUMMARY_TO_HISTORY} - set(summary.columns)
+    if need:
+        raise ValueError(f"purchase summary lacks columns {sorted(need)} (expected persona.summarize_purchases)")
+    out: dict[str, dict] = {}
+    for r in summary.to_dict("records"):
+        d = {k: r[c] for c, k in SUMMARY_TO_HISTORY.items()}
+        d["last"] = None if _missing(d["last"]) else str(d["last"])
+        for k in ("count", "days", "count_recent"):
+            d[k] = 0 if _missing(d[k]) else int(d[k])
+        out.setdefault(str(r[id_col]), {})[str(r["category"])] = d
+    return out
 
 
 def _call_all(llm, jobs, parse, *, max_tokens, retries, sample_kw, usage, tag, ask_kw=None):
@@ -263,13 +384,24 @@ def _call_all(llm, jobs, parse, *, max_tokens, retries, sample_kw, usage, tag, a
     return out, failed, retried
 
 
-def predict_people(llm, people=None, items: Sequence[str] = (), *, level: str = "L1",
-                   spec: PredictionSpec | None = None, histories: Mapping[str, Any] | None = None,
+def predict_people(*args, llm=None, people=None, items: Sequence[str] | None = None, level: str = "L1",
+                   spec: PredictionSpec | None = None, histories: Mapping[str, Any] | pd.DataFrame | None = None,
                    questions: Mapping[str, str] | None = None, samples: int = 1, l0_samples: int = 10,
                    max_tokens: int = 2000, retries: int = 1, sample_kw: str | None = "sample",
                    ssr: SSR | None = None, ask_kw: dict | None = None) -> dict:
     """Run one prediction arm. level: 'L0' (people optional; l0_samples independent samples, averaged, one
-    prior for everyone), 'L1', 'L2' (needs `histories`: {pid: text or history_text summary}), 'SSR'.
+    prior for everyone), 'L1', 'L2' (needs `histories`), 'SSR'.
+
+    Call forms: predict_people(llm, people, items, ...) (legacy, llm first) or predict_people(people, items,
+    llm=llm, ...) like survey / ab_test; giving the llm both ways raises TypeError.
+    people: list[Persona] (e.g. persona.from_history(level="L1")), {pid: {column: answer}} or {pid: text}; see
+    the module docstring. Anything else raises TypeError.
+    histories: {pid: text or history_text summary {item: {count, days, last, count_recent}}}, or a
+    persona.summarize_purchases frame (columns items, days, last_purchase, items_recent -> count, days, last,
+    count_recent; see `histories_from_summary`). History lines use the item key; for display names render
+    each person with persona.purchase_history_text(rows, labels=...) and pass {pid: text}.
+    Items with no entry in spec.labels are described by their key name; when spec.labels is not empty (e.g.
+    AMAZON, whose labels cover 10 of the 20 measured categories) one warning lists them. Labels are never invented.
 
     samples: independent samples per person (passed as `sample=j` to backends that key their cache on it;
     set sample_kw=None for a backend that rejects the keyword). An unparsable or incomplete reply is re-asked up
@@ -279,13 +411,36 @@ def predict_people(llm, people=None, items: Sequence[str] = (), *, level: str = 
     Calls go through `sim.panel.ask_many`: a soft refusal is not cached and is re-asked once with a
     research-forecast note, an empty reply (EmptyResponseError) once with a larger max_tokens; a person still
     without a reply goes through the normal `retries` and then into 'failed'. `ask_kw` passes ask_many options."""
+    args = list(args)
+    if llm is None:
+        if not args:
+            raise TypeError("predict_people() needs an llm: pass it first (legacy) or as llm=")
+        llm = args.pop(0)
+    elif args and _is_llm(args[0]):
+        raise TypeError("predict_people() got the llm both positionally and as llm=; pass it one way")
+    if len(args) > 2:
+        raise TypeError(f"predict_people() takes people, items after the llm but {len(args)} were given")
+    if len(args) >= 1:
+        if people is not None:
+            raise TypeError("predict_people() got multiple values for argument 'people'")
+        people = args[0]
+    if len(args) == 2:
+        if items is not None:
+            raise TypeError("predict_people() got multiple values for argument 'items'")
+        items = args[1]
     level = level.upper()
     if level not in ("L0", "L1", "L2", "SSR"):
         raise ValueError("level must be L0, L1, L2 or SSR")
-    items = [str(k) for k in items]
+    items = [str(k) for k in (items or ())]
     if not items:
         raise ValueError("items is empty")
     spec = spec or PredictionSpec()
+    unlabeled = spec.unlabeled(items) if spec.labels else []    # no labels at all: key names by design
+    if unlabeled:
+        warnings.warn(f"{len(unlabeled)} of {len(items)} items have no entry in spec.labels and are described by "
+                      f"their key name: {unlabeled}", stacklevel=2)
+    if isinstance(histories, pd.DataFrame):
+        histories = histories_from_summary(histories)
     usage = Usage()
     jobs = []
     if level == "L0":
@@ -381,7 +536,9 @@ def batch_calibrate(frame: pd.DataFrame, prior_rates: Mapping[str, float], *, co
     """Batch (contextual) calibration, talp73 v1.7a: z = logit(p) - mean_item(logit p) + logit(prior_rate[item]),
     p_cal = sigmoid(z). Uses no labels of the scored people: prior_rates must come from outside the sample
     (e.g. other people's base rate in the previous period). The per-item mean is over the rows in `frame`, so
-    score the whole batch at once. Returns a copy with `out_col` (default: `col` overwritten)."""
+    score the whole batch at once. Returns a copy; `frame` itself is not modified. Overwrite: with out_col=None
+    (the default) the calibrated values replace `col` in the copy, so the raw predictions are gone from it;
+    pass out_col (e.g. "pred_L1_cal") to keep both columns side by side."""
     f = frame.copy()
     missing = set(f[item_col]) - set(prior_rates)
     if missing:
@@ -489,5 +646,5 @@ def retest_stats(samples, *, unit: str = "unit", item: str = "item", sample: str
 
 
 __all__ = ["PredictionSpec", "AMAZON", "AMAZON_QUESTIONS", "AMAZON_NONE_FIELDS", "AMAZON_COMMA_FIELDS",
-           "profile_text", "history_text", "prompt_l0", "prompt_l1", "prompt_l2", "prompt_ssr",
+           "profile_text", "history_text", "histories_from_summary", "prompt_l0", "prompt_l1", "prompt_l2", "prompt_ssr",
            "predict_people", "prediction_frame", "batch_calibrate", "retest_stats"]
