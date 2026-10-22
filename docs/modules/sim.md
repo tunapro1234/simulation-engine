@@ -528,10 +528,16 @@ robustness_frame(rb)                           # segment x question x condition,
   shift E[pos | base] − E[pos | reversed] with positions scaled to [0, 1] (negative = pulled toward the option
   listed first). Signal per segment × question: W1(group, population). `signal="population"` (default) asks the
   population description once as its own segment; `"mean"` uses the mean of the segments' base vectors (no extra
-  calls); a mapping `{"population": {qid: vec}, "segments": {...}}` uses real data. Condition ratio = mean
+  calls); a mapping `{"segments": {seg: {qid: vec}}, "population": {qid: vec}}` uses real data. `segments` is
+  required there (W1 between a simulated group and the real population would count the simulator's own error as
+  signal); without `population` the real groups are scored against their own mean (`by="given-mean"`, the
+  rehearsal's round 3). The card note names the scale: real data or the simulator's own. Condition ratio = mean
   condition W1 / mean signal W1 over questions; questions are the bootstrap clusters (`n_boot=1000`, `seed=0`).
   The summary `ratio` is the worst condition. Above `threshold=0.5` the verdict says single-prompt subgroup
-  comparisons are not reliable (the G7 reading). `nominal=True` uses TVD and drops the order shift.
+  comparisons are not reliable (the G7 reading), and it adds "borderline" when the worst ratio's CI contains the
+  threshold. `nominal=True` uses TVD and drops the order shift. Invalid answers become uniform vectors
+  (`fallback="uniform"`, as in the kit), which shows up as movement; the card note gives their count, and
+  `fallback="skip"` leaves those cells out of the comparison instead.
 - **Calls.** (1 + retests + extra framings + order) × segments × questions, plus one per question for
   `signal="population"`. With a backend that ignores `sample` (FakeLLM) the retest distance is 0 by construction.
 - No measured number is quoted here: the module has only been run offline (FakeLLM) in this repository.
@@ -568,7 +574,7 @@ robustness_frame(rb)                           # segment x question x condition,
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
 profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
 `test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
-`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, ratio and card row) (123 tests, offline, FakeLLM, under 1 s):
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers) (123 tests, offline, FakeLLM, under 1 s):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
