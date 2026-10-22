@@ -80,6 +80,12 @@ Kör provadan (D2, 22 Eki) sonra eklenenler, her biri bir iki satır (ayrıntı 
   `ceiling_col=` (model/oracle tavanı), `aggregate_by=` / `se.evaluate_aggregate` (grup düzeyi), büyük tabloda
   çarpan 2.000 satırlık alt örneklemle, gerçek yokken mühürlü `awaiting truth` kartı; sayısal ezber için
   `se.correlation_audit` ve `memorization_audit(tolerance=, relative=True)`.
+- **Talep tahmini (D4):** `se.methods.forecast`: tabanlar (`persistence_forecast`, `seasonal_naive`, `moving_mean`,
+  `ses`), `make_features`, `se.DirectForecaster` (ufuk başına model, LightGBM Tweedie ya da sklearn), kayan köken
+  `se.backtest(..., origins=[...])` + `se.summarize_backtest`, L1 ölçütleri için `se.point_for_metric`, adlı/kör/
+  karıştırılmış LLM önseli `se.llm_prior_feature`. Kanıt tarafı: `evaluate(task="forecast", primary="wmape")`
+  (yanlılık yanında), `aggregate="sum"` (hiyerarşi toplamları), `ci="basic"`, `n_configs=`; CLI'de `--task forecast
+  --primary wmape --aggregate sum --ci basic --n-configs N`.
 
 Kör prova D3'ten (yeni film soğuk başlangıcı, 22 Eki) sonra eklenenler:
 
@@ -147,7 +153,9 @@ Kısayollar: `se.Claude`, `se.FakeLLM`, `se.CostLedger`, `se.EmptyResponseError`
 `se.predict_people`, `se.GroupTransfer`, `se.oof_predict`, `se.item_holdout_features`, `se.MFBaseline`,
 `se.compose_tag`, `se.paired_diff`, `se.evaluate`, `se.evaluate_aggregate`, `se.card`,
 `se.dashboard`, `se.worth_humans`, `se.memorization_audit`, `se.correlation_audit`, `se.seal`, `se.chain`, `se.Loop`,
-`se.Space`, `se.Prereg`, `se.play_games`, `se.distance_to_human`. Alt paketler ilk erişimde yüklenir.
+`se.Space`, `se.Prereg`, `se.play_games`, `se.distance_to_human`, `se.persistence_forecast`, `se.seasonal_naive`,
+`se.moving_mean`, `se.ses`, `se.make_features`, `se.DirectForecaster`, `se.backtest`, `se.summarize_backtest`,
+`se.point_for_metric`, `se.llm_prior_feature`. Alt paketler ilk erişimde yüklenir.
 
 Örnekler (`examples/`): `quickstart.py`, `ab_test.py`, `segment_distribution.py`, `research_loop.py` + `loop.json`,
 `abm_adoption.py`, `econ_games.py` (persona yöntemleri → oyunlar → insana uzaklık → kıyas → kimi cezalandırmalı

@@ -39,12 +39,21 @@ class Orneklem:
         return idx, yeni
 
 
-def ga(degerler: np.ndarray, alfa: float = 0.05):
+def ga(degerler: np.ndarray, alfa: float = 0.05, nokta: float | None = None, yontem: str = "percentile"):
+    """Bootstrap GA. yontem="percentile" (varsayılan) ya da "basic": (2θ − q_üst, 2θ − q_alt), θ = nokta tahmini.
+    Toplu/oran metriklerinde yüzdelik GA nokta tahminini dışarıda bırakabilir; temel (basic) GA θ'ya göre yansıtır."""
     v = np.asarray(degerler, float)
     v = v[np.isfinite(v)]
     if len(v) < 10:
         return np.nan, np.nan
-    return float(np.quantile(v, alfa / 2)), float(np.quantile(v, 1 - alfa / 2))
+    a, u = float(np.quantile(v, alfa / 2)), float(np.quantile(v, 1 - alfa / 2))
+    if yontem == "basic":
+        if nokta is None or not np.isfinite(nokta):
+            return np.nan, np.nan
+        return float(2 * nokta - u), float(2 * nokta - a)
+    if yontem != "percentile":
+        raise ValueError(f"ci must be 'percentile' or 'basic', not {yontem!r}")
+    return a, u
 
 
 def p_degeri(fark: np.ndarray) -> float:
@@ -89,6 +98,33 @@ def hesapla(orn: Orneklem, girdiler: dict, metrikler: list, madde=None, agirlik=
             R[b] = (c @ S) / np.maximum(c @ W, 1e-12)
         for k, (s, m) in enumerate(anahtar):
             tekrar[s][m.ad] = np.array([_son(m, v) for v in R[:, k]]) if m.son else R[:, k]
+
+    # --- oran: pay ve payda küme toplamları, tekrar başına Σpay / Σpayda (ikisi birlikte yeniden örneklenir)
+    oran = [m for m in metrikler if m.tur == "oran"]
+    if oran:
+        P, Q, anahtar_o = [], [], []
+        for s, (y, p, maske) in girdiler.items():
+            ww = w if maske is None else w * maske
+            for m in oran:
+                pay, payda = np.zeros(len(ww)), np.zeros(len(ww))
+                if maske is None:
+                    pay, payda = m.fn(y, p)
+                else:
+                    pay[maske], payda[maske] = m.fn(_al(y, maske), _al(p, maske))
+                tp, tq = float(np.sum(ww * pay)), float(np.sum(ww * payda))
+                nokta[s][m.ad] = _son(m, tp / tq) if abs(tq) > 1e-12 else np.nan
+                P.append(np.bincount(orn.kume, ww * pay, minlength=orn.G))
+                Q.append(np.bincount(orn.kume, ww * payda, minlength=orn.G))
+                anahtar_o.append((s, m))
+        P, Q = np.vstack(P).T, np.vstack(Q).T
+        R = np.empty((orn.B, len(anahtar_o)))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            for b in range(orn.B):
+                c = orn.sayim(b)
+                q = c @ Q
+                R[b] = np.where(np.abs(q) > 1e-12, (c @ P) / np.where(np.abs(q) > 1e-12, q, 1.0), np.nan)
+        for k, (s, m) in enumerate(anahtar_o):
+            tekrar[s][m.ad] = m.son(R[:, k]) if m.son else R[:, k]
 
     # --- toplu: döngü
     toplu = [m for m in metrikler if m.tur == "toplu"]

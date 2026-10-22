@@ -3,6 +3,8 @@
 İki tür metrik var:
   birim  satır başına kayıp/puan vektörü döner; metrik = ortalaması (+ isteğe bağlı dönüşüm).
          Bootstrap'ta küme toplamlarıyla hızlı hesaplanır.
+  oran   (y, p) → (pay, payda) satır vektörleri; metrik = Σpay / Σpayda (WMAPE, yanlılık). Bootstrap'ta pay ve
+         payda AYNI küme yeniden örnekleriyle birlikte toplanır (tekrar başına toplamların oranı).
   toplu  (y, p, madde) → tek sayı (AUC, macro-F1, korelasyon, ECE, ab kazananı). Bootstrap'ta döngü.
 yon: +1 büyük iyi, -1 küçük iyi. tavan: test-retest tavanı bu metrikte anlamlı mı.
 """
@@ -30,6 +32,12 @@ class Metrik:
     aciklama: str = ""
 
     def deger(self, y, p, madde=None, w=None) -> float:
+        if self.tur == "oran":
+            pay, payda = self.fn(y, p)
+            ww = np.ones(len(pay)) if w is None else np.asarray(w, float)
+            alt = float(np.sum(ww * payda))
+            v = float(np.sum(ww * pay)) / alt if abs(alt) > 1e-12 else np.nan
+            return float(self.son(v)) if self.son else v
         if self.tur == "birim":
             v = float(np.average(self.fn(y, p), weights=w))
             return float(self.son(v)) if self.son else v
@@ -228,6 +236,26 @@ def _demeaned_r2(y, p, madde):
     return 1 - np.sum((ry - rp) ** 2) / max(np.sum(ry ** 2), 1e-12)
 
 
+# ------------------------------------------------------------------ oran (talep tahmini)
+def _wmape(y, p):
+    """WMAPE / WAPE = Σ|y − p| / Σ|y| (küçük iyi)."""
+    return np.abs(y - p), np.abs(y)
+
+
+def _yanlilik(y, p):
+    """Yanlılık = Σp / Σy − 1 (işaretli; 0 iyi, > 0 fazla tahmin)."""
+    return p, y
+
+
+WMAPE = Metrik("wmape", "oran", _wmape, -1, aciklama="Σ|hata| / Σ|gerçek| (WAPE); küme bootstrap'ında pay ve payda birlikte")
+YANLILIK = Metrik("yanlilik", "oran", _yanlilik, -1, son=lambda v: v - 1,
+                  aciklama="Σtahmin / Σgerçek − 1, işaretli (0 iyi); tanı satırı, birincil metrik olamaz")
+ORAN_METRIKLERI = ("wmape", "yanlilik")
+# işaretli metrikler: yönü yok (0 iyi); "daha iyi" = |değer| daha küçük. Metrik.yon iç hesap için -1 kalır,
+# rapor tablosunda yon=0 yazılır.
+ISARETLI_METRIKLER = ("yanlilik",)
+
+
 # ------------------------------------------------------------------ ab (madde = test)
 def _gruplar(madde):
     kod, _ = pd.factorize(madde)
@@ -299,8 +327,12 @@ DEMEANED = Metrik("demeaned_r2", "toplu", _demeaned_r2, +1, tavan=True,
                   aciklama="madde ortalaması çıkarılınca R²: kişiye özgü sinyal (madde ortalaması = 0)")
 
 
-def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: bool = False) -> list[Metrik]:
+def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: bool = False,
+         oran: bool = False) -> list[Metrik]:
+    """oran=True: sürekli görevde WMAPE ve yanlılık da eklenir (talep tahmini)."""
     ek = [MADDE_ICI, DEMEANED] if madde else []
+    if oran and gorev == "surekli":
+        ek = ek + [WMAPE, YANLILIK]
     if gorev == "ikili":
         return [
             Metrik("dogruluk", "birim", _acc_ikili, +1, tavan=True, aciklama="eşik 0,5; tam 0,5 yarım puan"),

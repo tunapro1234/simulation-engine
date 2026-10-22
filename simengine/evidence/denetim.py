@@ -111,8 +111,14 @@ def dengesizlik(veri):
 def kontaminasyon(veri, sutun_dizileri, metrik, kesim: str | None):
     """Model eğitim kesim tarihinden önceki ve sonraki birimlerde başarı farkı (ezber işareti)."""
     if not kesim or "zaman" not in veri.df:
-        return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi",
-                  "kesim tarihi ya da 'zaman' sütunu yok" if not kesim else "'zaman' sütunu yok")
+        if not kesim and "zaman" in veri.df:
+            ayr = ("'zaman' (time) sütunu var ama LLM eğitim kesim tarihi verilmedi: evaluate(..., cutoff=\"2025-03-01\") "
+                   "ile kesim öncesi/sonrası karşılaştırılır")
+        elif not kesim:
+            ayr = "kesim tarihi (cutoff=) ve 'zaman' (time) sütunu yok"
+        else:
+            ayr = "'zaman' (time) sütunu yok"
+        return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi", ayr)
     z = pd.to_datetime(veri.df["zaman"], errors="coerce")
     once = (z < pd.Timestamp(kesim)).to_numpy()
     if once.sum() < 30 or (~once).sum() < 30:

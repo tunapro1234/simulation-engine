@@ -559,3 +559,65 @@ ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipp
 - Tests *(this port)*: 137 evidence tests run in about 50 s (ported, API, extras, the gap tests in
   `test_evidence_gaps.py` and `test_evidence_d3_gaps.py`, and 6 equivalence tests, which skip when the original is
   absent; with `SIMENGINE_KANIT_SRC` set they pass after the D3 options, which add keys only when used).
+
+## Demand forecasting: `task="forecast"`, WMAPE, bias, totals (D4 rehearsal gaps)
+
+Added after the D4 blind rehearsal (M5 weekly demand, 4 weeks ahead), where the team had to write WMAPE, an item-
+clustered bootstrap and a store x dept x week total themselves.
+
+```python
+rep = ev.evaluate(fr, "M5 4-week", ours="lgbm", task="forecast",      # continuous + forecast behaviour
+                  unlabeled_baselines=["last4_mean"],                   # cluster = the frame's group > item column
+                  ours_uses_llm=False,                                   # no LLM arm: memorization audit n/a
+                  prereg="teslim/onkayit", n_configs=4, ci="basic")
+tot = ev.evaluate(fr, "store x dept x week", ours="lgbm", task="forecast",
+                  aggregate_by="store_dept_week", aggregate="sum")      # hierarchical totals, not means
+d = ev.paired_diff(fr, "lgbm", "last4_mean", metric="wmape", group="item")
+ev.seal("teslim/tahmin.csv", "final", registry="teslim/onkayit")      # records sha256 AND dosya_sha256
+```
+
+- **Metrics.** `primary="wmape"` (alias `"wape"`): sum|y - p| / sum|y|, lower is better. `"bias"`: sum p / sum y - 1,
+  signed, a diagnostic only (it is refused as primary). They are a new metric kind `oran` (ratio): the cluster
+  bootstrap resamples numerator and denominator with the same cluster counts and takes the ratio of sums per
+  replicate. Both are added to any continuous evaluation whose primary is a ratio metric, and always with
+  `task="forecast"`. `paired_diff` and `paired_ci` accept them on any continuous frame.
+- **`aggregate="sum"`** with `aggregate_by=` sums truth and predictions per group (default `"mean"` unchanged).
+  The sum is the group total even when the frame has an `item` column (the item is kept as a column only when
+  it is constant within the group; the bootstrap clusters are the groups). A group in which a column has any
+  missing row gets NaN for that column, so a missing prediction never counts as a zero forecast; the group then
+  drops out of the common rows. `noise_ceiling=` is refused with `"sum"` (its half-split means are not totals).
+- **Bias has no direction.** `bias` is signed: in `paired_diff` / `paired_ci` / the comparison table, "a better"
+  means `|bias_a| < |bias_b|`, and the report's metric table gives it `yon=0`.
+- **Forecast-mode wording.** With `task="forecast"` the within-item shuffle row (which would compare ours with
+  itself) is not written, the de-meaned R² row is "seri içi sinyal (demeaned_r2 > 0)", and the automatic
+  baselines (random, item median/mean) are labelled "look-ahead": they are cross-fitted on the test-window truth,
+  so they are not legitimate rungs. Pass origin-time baselines (persistence, last-k mean) as `pred_` columns, or
+  `baselines=False`.
+- **`ci="basic"`** (2·θ − bootstrap quantiles) for column, ladder, headline and paired CIs; default `"percentile"`.
+  When a primary-metric point estimate falls outside its percentile CI (possible for ratio/aggregate metrics), a
+  `UserWarning` is raised, an audit row "bootstrap GA (nokta tahmini yüzdelik GA dışında)" is added and the card gets
+  a flag. The rehearsal saw this on its own code (point 0.0979, percentile CI [0.0965, 0.1114]; one run, D4
+  `SIMENGINE-EKSIK.md` #6); BCa is not implemented.
+- **`task="forecast"`** maps to the continuous task internally (`types.TASK_KINDS` is unchanged), default primary
+  wmape, and skips the persona shuffle control, the human test-retest ceiling and the PPI++ "worth N humans"
+  multiplier: the card rows say "uygulanamaz / not applicable: forecast task" and an audit row explains why. A model
+  ceiling still works through `ceiling_col=`. The awaiting-truth card does the same.
+- **Contamination audit.** The English `time` column is the internal `zaman`; the audit runs only when the LLM
+  training cutoff is given, e.g. `cutoff="2025-03-01"`. With `time` but no cutoff the row now says so.
+- **No LLM arm.** `ours_uses_llm=False` labels the missing memorization / contamination audits "no LLM arm: not
+  applicable" and the card no longer raises "kanıtlanmadı: sızıntı/ezber" for them (skipped split/group/time leakage
+  audits still flag "kanıtlanmadı: sızıntı (...)").
+- **Selection bias.** The audit writes "named in advance" only when the ours name (with or without `pred_`; names
+  of 1-2 characters need the prefix) occurs in a seal *description* or in the small text files (`.md .txt .yaml
+  .yml .json .toml`) of the `prereg=` directory. Sealed column names and source paths do not count: sealing a
+  table with every candidate column names nothing in advance. A text file newer (mtime) than the latest seal does
+  not count ("pre-registration text is newer than the seal"), and a text naming several methods without marking
+  ours (`ours: pred_x`, `primary: pred_x`) gives "several method names". Otherwise "not verified: ours not found in
+  the pre-registration" (warning) or "not verified: no pre-registration" (skipped).
+  ```python
+  Path("reg/PREREG.md").write_text("ours: pred_lgbm, primary WMAPE\n")   # write it BEFORE sealing
+  ev.seal(test_preds, "test predictions", registry="reg")
+  ```
+  `n_configs=` is written into the row and counts toward the "ours is the best of >= 4" optimism note.
+- **Seal hashes.** `seal(path)` also stores `dosya_sha256` (raw file bytes, what `sha256sum` prints) next to the
+  canonical CSV `sha256` (what `verify`/`grade` check); the card's seal table shows both columns, labelled.

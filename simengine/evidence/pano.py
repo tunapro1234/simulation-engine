@@ -607,8 +607,9 @@ def _metrik_tablosu(o: _Ozet) -> str:
                 if r.get("tur") not in ("tavan", "kontrol") and a in (r.get("metrikler") or {})
                 and not _bos(r["metrikler"][a].get("deger"))]
         if aday:
-            en_iyi[a] = (max(aday) if o.yon.get(a, 1) == 1 else min(aday))[1]
-    basliklar = ["Sütun"] + [f'<span title="{_e(o.acik.get(a, ""))}">{_e(_metrik_adi(a))}{" ↓" if o.yon.get(a) == -1 else " ↑"}</span>'
+            y_ = o.yon.get(a, 1)
+            en_iyi[a] = (min(aday, key=lambda t: abs(t[0])) if y_ == 0 else max(aday) if y_ == 1 else min(aday))[1]
+    basliklar = ["Sütun"] + [f'<span title="{_e(o.acik.get(a, ""))}">{_e(_metrik_adi(a))}{" →0" if o.yon.get(a) == 0 else " ↓" if o.yon.get(a) == -1 else " ↑"}</span>'
                              for a in adlar]
     satirlar = []
     for s, r in o.sonuclar.items():

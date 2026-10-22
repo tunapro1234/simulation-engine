@@ -9,6 +9,8 @@
     se.evidence.card(report, "card.md"); se.evidence.dashboard([report], "pano.html")
     se.seal(predictions, "before truth")                 # one seal: = se.evidence.seal, writes .onkayit/zincir.jsonl
     se.paired_diff(report, "P1", "L1")                   # paired difference of any two arms, same resamples
+    bt = se.backtest(se.DirectForecaster("lightgbm"), demand, origins=[229, 249, 269])  # long id,time,y panel
+    se.evaluate(frame, ours="lgbm", task="forecast", primary="wmape")                              # + bias
 
 Subpackages are imported lazily on first attribute access, so `import simengine` stays fast and optional
 dependencies (anthropic, lightgbm, sentence-transformers) are only needed by the parts that use them.
@@ -55,6 +57,17 @@ _ENTRY_POINTS = {
     "ItemHoldout": ("methods", "ItemHoldout"),
     "MFBaseline": ("methods", "MFBaseline"),
     "procrustes_align": ("methods", "procrustes_align"),
+    # methods.forecast (multi-series demand forecasting)
+    "persistence_forecast": ("methods", "persistence_forecast"),
+    "seasonal_naive": ("methods", "seasonal_naive"),
+    "moving_mean": ("methods", "moving_mean"),
+    "ses": ("methods", "ses"),
+    "make_features": ("methods", "make_features"),
+    "DirectForecaster": ("methods", "DirectForecaster"),
+    "backtest": ("methods", "backtest"),
+    "summarize_backtest": ("methods", "summarize_backtest"),
+    "point_for_metric": ("methods", "point_for_metric"),
+    "llm_prior_feature": ("methods", "llm_prior_feature"),
     # evidence
     "evaluate": ("evidence", "evaluate"),
     "card": ("evidence", "card"),

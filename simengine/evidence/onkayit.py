@@ -135,6 +135,17 @@ def _git_commit(dizin: Path, mesaj: str) -> None:
         warnings.warn(f"onkayit: git commit atlandı ({ayrinti.strip()})")
 
 
+def _dosya_sha(tahmin) -> str | None:
+    """Dosya yolu verildiyse dosyanın ham baytlarının sha256'sı (kanonik CSV hash'inden farklıdır)."""
+    if isinstance(tahmin, pd.DataFrame):
+        return None
+    try:
+        p = Path(tahmin)
+        return _sha(p.read_bytes()) if p.is_file() else None
+    except (TypeError, OSError, ValueError):
+        return None
+
+
 def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = False, *, kopya: bool = True,
             arsiv_dizini=None) -> dict:
     """Tahmini mühürler: hash + zaman + zincir bağı; kanonik kopyayı saklar.
@@ -163,6 +174,7 @@ def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = F
         "sutunlar": sorted(str(s) for s in df.columns),
         "aciklama": aciklama,
         "kaynak": None if isinstance(tahmin, pd.DataFrame) else str(tahmin),
+        "dosya_sha256": _dosya_sha(tahmin),
         "arsiv": f"{sha[:12]}.csv.gz" if kopya else None,
         "onceki": son["sha256"] if son else None,
         "onceki_kayit": son["kayit_hash"] if son else None,

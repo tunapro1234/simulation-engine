@@ -70,6 +70,7 @@ METRIC_TO_INTERNAL = {
     "mae": "mae", "rmse": "rmse", "r2": "r2", "within_item_corr": "madde_ici_kor", "demeaned_r2": "demeaned_r2",
     "winner_top1": "kazanan_top1", "pair_sign": "cift_isaret",
     "within_spearman": "spearman_ici", "effect_corr": "etki_korelasyonu", "scale_error": "olcek_sapmasi",
+    "wmape": "wmape", "wape": "wmape", "bias": "yanlilik",
 }
 METRIC_TO_ENGLISH = {}
 for _en, _tr in METRIC_TO_INTERNAL.items():
@@ -121,8 +122,35 @@ def _methods(names: Iterable[str] | None) -> list[str] | None:
     return None if names is None else [_method(n) for n in names]
 
 
+FORECAST_TASKS = ("forecast", "tahmin")   # handled inside evidence: continuous + forecast behaviour (see evaluate)
+AGGREGATES = ("mean", "sum")
+CI_METHODS = ("percentile", "basic")
+
+
 def _task(task: str | None) -> str | None:
+    if task in FORECAST_TASKS:
+        return "surekli"
     return None if task is None else TASK_TO_INTERNAL.get(task, task)
+
+
+def _prereg_texts(prereg) -> list[dict]:
+    """Small text files (.md/.txt/.yaml/.yml/.json/.toml) of a prereg registry directory, or the file itself:
+    searched for the `ours` name by the selection-bias audit, as {"metin", "zaman" (file mtime), "dosya"}. A text
+    newer than the latest seal does not count as pre-registration. Seal chains (.jsonl) and lock files are skipped."""
+    if prereg is None or isinstance(prereg, list):
+        return []
+    p = Path(prereg)
+    files = [p] if p.is_file() else (sorted(p.iterdir()) if p.is_dir() else [])
+    out = []
+    for f in files:
+        if f.is_file() and f.suffix.lower() in (".md", ".txt", ".yaml", ".yml", ".json", ".toml") \
+                and not f.name.endswith(".lock.json") and f.stat().st_size <= 1_000_000:
+            try:
+                out.append({"metin": f.read_text(encoding="utf-8", errors="replace"), "zaman": f.stat().st_mtime,
+                            "dosya": f.name})
+            except OSError:
+                pass
+    return out
 
 
 def _metric(name: str | None) -> str | None:
@@ -148,14 +176,22 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              ceiling_col: str | None = None, ceiling_label: str | None = None, aggregate_by: str | None = None,
              multiplier_max_rows: int | None = MULTIPLIER_MAX_ROWS, offset_col: str | None = None,
              noise_ceiling: str | None = None, noise_ceiling_repeats: int = NOISE_CEILING_REPEATS,
-             blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None) -> dict:
+             blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None,
+             aggregate: str = "mean", ci: str = "percentile", n_configs: int | None = None) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
     ours / raw: method names without the `pred_` prefix. Name `ours` BEFORE looking at results: if omitted the
     last method is used and a selection-bias warning is added to the audits.
-    task: binary | multiclass | distribution | continuous | ab (auto-detected when None).
+    task: binary | multiclass | distribution | continuous | ab (auto-detected when None) | forecast.
+        forecast (demand / time-series forecasting): continuous metrics plus wmape and bias, default primary wmape;
+        the persona shuffle control, the human retest ceiling and the PPI++ "worth N humans" multiplier are skipped
+        and the card says "not applicable" (no human answers, no person information). A model ceiling still works
+        via ceiling_col=.
     primary: metric name (English alias or internal); default per task, macro-F1 when the majority class > 60 %.
+        Continuous ratio metrics: "wmape" (= "wape", sum|y - p| / sum|y|, lower is better; the cluster bootstrap
+        resamples numerator and denominator together, ratio of sums per replicate) and "bias" (sum p / sum y - 1,
+        signed diagnostic, never primary). Passing primary="wmape" adds both to any continuous evaluation.
     B / B_aggregate: bootstrap replicates for per-unit / aggregate metrics. Cluster = group > item > row.
     memorization: result dict of `memorization_audit` or a path to its JSON.
     prereg: list of seal records, or a registry directory (its chain is attached to the report).
@@ -168,6 +204,14 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         ceiling; the card labels the ceiling type and the gap closed is computed from it. ceiling_label names it.
     aggregate_by: evaluate at group level ("group" or any column): truth and predictions are averaged per group
         (and per item / split when present) and the bootstrap resamples groups. Binary/continuous tasks only.
+    aggregate: "mean" (default) or "sum" with aggregate_by: sum per group instead of the mean (hierarchical totals,
+        e.g. aggregate_by="store_dept_week" for a store x dept x week WMAPE).
+    ci: "percentile" (default) or "basic" (2*theta - bootstrap quantiles) for column, ladder, headline and paired
+        CIs. When the point estimate falls outside the percentile CI (possible for ratio/aggregate metrics) a warning
+        is raised and the card gets an audit row and a flag.
+    n_configs: number of configurations tried before picking ours; written in the selection-bias audit (and >= 4
+        with ours the best adds the optimism note). The audit says ours was "named in advance" only when the ours
+        name occurs in the seal records or the text files of the prereg= registry; otherwise "not verified".
     multiplier_max_rows: single-item frames larger than this compute the PPI++ multiplier on a fixed-seed
         subsample of this many rows (None: whole table, slow). A warning is raised for large frames.
     offset_col: a per-row offset column (e.g. the member's training mean): subtracted from truth, retest, the
@@ -187,10 +231,23 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         report (`kayitli_karsilastirmalar`), `summary()["comparisons"]`, the card and the dashboard.
     ours_uses_llm: when the memorization audit is in warning state and ours includes an LLM arm, the badge reason
         gets the caveat "gain may come from recognition/memorization". None (default) assumes yes whenever a
-        memorization result is passed; False turns the caveat off.
+        memorization result is passed; False turns the caveat off, and the missing memorization / contamination
+        audits are then labelled "no LLM arm: not applicable" instead of raising the "not proven: leakage/memorization"
+        flag.
+    cutoff: the LLM's training cutoff date (e.g. cutoff="2025-03-01") for the contamination audit; it needs a
+        `time` (or `zaman`) column and compares the primary metric before vs after the cutoff.
     Missing truth: rows with no truth are dropped (noted); when the truth column is absent or all missing the
     report is an "awaiting truth" card (seals + prediction summary; no ladder, calibration or bootstrap).
     """
+    if aggregate not in AGGREGATES:
+        raise ValueError(f"aggregate must be one of {AGGREGATES}, not {aggregate!r}")
+    if ci not in CI_METHODS:
+        raise ValueError(f"ci must be one of {CI_METHODS}, not {ci!r}")
+    forecast = task in FORECAST_TASKS
+    if forecast:
+        multiplier = False
+        task = "continuous"
+    prereg_texts = _prereg_texts(prereg)
     tmp = None
     ezber_json = None
     if isinstance(memorization, dict):
@@ -231,7 +288,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     tavan_yarim = None
     if aggregate_by is not None:
         d, toplama = _aggregate(d, aggregate_by, _task(task),
-                                halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed)
+                                halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed, how=aggregate)
         tavan_yarim = toplama.pop("halves", None)
         task = "continuous"
         limits = list(limits or []) + [toplama["note"]]
@@ -255,7 +312,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             duzey=level, girdi_kaynagi=source, etiketsiz_tabanlar=_methods(unlabeled_baselines),
             oof_tabanlar=_methods(baselines_oof), tavan_sutun=tavan_sutun, tavan_etiket=tavan_etiket,
             carpan_en_fazla=multiplier_max_rows, tavan_yarim=tavan_yarim, kor=_method(blind_col),
-            kiyaslar=kiyas, ezber_llm=ours_uses_llm)
+            kiyaslar=kiyas, ezber_llm=ours_uses_llm, tahmin_gorevi=forecast, ga_yontemi=ci,
+            n_yapilandirma=n_configs, onkayit_metin=prereg_texts)
     finally:
         if tmp:
             os.unlink(tmp)
@@ -375,15 +433,24 @@ def _within_variance(y: np.ndarray, codes: np.ndarray, G: int):
     return n, s2
 
 
-def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0):
-    """Average truth, predictions, retest and model ceiling per group (x item x split when present).
-    halves: number of random within-group half splits for the split-half noise ceiling (None: not computed)."""
+def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0,
+               how: str = "mean"):
+    """Average (how="mean") or sum (how="sum") truth, predictions, retest and model ceiling per group (x item x split
+    when present). halves: number of random within-group half splits for the split-half noise ceiling (None: not
+    computed)."""
+    if how not in AGGREGATES:
+        raise ValueError(f"aggregate must be one of {AGGREGATES}, not {how!r}")
     col = COLUMN_TO_INTERNAL.get(by, by)
     if col not in d.columns:
         raise ValueError(f"aggregate_by {by!r} is not a column of the frame")
     if task in ("cok_sinif", "dagilim", "ab"):
         raise ValueError(f"aggregate_by works for binary/continuous tasks, not {TASK_TO_ENGLISH.get(task, task)}")
-    keys = [col] + [k for k in ("madde", "bolum") if k in d.columns and k != col]
+    # sum = hierarchical total of the group (e.g. store x dept x week): never split by item, otherwise each
+    # (group, item) cell is one row and nothing is summed. The item survives only when constant within the group.
+    keys = [col] + [k for k in (("bolum",) if how == "sum" else ("madde", "bolum")) if k in d.columns and k != col]
+    if how == "sum" and halves:
+        raise ValueError("noise_ceiling works on group means; it is not available with aggregate='sum' "
+                         "(the half-split means are on a different scale from the group totals)")
     num = [c for c in d.columns if c in ("gercek", "tekrar", "tavan_model") or (isinstance(c, str) and c.startswith(ON_EK))]
     out = d[keys].copy()
     for c in num:
@@ -394,8 +461,19 @@ def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = 
     if "gercek" in d.columns and out["gercek"].isna().all() and d["gercek"].notna().any():
         raise ValueError("aggregate_by needs a numeric truth (binary or continuous)")
     g = out.groupby(keys, sort=True, dropna=False)
-    agg = g[num].mean().reset_index()
+    if how == "sum":
+        # a group total is defined only when every row of the column is present: a missing prediction must not
+        # count as a zero forecast while the truth is summed over all rows (biased WMAPE / bias)
+        agg = g[num].sum(min_count=1)
+        eksik = out[num].isna().groupby([out[k] for k in keys], sort=True, dropna=False).any()
+        agg = agg.mask(eksik.reindex(agg.index).fillna(False).astype(bool)).reset_index()
+    else:
+        agg = g[num].mean().reset_index()
     agg.insert(len(keys), "n_satir", g.size().to_numpy())
+    if how == "sum" and "madde" in d.columns and col != "madde":
+        m = d.groupby(keys, sort=True, dropna=False)["madde"]
+        if (m.nunique(dropna=False) <= 1).all():
+            agg["madde"] = m.first().to_numpy()
     # segment columns constant within the group survive (first value)
     segs = [c for c in d.columns if isinstance(c, str) and (c == "segment" or c.startswith("seg_"))]
     for c in segs:
@@ -415,13 +493,18 @@ def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = 
                                    codes, len(agg))
         yarim = {"A": A, "B": B, "n": n_v, "s2": s2, "sutun": "_tavan_satir", "R": int(halves), "tohum": seed,
                  "ortalama_grup_boyu": float(n_g[n_g > 0].mean()) if (n_g > 0).any() else None}
-    note = (f"Grup düzeyi değerlendirme (aggregate_by={by}): {len(d)} satır {n_groups} grubun ortalamasına indirildi "
+    note = (f"Grup düzeyi değerlendirme (aggregate_by={by}): {len(d)} satır {n_groups} grubun "
+            + ("toplamına (aggregate='sum', hiyerarşik toplam; madde ayrımı yok, bir sütunda grubun herhangi bir "
+               "satırı eksikse o grubun o sütun toplamı eksik sayılır) indirildi " if how == "sum"
+               else "ortalamasına indirildi ")
+            + 
             f"(eşit satır ağırlığı, {len(agg)} değerlendirme satırı); bootstrap gruplar üzerinden. Grup içi örneklem "
             "gürültüsü ortalamalarda kalır. Otomatik tabanlar (genel ortalama, demografi) grup satırları üzerinde "
             "çapraz uydurmalıdır: kat dışı ortalama tutulan grupların ortalamasıyla ters ilişkili olduğundan sıra "
             "metriklerinde (Spearman) bilgisizken bile sıfırın belirgin altında çıkabilir; anlamlı karşılaştırma için "
             "baselines_oof / unlabeled_baselines ile grup düzeyi bir taban bildirin.")
     info = {"by": by, "column": col, "n_rows": int(len(d)), "n_groups": n_groups, "n_eval_rows": int(len(agg)),
+            "aggregate": how,
             "auto_baselines_cross_fitted_bias": True, "note": note}
     if yarim is not None:
         info["halves"] = yarim
@@ -457,7 +540,7 @@ def _badge_english(k: dict) -> str | None:
 
 def _seals(report: dict) -> list[dict]:
     return [{"index": r.get("sira"), "sha256": r.get("sha256"), "time_utc": r.get("zaman_utc") or r.get("zaman"),
-             "rows": r.get("satir"), "description": r.get("aciklama")}
+             "rows": r.get("satir"), "description": r.get("aciklama"), "file_sha256": r.get("dosya_sha256")}
             for r in report.get("onkayit") or [] if isinstance(r, dict)]
 
 
@@ -500,7 +583,8 @@ def summary(report: dict) -> dict:
     k = report.get("kanit_kart") or {}
     worth = next((r for r in k.get("satirlar") or [] if r.get("tur") == "bedel"), None)
     out = {
-        "title": report.get("baslik"), "task": TASK_TO_ENGLISH.get(report.get("gorev"), report.get("gorev")),
+        "title": report.get("baslik"),
+        "task": "forecast" if report.get("tahmin_gorevi") else TASK_TO_ENGLISH.get(report.get("gorev"), report.get("gorev")),
         "primary_metric": METRIC_TO_ENGLISH.get(report.get("birincil"), report.get("birincil")),
         "primary_metric_internal": report.get("birincil"),
         "ours": _box(m.get("bizim")), "raw": _box(m.get("ham")), "best_baseline": _box(m.get("en_iyi_baseline")),
@@ -689,10 +773,14 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         for a in s["audits"]:
             out.append(f"| {_md(a['check'])} | {a['status']} | {_dot(a['detail'], lang)} |")
     if s["seals"]:
-        out += ["", "## Sealed predictions (pre-registration chain)", "", "| # | SHA-256 | Sealed at (UTC) | Rows | Description |",
-                "|---|---|---|---|---|"]
+        out += ["", "## Sealed predictions (pre-registration chain)", "",
+                "| # | SHA-256 (canonical CSV) | SHA-256 (file bytes) | Sealed at (UTC) | Rows | Description |",
+                "|---|---|---|---|---|---|"]
         for z in s["seals"]:
-            out.append(f"| {z['index']} | `{z['sha256']}` | {_md(z['time_utc'])} | {z['rows']} | {_md(z['description'])} |")
+            fb = f"`{z['file_sha256']}`" if z.get("file_sha256") else "— (sealed from a DataFrame)"
+            out.append(f"| {z['index']} | `{z['sha256']}` | {fb} | {_md(z['time_utc'])} | {z['rows']} | {_md(z['description'])} |")
+        out += ["", "Canonical CSV = hash of the sorted, normalised table (what verify/grade check); file bytes = sha256 "
+                    "of the submitted file as written on disk (what `sha256sum <file>` prints)."]
     else:
         out += ["", "Sealed predictions: none attached (pass prereg=<registry dir> to evaluate)."]
     limits = list(k.get("yanilgi") or [])
@@ -825,8 +913,9 @@ def paired_ci(df: pd.DataFrame, a: str, b: str, metric: str | None = None, *, B:
     madde_var = "madde" in d
     olas = v.gorev != "cok_sinif" or isinstance(d[ON_EK + v.yontemler[0]].iloc[0], np.ndarray)
     birim = v.gorev == "surekli" and d["gercek"].between(0, 1).all()
-    fam = {m.ad: m for m in _metrik.aile(v.gorev, olas, madde_var and v.gorev in ("ikili", "surekli"), birim)}
-    ad = _metric(metric) or ("bir_eksi_mae" if birim else _metrik.BIRINCIL[v.gorev])
+    fam = {m.ad: m for m in _metrik.aile(v.gorev, olas, madde_var and v.gorev in ("ikili", "surekli"), birim, oran=True)}
+    ad = _metric(metric) or ("wmape" if task in FORECAST_TASKS else
+                             "bir_eksi_mae" if birim else _metrik.BIRINCIL[v.gorev])
     M = fam[ad]
     ca, cb = ON_EK + _method(a), ON_EK + _method(b)
     girdi = {c: (*_metrik.diziler(v, c), None) for c in (ca, cb)}
@@ -837,13 +926,22 @@ def paired_ci(df: pd.DataFrame, a: str, b: str, metric: str | None = None, *, B:
     lo, hi = _boot.ga(f)
     return {"metric": METRIC_TO_ENGLISH.get(ad, ad), "a": nokta[ca][ad], "b": nokta[cb][ad],
             "diff": nokta[ca][ad] - nokta[cb][ad], "lo": lo, "hi": hi, "p": _boot.p_degeri(f),
-            "a_better": bool(M.yon * (nokta[ca][ad] - nokta[cb][ad]) > 0), "cluster": v.kume_adi,
+            "a_better": _a_better(M, nokta[ca][ad], nokta[cb][ad]), "cluster": v.kume_adi,
             "n_clusters": int(v.kume.max()) + 1}
+
+
+def _a_better(M, va, vb) -> bool | None:
+    """a better than b: by direction, or for a signed metric (bias) the one closer to 0 (|a| < |b|)."""
+    if M.ad in _metrik.ISARETLI_METRIKLER:
+        if va is None or vb is None or not (np.isfinite(va) and np.isfinite(vb)):
+            return None
+        return bool(abs(va) < abs(vb))
+    return bool(M.yon * (va - vb) > 0)
 
 
 def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = None, aggregate_by: str | None = None,
                 group: str | None = None, B: int = 2000, seed: int = 0, offset_col: str | None = None,
-                task: str | None = None) -> dict:
+                task: str | None = None, aggregate: str = "mean", ci: str = "percentile") -> dict:
     """Paired difference metric(a) − metric(b) with a cluster-bootstrap 95 % CI, for ANY two columns (a drop
     condition such as P1 − L1, or a control such as P1 − P_shuffled). b=None: a's own value and CI (e.g. "P2 ≈ 0").
 
@@ -854,6 +952,8 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
         `evaluate(aggregate_by=)`; the clusters are then the groups). group: the bootstrap cluster column (default
         group > item > row; with aggregate_by it must be constant within each aggregate group). offset_col: as in
         `evaluate`, subtracted before aggregation. All percentile CIs use B resamples for every metric type.
+    metric="wmape" / "bias" work on continuous (and task="forecast") frames: numerator and denominator are resampled
+        together. aggregate="sum": sum per aggregate_by group instead of the mean. ci="basic": 2*diff - quantiles.
     Returns {"metric", "a", "b", "value_a", "value_b", "diff", "lo", "hi", "p", "n" (clusters), "cluster",
     "a_better", "B", "source"}. diff is raw a − b: for lower-is-better metrics a negative diff favours a."""
     if isinstance(frame_or_report, dict):
@@ -877,7 +977,7 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
             if (d.groupby(col, dropna=False)[gc].nunique(dropna=False) > 1).any():
                 raise ValueError(f"group {group!r} must be constant within each aggregate_by={aggregate_by!r} group")
             cmap = d.groupby(col, dropna=False)[gc].first()
-        d, _ = _aggregate(d, aggregate_by, task_i)
+        d, _ = _aggregate(d, aggregate_by, task_i, how=aggregate)
         task_i = "surekli"
         if cmap is not None:
             d["grup"] = d[col].map(cmap).astype(str)
@@ -888,8 +988,11 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
     madde_var = "madde" in dd
     olas = v.gorev != "cok_sinif" or isinstance(dd[ON_EK + v.yontemler[0]].iloc[0], np.ndarray)
     birim = v.gorev == "surekli" and dd["gercek"].between(0, 1).all()
-    fam = {m.ad: m for m in _metrik.aile(v.gorev, olas, madde_var and v.gorev in ("ikili", "surekli"), birim)}
-    ad = _metric(metric) or ("bir_eksi_mae" if birim else _metrik.BIRINCIL[v.gorev])
+    if ci not in CI_METHODS:
+        raise ValueError(f"ci must be one of {CI_METHODS}, not {ci!r}")
+    fam = {m.ad: m for m in _metrik.aile(v.gorev, olas, madde_var and v.gorev in ("ikili", "surekli"), birim, oran=True)}
+    ad = _metric(metric) or ("wmape" if task in FORECAST_TASKS else
+                             "bir_eksi_mae" if birim else _metrik.BIRINCIL[v.gorev])
     if ad not in fam:
         raise ValueError(f"metric {metric!r} is not available for this task: {sorted(fam)}")
     M = fam[ad]
@@ -906,11 +1009,11 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
     va = nokta[ca][ad]
     vb = nokta[cb][ad] if cb else None
     f = tekrar[ca][ad] - (tekrar[cb][ad] if cb else 0.0)
-    lo, hi = _boot.ga(f)
     diff = va - (vb if cb else 0.0)
+    lo, hi = _boot.ga(f, nokta=diff, yontem=ci)
     return {"metric": METRIC_TO_ENGLISH.get(ad, ad), "a": _method(a), "b": _method(b), "value_a": va, "value_b": vb,
             "diff": diff, "lo": lo, "hi": hi, "p": _boot.p_degeri(f),
-            "a_better": bool(M.yon * diff > 0) if cb else None, "n": int(v.kume.max()) + 1, "cluster": v.kume_adi,
+            "a_better": _a_better(M, va, vb) if cb else None, "n": int(v.kume.max()) + 1, "cluster": v.kume_adi,
             "B": int(B), "source": "frame"}
 
 
@@ -937,9 +1040,15 @@ def _paired_from_report(report: dict, a: str, b: str | None, metric: str | None)
             lo, hi = (None if hi is None else -hi), (None if lo is None else -lo)
         diff = None if r.get("fark") is None else sign * r["fark"]
         yon = next((m.get("yon", 1) for m in report.get("metrikler") or [] if m.get("ad") == met), 1)
+        if met in _metrik.ISARETLI_METRIKLER:
+            val = lambda c: (((report.get("sonuclar") or {}).get(c) or {}).get("metrikler") or {}).get(met, {}).get("deger")
+            va_, vb_ = val(ca), (val(cb) if cb else None)
+            better = None if va_ is None or vb_ is None else bool(abs(va_) < abs(vb_))
+        else:
+            better = None if (diff is None or b is None) else bool(yon * diff > 0)
         return {"metric": METRIC_TO_ENGLISH.get(met, met), "a": _method(a), "b": _method(b), "value_a": None,
                 "value_b": None, "diff": diff, "lo": lo, "hi": hi, "p": r.get("p"),
-                "a_better": None if (diff is None or b is None) else bool(yon * diff > 0), "n": r.get("n", n),
+                "a_better": better, "n": r.get("n", n),
                 "cluster": report.get("tutma_birimi"), "B": None, "source": "report"}
     raise ValueError(f"pair ({a!r}, {b!r}) on {met!r} is not in the report: pass the frame, or evaluate(..., "
                      f"compare=[({a!r}, {b!r})])")
@@ -1025,7 +1134,10 @@ def seal(predictions, description: str, registry: str | os.PathLike | None = Non
     store_copy=False: write only the hash-chain record (no canonical copy; the record has "arsiv": None).
     verify / verify_chain work from the chain alone; grade then needs the predictions passed back in.
     archive_dir: write the canonical copy there instead of the registry (the record keeps only the file name
-    and "arsiv_konum": "dis", no path); grade(None, truth, keys, archive_dir=...) can reopen it."""
+    and "arsiv_konum": "dis", no path); grade(None, truth, keys, archive_dir=...) can reopen it.
+    A file path also records the raw file bytes' sha256 as "dosya_sha256" (file_sha256) next to the canonical
+    "sha256"; the card's seal table shows both, labelled. Report the canonical one for verify/grade, the file one
+    for `sha256sum` checks of the submitted file."""
     if not store_copy and archive_dir is not None:
         raise ValueError("store_copy=False and archive_dir= exclude each other")
     return _onkayit.muhurle(predictions, description, _registry(registry, registry_dir), git_commit,

@@ -12,7 +12,7 @@ import pandas as pd
 from . import analiz, denetim, kalibrasyon, merdiven
 from . import kart as _kart
 from .bootstrap import Orneklem, ga, hesapla, p_degeri
-from .metrik import BIRINCIL, aile, diziler
+from .metrik import BIRINCIL, ISARETLI_METRIKLER, ORAN_METRIKLERI, aile, diziler
 from .sema import ON_EK, _normalle, _sinif_vektoru, _vektor, _vektor_mu, gercek_yok, hazirla
 
 SURUM = "0.1"
@@ -278,9 +278,18 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 etiketsiz_tabanlar: list[str] | None = None, oof_tabanlar: list[str] | None = None,
                 tavan_sutun: str | None = None, tavan_etiket: str | None = None,
                 carpan_en_fazla: int | None = 2000, tavan_yarim: dict | None = None, kor: str | None = None,
-                kiyaslar: list | None = None, ezber_llm: bool | None = None) -> dict:
+                kiyaslar: list | None = None, ezber_llm: bool | None = None, *, tahmin_gorevi: bool = False,
+                ga_yontemi: str = "percentile", n_yapilandirma: int | None = None,
+                onkayit_metin: list[str] | None = None) -> dict:
     """bizim/ham: tahmin_ ön eki olmadan yöntem adı. bizim verilmezse SON yöntem (önceden belirlenmeli;
     en iyiyi sonradan seçmek iyimser yanlılık yaratır, denetimde işaretlenir).
+
+    tahmin_gorevi: talep/zaman serisi tahmini (api task="forecast"): sürekli görev + WMAPE/yanlılık metrikleri; persona
+    karıştırma kontrolü, insan test-retest tavanı ve PPI++ 'kaç insana bedel' uygulanamaz (kartta gerekçesiyle).
+    ga_yontemi: "percentile" (varsayılan) | "basic" (2θ − yüzdelikler); sütun, merdiven, manşet ve fark GA'larında.
+    Yüzdelik GA nokta tahminini dışarıda bırakırsa uyarı + denetim satırı + kart etiketi.
+    n_yapilandirma: denenen yapılandırma sayısı (seçim yanlılığı satırına yazılır). onkayit_metin: ön kayıt metinleri
+    ('bizim' adı önceden yazılmış mı diye aranır; mühür kayıtlarıyla birlikte).
 
     oof_tabanlar: hedef etiketiyle eğitilmiş ama çapraz uydurmalı (kat dışı, OOF) tahmin sütunları; etiketsiz
     tabanlar gibi taban basamağı olur. Rozet ve manşet en güçlü tabana (otomatik + bildirilen) karşı; hiç bildirilmiş
@@ -295,14 +304,23 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     if gercek_yok(df):
         return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
                         etiketler=etiketler, birincil=birincil, onkayit=onkayit, sinirlar=sinirlar, duzey=duzey,
-                        girdi_kaynagi=girdi_kaynagi, tohum=tohum, B=B)
+                        girdi_kaynagi=girdi_kaynagi, tohum=tohum, B=B, tahmin_gorevi=tahmin_gorevi)
+    if ga_yontemi not in ("percentile", "basic"):
+        raise ValueError(f"ci must be 'percentile' or 'basic', not {ga_yontemi!r}")
+    if tahmin_gorevi:
+        gorev = "surekli"
+        birincil = birincil or "wmape"
+    if birincil == "yanlilik":
+        raise ValueError("bias (yanlilik) is a signed diagnostic, not a primary metric: use wmape/mae and read bias "
+                         "from the metric table")
     veri = hazirla(df, gorev, yontemler, siniflar)
     d = veri.df
     etiketler = dict(etiketler or {})
     madde_var = "madde" in d
     olasilik = veri.gorev != "cok_sinif" or isinstance(d[ON_EK + veri.yontemler[0]].iloc[0], np.ndarray)
     birim_aralik = veri.gorev == "surekli" and d["gercek"].between(0, 1).all()
-    metrikler = aile(veri.gorev, olasilik, madde_var and veri.gorev in ("ikili", "surekli"), birim_aralik)
+    oranli = tahmin_gorevi or birincil in ORAN_METRIKLERI
+    metrikler = aile(veri.gorev, olasilik, madde_var and veri.gorev in ("ikili", "surekli"), birim_aralik, oran=oranli)
     adlar = [m.ad for m in metrikler]
     dengesiz_not = None
     if not birincil and veri.gorev in ("ikili", "cok_sinif"):
@@ -322,10 +340,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     # ---- sütunlar: baseline, yöntem, kalibre, kontrol, tavan
     turler, etiket = {}, {}
     if baseline:
-        ozet_s = "median" if birincil in ("mae", "bir_eksi_mae") else "mean"
+        ozet_s = "median" if birincil in ("mae", "bir_eksi_mae", "wmape") else "mean"
         for ad, (et, deg) in merdiven.baselineler(veri, ozet_s, tohum).items():
             c = f"taban_{ad}"
             d[c] = deg if not isinstance(deg, list) else pd.Series(deg, dtype=object).to_numpy()
+            if tahmin_gorevi:   # test penceresinin gerçeğinden çapraz uydurulur: başlangıçtan ileriye bakar
+                et = f"{et} (ileriye bakan / look-ahead)"
             turler[c], etiket[c] = "baseline", et
     taban_turu = {c: "otomatik" for c in turler}
     for y_ in veri.yontemler:
@@ -355,7 +375,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 turler[c], etiket[c] = "kalibre", f"{etiketler.get(y_, y_)} + {ek}"
                 kalib_sutun.setdefault(ON_EK + y_, []).append(c)
     kontrol_sutun = {}
-    for y_ in dict.fromkeys([bizim] + ([ham] if ham else [])):
+    for y_ in ([] if tahmin_gorevi else dict.fromkeys([bizim] + ([ham] if ham else []))):
         c = f"kontrol_karistir_{y_}"
         d[c] = merdiven.karistir(veri, ON_EK + y_, tohum + 1)
         turler[c], etiket[c] = "kontrol", f"{etiketler.get(y_, y_)} · karıştırılmış"
@@ -378,6 +398,9 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         tavan_metrik = []
         if "tekrar" in d:
             veri.notlar.append("tavan: örneklem gürültüsü (varyans bileşenleri) kullanıldı; 'tekrar' (insan test-retest) tavanı yok sayıldı")
+    elif "tekrar" in d and tahmin_gorevi:
+        tavan_metrik = []
+        veri.notlar.append("tahmin görevi: 'tekrar' (insan test-retest) sütunu tavan olarak kullanılmadı")
     elif "tekrar" in d:
         girdiler["tavan"] = _diz(veri, "tekrar")
         tavan_turu = "insan_tekrar"
@@ -412,12 +435,21 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             etiket.pop("tavan")
             veri.notlar.append(f"örneklem gürültüsü tavanı tanımsız: {gurultu['not']}")
 
+    def gaa(r, theta):
+        return ga(r, nokta=theta, yontem=ga_yontemi)
+
     sonuclar = {}
+    ga_disi = []   # yüzdelik GA'nın dışında kalan nokta tahminleri (birincil metrik)
     for c in turler:
         sonuclar[c] = {"tur": turler[c], "etiket": etiket[c], "metrikler": {}}
         for m in metrikler:
             if m.ad in nokta.get(c, {}):
-                a, u = ga(tekrar[c][m.ad])
+                if m.ad == birincil:
+                    pa, pu = ga(tekrar[c][m.ad])
+                    th = nokta[c][m.ad]
+                    if np.isfinite(pa) and np.isfinite(pu) and np.isfinite(th) and not (pa <= th <= pu):
+                        ga_disi.append((c, th, pa, pu))
+                a, u = gaa(tekrar[c][m.ad], nokta[c][m.ad])
                 n = int(len(d) if girdiler[c][2] is None else girdiler[c][2].sum())
                 sonuclar[c]["metrikler"][m.ad] = {"deger": nokta[c][m.ad], "alt": a, "ust": u, "n": n}
 
@@ -426,7 +458,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
 
     def fark(a, b, met=birincil):
         f = tekrar[a][met] - tekrar[b][met]
-        al, us = ga(f)
+        al, us = gaa(f, nokta[a][met] - nokta[b][met])
         return nokta[a][met] - nokta[b][met], al, us, p_degeri(f)
 
     # ---- merdiven
@@ -442,7 +474,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         adim.append("tavan")
     merd = []
     for i, c in enumerate(adim):
-        a, u = ga(tekrar[c][birincil])
+        a, u = gaa(tekrar[c][birincil], deg(c))
         r = {"sutun": c, "etiket": etiket[c], "tur": turler[c], "deger": deg(c), "alt": a, "ust": u,
              "fark_onceki": None, "fark_alt": None, "fark_ust": None, "p": None}
         if i:
@@ -462,7 +494,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     def kutu(c):
         if c is None or c not in nokta:
             return None
-        a, u = ga(tekrar[c][birincil])
+        a, u = gaa(tekrar[c][birincil], deg(c))
         return {"sutun": c, "etiket": etiket[c], "deger": deg(c), "alt": a, "ust": u}
     manset = {"ham": kutu(ON_EK + ham) if ham else None, "bizim": kutu(bc), "en_iyi_baseline": kutu(en_iyi_b),
               "en_iyi_rakip": kutu(en_iyi_r), "taban_tavana_oran": None,
@@ -509,6 +541,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                   f"[{100 * k_['alt']:.0f}–{100 * k_['ust']:.0f}]")
         o = manset["tavana_oran"]
         cumle += (f"; tavana oran %{100 * o['deger']:.0f} (taban tek başına %{100 * manset['taban_tavana_oran']:.0f})")
+    elif not manset["tavan"] and tahmin_gorevi:
+        cumle += " · tavan uygulanamaz (tahmin görevi: insan test-retest yok; model/oracle tavanı için ceiling_col=)"
     elif not manset["tavan"]:
         cumle += " · tavan yok (test-retest ölçülmemiş): normalize skor hesaplanamaz"
     manset["cumle"] = cumle
@@ -539,8 +573,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             if met in nokta.get(b, {}) and met in nokta[bc]:
                 f, a, u, p = fark(bc, b, met)
                 yon = {m.ad: m.yon for m in metrikler}[met]
+                # işaretli metrik (yanlılık): 0'a yakın olan iyidir, ham fark yönü değil
+                iyi = (bool(abs(nokta[bc][met]) < abs(nokta[b][met])) if met in ISARETLI_METRIKLER
+                       else bool(yon * f > 0))
                 karsi.append({"a": bc, "b": b, "metrik": met, "fark": f, "alt": a, "ust": u, "p": p,
-                              "a_iyi": bool(yon * f > 0)})
+                              "a_iyi": iyi})
 
     # ---- kalibrasyon eğrileri
     kal = {}
@@ -580,17 +617,20 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     if bc in kontrol_sutun:
         den.append(denetim.fark_denetimi("persona karıştırma (birey bilgisi kullanılıyor mu)", bc, kontrol_sutun[bc],
                                          tekrar, nokta, M, "bizim − karıştırılmış"))
-    if "madde_ici_kor" in nokta.get(bc, {}):
+    if "madde_ici_kor" in nokta.get(bc, {}) and bc in kontrol_sutun:
+        # karıştırma kontrolü yoksa (tahmin görevi) bizim − bizim = 0 anlamsız satırı yazılmaz
         mm = {m.ad: m for m in metrikler}["madde_ici_kor"]
-        den.append(denetim.fark_denetimi("kişiye özgü sinyal (madde_ici_kor)", bc, kontrol_sutun.get(bc, bc), tekrar, nokta, mm,
+        den.append(denetim.fark_denetimi("kişiye özgü sinyal (madde_ici_kor)", bc, kontrol_sutun[bc], tekrar, nokta, mm,
                                          "bizim − karıştırılmış"))
     if "demeaned_r2" in nokta.get(bc, {}):  # sıfır = madde ortalaması; karıştırma burada sıfır hipotezi olamaz
         v_ = nokta[bc]["demeaned_r2"]
         a_, u_ = ga(tekrar[bc]["demeaned_r2"])
-        den.append({"kontrol": "kişiye özgü sinyal (demeaned_r2 > 0)", "durum": "tamam" if a_ > 0 else "uyari", "deger": v_,
+        kim, ort = (("seri içi sinyal", "seri ortalamasından") if tahmin_gorevi
+                    else ("kişiye özgü sinyal", "madde ortalamasından"))
+        den.append({"kontrol": f"{kim} (demeaned_r2 > 0)", "durum": "tamam" if a_ > 0 else "uyari", "deger": v_,
                     "ayrinti": f"de-meaned R² {_f(v_)} [{_f(a_)}, {_f(u_)}]"
-                               + ("" if a_ > 0 else " · kişiye özgü sapmalar madde ortalamasından kötü ya da ayırt edilemiyor; "
-                                  "genlik kalibrasyonu gerekebilir")})
+                               + ("" if a_ > 0 else f" · {'seri içi' if tahmin_gorevi else 'kişiye özgü'} sapmalar {ort} "
+                                  "kötü ya da ayırt edilemiyor; genlik kalibrasyonu gerekebilir")})
     if tavan_turu == "model":
         den.append(_model_tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
     elif tavan_turu == "orneklem_gurultusu":
@@ -606,18 +646,39 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     dz = denetim.dengesizlik(veri)
     if dz:
         den.append(dz)
-    den.append(denetim.kontaminasyon(veri, {c: girdiler[c] for c in sec}, M, kesim))
+    llm_yok = ezber_llm is False
+    if llm_yok and not kesim:
+        den.append({"kontrol": "kontaminasyon (kesim öncesi/sonrası)", "durum": "atlandi", "deger": None, "uygulanamaz": True,
+                    "ayrinti": "LLM kolu yok (ours_uses_llm=False): eğitim kesim tarihi denetimi uygulanamaz "
+                               "(no LLM arm: contamination audit not applicable)"})
+    else:
+        den.append(denetim.kontaminasyon(veri, {c: girdiler[c] for c in sec}, M, kesim))
     den.extend(denetim.pozisyon_takasi(veri))
-    den.append(denetim.ezber(ezber_json))
+    if llm_yok and not ezber_json:
+        den.append({"kontrol": "ezber testi (LLM veriyi biliyor mu)", "durum": "atlandi", "deger": None, "uygulanamaz": True,
+                    "ayrinti": "LLM kolu yok (ours_uses_llm=False): ezber denetimi uygulanamaz "
+                               "(no LLM arm: memorization audit not applicable)"})
+    else:
+        den.append(denetim.ezber(ezber_json))
+    if tahmin_gorevi:
+        den.append({"kontrol": "görev türü: tahmin", "durum": "tamam", "deger": None,
+                    "ayrinti": "talep/zaman serisi tahmini (task=forecast): persona karıştırma kontrolü, insan test-retest "
+                               "tavanı ve PPI++ 'kaç insana bedel' uygulanamaz (insan yanıtı ya da kişi bilgisi yok); "
+                               "atlandı. Metrikler WMAPE ve yanlılık içerir."})
+    if ga_disi:
+        ayr = "; ".join(f"{etiket.get(c, c)} {_f(th)} ∉ [{_f(a)}, {_f(u)}]" for c, th, a, u in ga_disi[:4])
+        warnings.warn(f"percentile bootstrap CI excludes the point estimate of {birincil} for {len(ga_disi)} column(s) "
+                      f"({ayr}); consider ci='basic'", UserWarning, stacklevel=3)
+        den.append({"kontrol": "bootstrap GA (nokta tahmini yüzdelik GA dışında)",
+                    "durum": "uyari" if ga_yontemi == "percentile" else "tamam", "deger": len(ga_disi),
+                    "ayrinti": f"{birincil}: {ayr}. Oran/toplu metrikte yüzdelik bootstrap yanlı olabilir; "
+                               + ("ci='basic' (2θ − yüzdelikler) deneyin." if ga_yontemi == "percentile"
+                                  else "kartta temel (basic) GA kullanıldı.")})
     if bizim_sec_oto:
         den.append({"kontrol": "seçim yanlılığı", "durum": "uyari",
                     "ayrinti": "'bizim' yöntem açıkça belirtilmedi (son sütun alındı); yöntemi önceden belirleyin", "deger": None})
     elif len(veri.yontemler) > 1:
-        sira = sorted(yontem_c, key=lambda c: -M.yon * deg(c))
-        den.append({"kontrol": "seçim yanlılığı", "durum": "tamam" if sira[0] != bc or len(sira) < 4 else "uyari",
-                    "ayrinti": f"{len(veri.yontemler)} yöntem; 'bizim' önceden adlandırıldı"
-                               + ("; bizim en iyisi: çok yöntem arasından seçildiyse iyimser, bağımsız veride doğrulayın"
-                                  if sira[0] == bc and len(sira) >= 4 else ""), "deger": len(veri.yontemler)})
+        den.append(_secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, onkayit_metin, n_yapilandirma))
     for n_ in veri.notlar:
         den.append({"kontrol": "girdi notu", "durum": "uyari" if "düşürüldü" in n_ else "tamam", "ayrinti": n_, "deger": None})
 
@@ -693,7 +754,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
 
     # ---- etkin örneklem çarpanı
     orneklem = None
-    if carpan and veri.gorev != "ab":
+    if carpan and veri.gorev != "ab" and not tahmin_gorevi:
         try:
             from . import orneklem as _orn
             sec = carpan_yontemler or [bizim] + ([ham] if ham else [])
@@ -727,9 +788,17 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
 
     sinir = [
         f"Bootstrap birimi '{veri.kume_adi}' ({int(veri.kume.max()) + 1} küme, B={B}; toplu metriklerde {orn.B_toplu}). "
-        "Maddeler sabit kabul edilir: GA yeni kişilere genellemeyi ölçer, yeni sorulara değil.",
+        + ("Seriler (madde) sabit kabul edilir: GA aynı serilerde yeni kümelere (seri/grup) genellemeyi ölçer; tek "
+         "tahmin başlangıcı (origin) zamanda genellemeyi ölçmez, birden çok başlangıç için backtest kullanın."
+         if tahmin_gorevi else
+         "Maddeler sabit kabul edilir: GA yeni kişilere genellemeyi ölçer, yeni sorulara değil."),
         "Baseline'lar ve kalibrasyon çapraz uydurmalıdır (aynı grubun satırı kendi eşlemesini görmez).",
     ]
+    if tahmin_gorevi and baseline:
+        sinir.append("Tahmin görevi: otomatik tabanlar (rastgele / madde medyanı-ortalaması) test penceresinin "
+                     "gerçeğinden çapraz uydurulur, yani tahmin başlangıcından ileriye bakar; meşru bir merdiven basamağı "
+                     "değildir. Başlangıçta bilinen tabanları (persistence, son-k ortalama: methods.forecast) pred_ "
+                     "sütunu olarak verin ya da baselines=False kullanın.")
     if manset["tavan"] and tavan_turu == "orneklem_gurultusu":
         sinir.append("Tavan örneklem gürültüsü tavanıdır (varyans bileşenleri): puanlanan tüm gruplarda güvenilirlik = "
                      "1 − ort(grup içi varyans / grup boyu) / var(grup ortalamaları); tavan = √güvenilirlik (Spearman'da "
@@ -762,12 +831,19 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         "tutma_birimi": veri.kume_adi, "girdi_kaynagi": girdi_kaynagi,
         "olusturma": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "surum": SURUM,
         "kart": kart, "birincil": birincil,
-        "metrikler": [{"ad": m.ad, "yon": m.yon, "aciklama": m.aciklama, "tur": m.tur} for m in metrikler],
+        "metrikler": [{"ad": m.ad, "yon": 0 if m.ad in ISARETLI_METRIKLER else m.yon, "aciklama": m.aciklama,
+                       "tur": m.tur} for m in metrikler],
         "sonuclar": sonuclar, "merdiven": merd, "manset": manset, "orneklem": orneklem,
         "karsilastirmalar": karsi, "kalibrasyon": kal, "segment": segment, "yayilim": yay,
         "denetim": den, "ornekler": orn_ler, "onkayit": onkayit or [], "sinirlar": sinir,
         "tabanlar": taban_ozet, "tavan_turu": tavan_turu,
     }
+    if tahmin_gorevi:
+        ozet["tahmin_gorevi"] = True
+    if ga_yontemi != "percentile":
+        ozet["ga_yontemi"] = ga_yontemi
+    if ga_disi:
+        ozet["ga_uyarisi"] = {"metrik": birincil, "n": len(ga_disi), "yontem": ga_yontemi}
     if gurultu is not None:
         ozet["gurultu_tavani"] = gurultu
     if kayitli:
@@ -779,6 +855,90 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     ozet = _temiz(ozet)
     ozet["kanit_kart"] = _temiz(_kart.kart(ozet, muhur=(onkayit or [None])[-1]))  # sahne kart.py ile aynı şema
     return ozet
+
+
+def _ad_kalibi(ad: str):
+    """Yöntem adı için tam kelime kalıbı; 1-2 harfli adlar ('a', 'b') düz metinde sözcükle karışır: ön ek şart."""
+    import re as _re
+    on = r"(?:pred_|tahmin_)" if len(ad) <= 2 else r"(?:pred_|tahmin_)?"
+    return _re.compile(r"(?<![A-Za-z0-9_])" + on + _re.escape(ad) + r"(?![A-Za-z0-9_])")
+
+
+def _muhur_zamani(r: dict) -> float | None:
+    from datetime import datetime as _dt
+    z = r.get("zaman_utc") or r.get("time_utc") or r.get("zaman") or r.get("time")
+    try:
+        return _dt.fromisoformat(str(z)).timestamp() if z else None
+    except ValueError:
+        return None
+
+
+def _onkayit_kaniti(bizim: str, onkayit: list | None, metinler: list | None, adlar=()) -> tuple[str, str]:
+    """'bizim' adının önceden seçildiğine kanıt. Yalnız mühür AÇIKLAMALARI (aciklama/description) ve ön kayıt metin
+    dosyaları aranır; mühürlenen sütun adları (sutunlar) ve kaynak yolu aranmaz: bütün aday sütunları içeren bir
+    tablo mühürlemek hiçbir adı önceden seçmez. Zamanlı metin (dict {"metin", "zaman"}) en son mühürden SONRA
+    yazıldıysa sayılmaz. Eşleşen metinde başka yöntem adları da geçiyor ve 'bizim' açıkça işaretlenmemişse
+    (ours:/primary:/bizim:/birincil: <ad>) belirsizdir.
+    Dönüş: (kod, açıklama), kod ∈ {"adlandirildi", "bulunamadi", "sonra", "belirsiz"}."""
+    import re as _re
+    zamanlar = [z for z in (_muhur_zamani(r) for r in onkayit or [] if isinstance(r, dict)) if z is not None]
+    sinir = max(zamanlar) if zamanlar else None
+    gecerli, gec = [], []
+    for r in onkayit or []:
+        if isinstance(r, dict):
+            gecerli += [str(r[k]) for k in ("aciklama", "description") if r.get(k)][:1]
+    for t in metinler or []:
+        if isinstance(t, dict):
+            z = t.get("zaman")
+            (gec if sinir is not None and z is not None and int(z) > int(sinir) else gecerli).append(str(t.get("metin", "")))
+        else:
+            gecerli.append(str(t))
+    kalip = _ad_kalibi(bizim)
+    eslesen = [g for g in gecerli if kalip.search(g)]
+    if not eslesen:
+        if any(kalip.search(g) for g in gec):
+            return "sonra", "ön kayıt metni son mühürden sonra yazılmış (pre-registration text is newer than the seal)"
+        return "bulunamadi", ""
+    isaret = _re.compile(r"(?i)(?:ours|primary|bizim|birincil)\W{0,3}[:=]\s*[`'\"]?(?:pred_|tahmin_)?"
+                         + _re.escape(bizim) + r"(?![A-Za-z0-9_])")
+    if any(isaret.search(g) for g in eslesen):
+        return "adlandirildi", ""
+    digerleri = sorted({a for a in adlar if a != bizim and any(_ad_kalibi(a).search(g) for g in eslesen)})
+    if digerleri:
+        return "belirsiz", ("ön kayıtta başka yöntem adları da geçiyor (" + ", ".join(digerleri) + "); 'bizim' açıkça "
+                            "işaretlenmemiş (ours: <ad>) (several method names in the pre-registration)")
+    return "adlandirildi", ""
+
+
+def _onkayitta_geciyor(bizim: str, onkayit: list | None, metinler: list | None) -> bool:
+    """Geri uyum: 'bizim' adı ön kayıt kanıtında (açıklama / zamanı uygun metin) geçiyor mu."""
+    return _onkayit_kaniti(bizim, onkayit, metinler)[0] in ("adlandirildi", "belirsiz")
+
+
+def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yapilandirma) -> dict:
+    """Seçim yanlılığı satırı: 'önceden adlandırıldı' yalnız ön kayıtta (mühür açıklaması / mühürden önceki metin)
+    kanıt varsa yazılır."""
+    sira = sorted(yontem_c, key=lambda c: -M.yon * deg(c))
+    n_den = max(len(sira), int(n_yapilandirma or 0))
+    en_iyi = bool(sira) and sira[0] == bc and n_den >= 4
+    yap = f"; {int(n_yapilandirma)} yapılandırma denendi (n_configs)" if n_yapilandirma else ""
+    iyimser = "; bizim en iyisi: çok yapılandırma arasından seçildiyse iyimser, bağımsız veride doğrulayın" if en_iyi else ""
+    kayit_var = bool(onkayit) or bool(metinler)
+    adlar = [str(a)[len(ON_EK):] if str(a).startswith(ON_EK) else str(a) for a in veri.yontemler]
+    kod, neden = _onkayit_kaniti(bizim, onkayit, metinler, adlar) if kayit_var else ("yok", "")
+    if kod == "adlandirildi":
+        durum, ad = ("uyari" if en_iyi else "tamam"), f"'bizim' ({bizim}) ön kayıtta geçiyor: önceden adlandırıldı"
+    elif kod in ("sonra", "belirsiz"):
+        durum, ad = "uyari", f"doğrulanmadı: {neden} (not verified)"
+    elif kayit_var:
+        durum, ad = "uyari", (f"doğrulanmadı: 'bizim' ({bizim}) ön kayıtta bulunamadı "
+                              "(not verified: ours not found in the pre-registration; sealed column names do not count)")
+    else:
+        durum = "uyari" if en_iyi else "atlandi"
+        ad = (f"doğrulanmadı: ön kayıt verilmedi (prereg=); 'bizim' ({bizim}) adının önceden seçildiği kanıtlanamaz "
+              "(not verified: no pre-registration)")
+    return {"kontrol": "seçim yanlılığı", "durum": durum, "ayrinti": f"{len(veri.yontemler)} yöntem; {ad}{yap}{iyimser}",
+            "deger": len(veri.yontemler), "n_configs": int(n_yapilandirma) if n_yapilandirma else None}
 
 
 def _tahmin_ozeti(seri: pd.Series) -> dict:
@@ -809,7 +969,7 @@ def bekleyen(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | Non
              yontemler: list[str] | None = None, bizim: str | None = None, ham: str | None = None,
              etiketler: dict | None = None, birincil: str | None = None, onkayit: list | None = None,
              sinirlar: list | None = None, duzey: str | None = None, girdi_kaynagi: str | None = None,
-             tohum: int = 0, B: int = 1000) -> dict:
+             tohum: int = 0, B: int = 1000, tahmin_gorevi: bool = False) -> dict:
     """Gerçek yok (sütun yok ya da tümü eksik): kalibrasyon, merdiven ve bootstrap atlanır. Rapor mühür kayıtlarını ve
     tahmin özetini taşır; kart rozeti 'bekliyor' (awaiting truth). Şema degerlendir() ile aynı anahtarlar."""
     etiketler = dict(etiketler or {})
@@ -861,6 +1021,10 @@ def bekleyen(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | Non
         "ornekler": [], "onkayit": muhurler, "sinirlar": sinir, "tabanlar": None, "tavan_turu": None,
         "gercek_bekleniyor": True, "tahmin_ozeti": ozetler,
     }
+    if tahmin_gorevi:
+        ozet["tahmin_gorevi"] = True
+        ozet["gorev"] = ozet["gorev"] or "surekli"
+        ozet["birincil"] = ozet["birincil"] or "wmape"
     ozet = _temiz(ozet)
     ozet["kanit_kart"] = _temiz(_kart.kart(ozet, muhur=(muhurler or [None])[-1]))
     return ozet

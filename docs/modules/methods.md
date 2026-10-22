@@ -19,6 +19,7 @@ that combine an LLM prediction with a model learned from data.
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
+| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature` | multi-series demand forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon, rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -30,6 +31,7 @@ that combine an LLM prediction with a model learned from data.
 - **[makro]** = `uretim/makro/RAPOR.md`, **[llmabm]** = `uretim/makro/llmabm/RAPOR.md`
 - **[dongu]** = `uretim/dongu/GUNLUK.md` (OpinionQA group loop)
 - **[prova-d2]** = `uretim/prova/d2/NOTLAR.md` and `SIMENGINE-EKSIK.md` (blind rehearsal: new-country survey answers; code `kod/cv.py`, `cv_biz3.py`, `tahmin.py`)
+- **[prova-d4]** = `uretim/prova/d4/NOTLAR.md`, `SONUC-MAIN.md`, `SIMENGINE-EKSIK.md` (blind rehearsal: M5 weekly demand, 30,490 series, 4 weeks ahead, WMAPE; code `kod/ozellik.py`, `ses.py`, `kos.py`, `pm.py`, `ek.py`, `llm_olay.py`)
 - **[prova-d3]** = `uretim/prova/d3/SIMENGINE-EKSIK.md` (blind rehearsal: new-film ratings, item cold start; code `kod/ozellik.py`, `kod/model.py`)
 
 Every number below comes from those files. This port re-measured nothing. The tests
@@ -569,3 +571,75 @@ fold) get noisy statistics; the SVD rank must stay below the number of items per
 - The research kits' scale conversions (deciles, point units) are not ported in `TwinStack`: targets are used in
   their raw numeric unit.
 - PPI++ is in `simengine.evidence`, not here.
+
+
+## Demand forecasting (`forecast.py`) [prova-d4]
+
+Long panel: one row per (series, time) with `id`, `time`, `y` (column names are keyword arguments). The
+*origin* is the last time with known `y`; horizon `h` is the h-th period after it. Missing cells count as 0
+(`fill_value=`). Rows after the origin may carry known-in-advance exogenous columns (price, calendar) with
+`y` NaN. Every forecaster returns `[id, origin, h, time, pred]`.
+
+```python
+import simengine.methods as M
+
+# rule ladder at one origin (week 269), 4 weeks ahead
+M.persistence_forecast(panel, 269, 4)
+M.seasonal_naive(panel, 269, 4, season=52)
+M.moving_mean(panel, 269, 4, window=4)
+fr, alpha, scores = M.ses(panel, 269, 4, return_alpha=True)  # alpha tuned on earlier origins, targets <= 269
+
+# features: only y at times <= origin; exog read at the target time; static -> category codes
+X = M.make_features(panel, 269, lags=(1, 2, 3, 4), windows=(4, 8, 13, 26), horizons=4, season=52,
+                    exog=["price", "snap"], static=["store", "dept"])
+
+# direct strategy: one model per horizon (lightgbm lazily, else sklearn HistGradientBoosting with a warning)
+gbm = M.DirectForecaster("lightgbm", horizons=4, season=52, exog=["price"], static=["store", "dept"],
+                         n_train_origins=52, clip_min=0.0)
+
+# rolling-origin backtest: each callee sees y masked after its origin; truth from the full panel
+bt = M.backtest(gbm, panel, origins=range(229, 270, 8), horizon=4)
+base = M.backtest(M.moving_mean, panel, origins=range(229, 270, 8), horizon=4, window=4)
+M.summarize_backtest(bt, by="origin")          # wmape, bias, n per origin
+
+# metric-optimal point: Poisson median for L1 metrics, only where y_hat < 3 (rehearsal B5)
+bt["pred_l1"] = M.point_for_metric(bt["pred"], metric="wmape", dist="poisson", threshold=3)
+
+# LLM prior as a feature, with a blind arm and a shuffled placebo (one llm.map batch)
+prior = M.llm_prior_feature(llm, ["FOODS", "HOBBIES", "HOUSEHOLD"],
+                            "Weekly unit-sales multiplier for {key} in a Super Bowl week (1.0 = no effect)?",
+                            blind_question="Weekly unit-sales multiplier for {key} in a Super Bowl week?",
+                            thinking="off")
+# -> key, value (named), value_blind ("group A", ...), value_shuffled (values permuted across keys)
+```
+
+What was measured (D4, one run, [prova-d4] `SONUC-MAIN.md`, series-level WMAPE on the sealed test weeks):
+persistence 0.418, seasonal naive (52) 0.600, last-4 mean 0.379, SES 0.371, LightGBM on sales history only
+0.354, LightGBM + price + calendar 0.348, + Poisson median (ŷ < 3) 0.347; the hidden LightGBM reference was
+0.357. The price/calendar gain was small per series (0.0053) and much larger at store x dept x week level
+(0.0141).
+
+Backtest details: truth of an (id, time) cell missing inside the panel is 0 (`fill_value=0.0`, the same rule
+as the forecasters), so a sparse panel without its zero-sales rows scores like the dense one; targets beyond the
+last panel time stay NaN. `fill_value=np.nan` restores the old drop. Integer or regular-date times are reindexed
+to a complete grid, so a week with no rows at all does not shift h. A `DirectForecaster` whose `horizons` do not
+cover `horizon=` raises a `UserWarning` (the missing h are absent from the result).
+
+```python
+bt = M.backtest(M.moving_mean, sparse_panel, origins=[30, 33], horizon=4)            # empty cells = 0
+bt_nan = M.backtest(M.moving_mean, sparse_panel, origins=[30, 33], horizon=4, fill_value=float("nan"))
+```
+
+Cautions:
+- **One origin is misleading.** On the rule baselines the D4 team saw WMAPE swing between about 0.38 and 0.45
+  across origins 229-269 (`kod/ek.py`, one run), and the dev origin was among the easiest. Use `backtest`
+  with several origins and report per-origin numbers.
+- **Median vs mean.** `point_for_metric` lowers an L1 metric and biases totals down. In D4 the median step
+  improved series WMAPE by 0.0014 but worsened store x dept WMAPE by 0.0036 and moved bias from -3.3% to
+  -4.0%. Report bias (`summarize_backtest`) separately and keep the untransformed arm if aggregate levels
+  are scored. For MSE it returns the mean unchanged.
+- **LLM prior.** In D4 the six-call category x event multiplier added nothing: named and blind arms both
+  0.359 on dev, difference to the no-LLM arm +0.0006 [-0.0007, +0.0017] (`NOTLAR.md`). Keep the blind and
+  shuffled columns; a prior only counts when `value` beats both.
+- `seasonal_naive` was the worst rung on M5 weekly data (0.600). It wins only where the season really repeats
+  (the synthetic test).

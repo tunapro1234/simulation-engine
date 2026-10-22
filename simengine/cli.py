@@ -4,6 +4,8 @@
     simengine evaluate test.csv --ours hybrid --prereg .onkayit                # no truth yet -> sealed "awaiting truth" card
     simengine evaluate pairs.csv --ours ours --primary spearman --aggregate-by item_id --offset-col member_mean \
         --noise-ceiling variance_components --memorization audit.json --blind-col ours_blind --compare P1:L1 --compare P2
+    simengine evaluate bt.csv --ours lgbm --task forecast --primary wmape --aggregate-by store_dept_week \
+        --aggregate sum --ci basic --n-configs 6 --unlabeled-baselines mean4 --cutoff 2016-01-01    # forecast mode
     simengine seal preds.csv "test predictions" --registry runs/.onkayit --no-copy   # hash-chain record only
     simengine card runs/card1/report.json -o card.md                           # Markdown (or *.json card dict)
     simengine bench list
@@ -152,6 +154,22 @@ def cmd_evaluate(a) -> int:
     extra = {} if mmr is None else {"multiplier_max_rows": (mmr or None)}
     if a.noise_ceiling_repeats is not None:
         extra["noise_ceiling_repeats"] = a.noise_ceiling_repeats
+    agg_extra = {}
+    if a.aggregate is not None:
+        if a.aggregate == "sum" and not a.aggregate_by:
+            print("error: --aggregate sum needs --aggregate-by (the column whose groups are summed, e.g. "
+                  "store_dept_week)", file=sys.stderr)
+            return 2
+        agg_extra["aggregate"] = a.aggregate
+    if a.ci is not None:
+        agg_extra["ci"] = a.ci
+    if a.n_configs is not None:
+        agg_extra["n_configs"] = a.n_configs
+    if a.primary and a.primary.lower() == "bias":
+        print("error: --primary bias: bias is signed (sum p / sum y - 1) and cannot be the primary metric; use "
+              "--primary wmape (bias is reported next to it)", file=sys.stderr)
+        return 2
+    extra.update(agg_extra)
     report = ev.evaluate(df, title=a.title or Path(a.table).stem, ours=a.ours, raw=a.raw, task=a.task,
                          primary=a.primary, B=a.B, B_aggregate=a.B_aggregate, seed=a.seed, dataset=a.dataset or "",
                          cutoff=a.cutoff, methods=_csv_list(a.methods), circular=_csv_list(a.circular),
@@ -350,9 +368,12 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("table")
     e.add_argument("--ours", help="our method (column pred_<ours>); name it before looking at results")
     e.add_argument("--raw", help="raw / unhybridised method, e.g. the plain LLM arm")
-    e.add_argument("--task", choices=["binary", "multiclass", "distribution", "continuous", "ab"])
-    e.add_argument("--primary", help="primary metric, e.g. auc, accuracy, pearson, wasserstein (default per task: "
-                   "binary accuracy, or macro_f1 when the majority class > 60%%; see docs/modules/evidence.md)")
+    e.add_argument("--task", choices=["binary", "multiclass", "distribution", "continuous", "ab", "forecast"],
+                   help="forecast = demand/time-series forecast: continuous metrics + wmape and bias, default "
+                        "primary wmape, no persona/human-ceiling/worth-N-humans blocks")
+    e.add_argument("--primary", help="primary metric, e.g. auc, accuracy, pearson, wasserstein, wmape (default per "
+                   "task: binary accuracy, or macro_f1 when the majority class > 60%%; forecast wmape; see "
+                   "docs/modules/evidence.md). bias is reported but refused as primary (signed)")
     e.add_argument("--title")
     e.add_argument("--dataset")
     e.add_argument("--methods", help="comma list of methods to include (default: every pred_* column)")
@@ -367,6 +388,13 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--aggregate-by", dest="aggregate_by",
                    help="evaluate at group level: average truth and predictions per this column (e.g. group), "
                         "bootstrap over groups; binary/continuous only")
+    e.add_argument("--aggregate", choices=["mean", "sum"],
+                   help="with --aggregate-by: mean (default) or sum per group (hierarchical totals, e.g. "
+                        "store x dept x week WMAPE)")
+    e.add_argument("--ci", choices=["percentile", "basic"],
+                   help="bootstrap CI method (default percentile; basic = 2*theta - quantiles)")
+    e.add_argument("--n-configs", dest="n_configs", type=int,
+                   help="configurations tried before picking ours (selection-bias audit)")
     e.add_argument("--calibrate", help="comma list of methods to recalibrate")
     e.add_argument("--cutoff", help="model training cutoff for the contamination audit (needs a time column)")
     e.add_argument("--prereg", help="seal registry directory to attach")

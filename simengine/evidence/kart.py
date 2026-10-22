@@ -111,6 +111,8 @@ def _bedel_satiri(oz: dict, bizim: str | None = None, ham: str | None = None) ->
 TAVAN_ETIKET = {"model": "Model/oracle tavanı", "orneklem_gurultusu": "Örneklem gürültüsü tavanı (varyans bileşenleri)"}
 TAVAN_NOT = {"model": "tür: model/oracle (insan test-retest değil)",
              "orneklem_gurultusu": "tavan türü: örneklem gürültüsü (varyans bileşenleri, tüm gruplar)"}
+TAHMIN_NOT = {"tavan": "uygulanamaz: tahmin görevi, insan test-retest yok (not applicable: forecast task)",
+              "bedel": "uygulanamaz: tahmin görevi, insan yanıtı yok, PPI++ atlandı (not applicable: forecast task)"}
 EZBER_EKI = "Uyarı: kazanç ezber/tanımadan gelebilir"
 EZBER_NEDEN = {"ezber_denetimi": "ezber denetimi uyarıda", "kor_kol": "kör kol kazancın çoğunu kaybediyor"}
 
@@ -124,6 +126,7 @@ def kazanc_var(fark: dict | None) -> bool:
 
 def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> dict:
     man = oz.get("manset") or {}
+    tahmin = bool(oz.get("tahmin_gorevi"))
     birincil = oz.get("birincil")
     yon = next((m.get("yon", 1) for m in oz.get("metrikler") or [] if m.get("ad") == birincil), 1)
     son = oz.get("sonuclar") or {}
@@ -134,11 +137,15 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
          satir("ham", f"Ham: {ham['etiket']}" if ham else "Ham yöntem", *_u(ham), not_=None if ham else "ham kol yok"),
          satir("kalibre", f"Bizim: {biz['etiket']}" if biz else "Bizim yöntem", *_u(biz)),
          satir("tavan", TAVAN_ETIKET.get(oz.get("tavan_turu"), "İnsan tekrar tavanı"), *_u(tav),
-               not_=(TAVAN_NOT.get(oz.get("tavan_turu")) if tav else "tavan yok (test-tekrar ölçülmemiş)")),
+               not_=(TAVAN_NOT.get(oz.get("tavan_turu")) if tav else
+                     (TAHMIN_NOT["tavan"] if tahmin else "tavan yok (test-tekrar ölçülmemiş)"))),
          satir("bosluk", "Kapanan boşluk (bizim − taban)/(tavan − taban)", *_u(bos), birim="%",
                not_=None if bos else "tavan yok: hesaplanamaz"),
          None]
-    S[-1], bedel_kaynak = _bedel_satiri(oz, (biz or {}).get("sutun"), (ham or {}).get("sutun"))
+    if tahmin:
+        S[-1], bedel_kaynak = satir("bedel", "Kaç insana bedel", not_=TAHMIN_NOT["bedel"]), None
+    else:
+        S[-1], bedel_kaynak = _bedel_satiri(oz, (biz or {}).get("sutun"), (ham or {}).get("sutun"))
     tbb = _ppi100(oz, (tb or {}).get("sutun"))
     fark = None
     if biz and tb:
@@ -148,9 +155,18 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
                         "ust": yon * (k["ust"] if yon > 0 else k["alt"])}
     r, g = rozet(S, fark, gercek_var=bool(son), bedel_kaynak=bedel_kaynak,
                  taban_bedel_alt=_f(tbb[1].get("alt")) if tbb else None, taban_var=bool(biz and tb))
-    atl = [d.get("kontrol") for d in oz.get("denetim") or [] if d.get("durum") == "atlandi"
+    atl = [d.get("kontrol") for d in oz.get("denetim") or [] if d.get("durum") == "atlandi" and not d.get("uygulanamaz")
            and any(k in (d.get("kontrol") or "") for k in ("bölme", "grup", "zaman", "kontaminasyon", "ezber"))]
-    et = list(etiketler or []) + (["kanıtlanmadı: sızıntı/ezber"] if atl else [])
+    llm_yok = any(d.get("uygulanamaz") and "ezber" in (d.get("kontrol") or "") for d in oz.get("denetim") or [])
+    # LLM kolu yoksa ezber denetimi eksikliği bayrak sebebi değildir: kalan atlanan sızıntı denetimleri için "sızıntı"
+    et = list(etiketler or []) + ([f"kanıtlanmadı: sızıntı ({', '.join(atl)} atlandı)" if llm_yok else
+                                   "kanıtlanmadı: sızıntı/ezber"] if atl else [])
+    if llm_yok:
+        et.append("LLM kolu yok: ezber denetimi uygulanamaz (no LLM arm: memorization audit not applicable)")
+    if oz.get("ga_uyarisi"):
+        gu = oz["ga_uyarisi"]
+        et.append(f"yüzdelik GA nokta tahminini dışarıda bırakıyor ({gu.get('metrik')}, {gu.get('n')} sütun)"
+                  + ("; ci='basic' deneyin" if gu.get("yontem") == "percentile" else "; temel (basic) GA kullanıldı"))
     if (oz.get("tabanlar") or {}).get("yalniz_basit"):
         et.append("yalnız basit tabanlar (rastgele/marjinal)")
     ez = oz.get("ezber_uyarisi")

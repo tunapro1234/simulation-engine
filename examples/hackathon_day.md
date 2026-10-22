@@ -53,6 +53,7 @@ Decide which of these the brief is really asking for, because the measured answe
 | "what will each customer do?" with history | `binary` / `continuous` | persistence, decayed frequency, LightGBM | LLM personas stayed below the history model |
 | "predict answers of people in **new** countries/groups" from survey data in other groups (no earlier wave) | `continuous` / `binary` | `methods.GroupTransfer` (group-level ridge + person deviation, optional LLM group prior) scored with `methods.oof_predict(..., group=...)` | D2 rehearsal, group-held-out CV Spearman: person-only 0.197, two-stage 0.257, + LLM prior 0.295-0.311, oracle 0.344; one dataset, no CI |
 | "predict member ratings for **new** items/films with no ratings" (cold start) and the item-level residual | `continuous` | `methods.GroupTransfer(group=item)` on `methods.item_holdout_features(ratings, ...)` (member stats + SVD taste rebuilt without each fold's items), `oof_predict(..., folds=res.folds)`; ladder rung `methods.MFBaseline`. Score: `evaluate(offset_col="member_mean", aggregate_by=item, noise_ceiling="variance_components")` | D3 rehearsal, one run, 300 dev films, film residual Spearman: label-free member mean 0.839, audience composition 0.845, stack with the LLM title prior and persona panel 0.895; split-half ceiling 0.987 (the rehearsal's own script). The LLM gain was title recognition (named 0.779 vs blind 0.169); no CI here |
+| "forecast weekly demand for many series, horizon H" (stores x items, price/calendar known ahead) | `forecast` | `methods.forecast` baselines (`persistence_forecast`, `seasonal_naive`, `moving_mean`, `ses`), then `DirectForecaster("lightgbm", horizons=H, exog=[price, calendar])`; compare all of them with `backtest(..., origins=[...])` over several origins. Score: `evaluate(task="forecast", primary="wmape")` (bias is reported next to it), a second report with `aggregate_by=<store_dept_week>, aggregate="sum"` for the hierarchy totals; `point_for_metric(pred, metric="wmape")` only for L1 metrics | D4 rehearsal (M5, one run, the team's own code written before these helpers existed), test series WMAPE: last-4 mean 0.379, SES 0.371, LightGBM + price + calendar with the Poisson median 0.347 [0.334, 0.360]; vs SES −0.024 [−0.030, −0.019]. The LLM event prior added nothing (named = blind) and was dropped |
 | "how will adoption / a cascade evolve?" | `continuous` | curves + `abm.AdoptionABCAnalogy` with the Bass control | ABM 8.48 vs Bass control 9.73 MAE |
 | "tell us why / give us voices" | qualitative | `sim.survey` / `sim.ab_test` panel with controls | use quotes, not the panel's numbers |
 
@@ -135,7 +136,7 @@ Skip discussion rounds and agent societies for accuracy: neither moved the resul
 
 ## 4b. Trap check before you seal (10 min)
 
-Every item below cost a rehearsal team time or a wrong claim in the three blind rehearsals (22 Oct). `tr`/`te` are the
+Every item below cost a rehearsal team time or a wrong claim in the blind rehearsals (22 Oct; 12-14 from D4). `tr`/`te` are the
 train and test inputs, `FEATS` the columns your model uses, `G` the group column (country, store, wave).
 
 1. **Post-response columns.** Columns asked after the stimulus (trust, identity, follow-ups) make CV look great and
@@ -176,6 +177,18 @@ train and test inputs, `FEATS` the columns your model uses, `G` the group column
     absolute counts relative (`user_n_pct`, not `user_n`): a fold sees fewer ratings than the full train set.
     `GroupTransfer`'s default composition averages every numeric column, so pass `composition=[...]` if unaligned
     fold columns are in the table.
+12. **One forecast origin.** A single dev origin can be lucky: in D4 the rule baselines moved between about 0.38 and
+    0.45 WMAPE across origins 229-269 (one run). Use `backtest(model, panel, origins=[...])` and
+    `summarize_backtest(bt, by="origin")`; tune anything (SES alpha, model settings) only on origins whose targets
+    are before the dev origin.
+13. **Mean vs median for L1 metrics.** WMAPE/MAE reward the median, which for low counts is below the mean:
+    `point_for_metric(pred, metric="wmape", threshold=3)` lowered D4 series WMAPE by 0.0014 but worsened
+    store x dept WMAPE by +0.0036 and pushed bias from −3.3 % to −4.0 % (one run). Report bias, and if totals are
+    also graded seal the untransformed arm too.
+14. **Items not on sale, and features per horizon.** Zeros before launch or while an item has no price are not
+    demand: train only on cells where it is on sale, and predict 0 where it is not on sale in the test window.
+    Each horizon h needs features known at the origin (`make_features` / `DirectForecaster` cut history at the
+    origin); only truly known-ahead columns (planned price, calendar) go in `exog=` at the target week.
 
 Rehearsal facts to calibrate expectations: the team with the plain kit took 63 min, the simengine-only team
 37 min; the kit team's CV estimate matched the test (0.308 → 0.306), the simengine team's was optimistic
@@ -258,6 +271,16 @@ The card gives the baseline ladder with paired CIs, the shuffle control, the spl
 example cards reached "high confidence", and "inconclusive" with honest baselines is a stronger pitch than a number
 without them. `lang="en"` drops the Turkish badge reason and headline and uses dot decimals; the ladder and audit
 labels stay Turkish.
+
+Forecast mode (D4 shape): reshape the `backtest` output (`truth`, one `pred_<arm>` column per arm, the series id as
+the bootstrap cluster) and pass the training cutoff so the contamination audit can run:
+
+```bash
+simengine evaluate data/bt.csv --ours lgbm --task forecast --primary wmape --unlabeled-baselines mean4,ses \
+    --cutoff 2016-01-01 --ci basic --n-configs 6 --ours-no-llm --prereg .onkayit --out runs/fc-evidence --lang en
+simengine evaluate data/bt.csv --ours lgbm --task forecast --primary wmape --aggregate-by store_dept_week \
+    --aggregate sum --out runs/fc-totals --lang en          # hierarchy totals, second report
+```
 
 ## 6. If there is time: a research loop (optional)
 
