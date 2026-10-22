@@ -542,14 +542,18 @@ class _Search:
             diffs[f"winner-{a}"] = {"ci95": self.paired(tests["winner"]["key"], tests[a]["key"]),
                                     "bonferroni": self.paired(tests["winner"]["key"], tests[a]["key"],
                                                               alpha=self.alpha / k)}
-        wt = tests["winner"]
+        wt, rt = tests["winner"], tests["reference"]
+        w_gap = (wt["score"] - w.score) if wt["status"] == "ok" else None
+        r_gap = (rt["score"] - ref.score) if rt["status"] == "ok" and ref.score is not None else None
         fin = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "winner_node": w.id, "winner_payload": w.payload,
-               "reference_node": ref.id, "winner_dev": w.score,
+               "reference_node": ref.id, "winner_dev": w.score, "reference_dev": ref.score,
                "test": {a: {kk: t.get(kk) for kk in ("status", "score", "lo", "hi", "n", "error", "key")}
                         for a, t in tests.items()},
                "test_diff": diffs, "bonferroni_k": k, "n_dev_candidates": sum(n.status == "ok" for n in self.nodes),
-               # max over noisy dev scores is optimistic: test - dev of the winner, metric units
-               "winner_test_minus_dev": (wt["score"] - w.score) if wt["status"] == "ok" else None}
+               # test - dev, metric units. The reference gap is the dev -> test shift (other rows, refit, period);
+               # the winner's extra gap is what selecting the max over noisy dev scores adds on top
+               "winner_test_minus_dev": w_gap, "reference_test_minus_dev": r_gap,
+               "excess_test_minus_dev": (w_gap - r_gap) if w_gap is not None and r_gap is not None else None}
         st["final"] = fin
         self._save()
         return self.result()
@@ -649,7 +653,10 @@ class _Search:
                     L.append(f"\n{a}: {f['diff']:+.4f} [{f['lo']:+.4f}, {f['hi']:+.4f}] · Bonferroni (k="
                              f"{fin['bonferroni_k']}) [{g['lo']:+.4f}, {g['hi']:+.4f}]")
             if fin.get("winner_test_minus_dev") is not None:
-                L.append(f"\nWinner test - dev: {fin['winner_test_minus_dev']:+.4f} (selection optimism shows here)")
+                L.append(f"\nWinner test - dev: {fin['winner_test_minus_dev']:+.4f}")
+            if fin.get("excess_test_minus_dev") is not None:
+                L.append(f"Reference test - dev: {fin['reference_test_minus_dev']:+.4f} (dev -> test shift); winner "
+                         f"minus reference gap: {fin['excess_test_minus_dev']:+.4f} (selection optimism on top of it)")
         return "\n".join(L) + "\n"
 
 
@@ -677,9 +684,12 @@ class TreeSearch(_Search):
         self.operators, self.steps, self.num_drafts = operators, steps, num_drafts
         self.debug_prob, self.max_debug_depth, self.budget_usd, self.task = debug_prob, max_debug_depth, budget_usd, task
         self.state = self._load_state() or self._base_state()
-        self.state.setdefault("policy", {"steps": steps, "num_drafts": num_drafts, "debug_prob": debug_prob,
-                                         "max_debug_depth": max_debug_depth,
-                                         "operators": getattr(operators, "name", type(operators).__name__)})
+        pol = {"steps": steps, "num_drafts": num_drafts, "debug_prob": debug_prob, "max_debug_depth": max_debug_depth,
+               "operators": getattr(operators, "name", type(operators).__name__)}
+        old = self.state.get("policy")
+        if old and old != pol:                   # resumed with other settings: keep the record, journal shows current
+            self.state.setdefault("policy_history", []).append({**old, "until_node": len(self.state["nodes"])})
+        self.state["policy"] = pol
 
     def policy(self, nodes: list[Node], rng: np.random.Generator) -> tuple[str, Node | None]:
         """AIDE search policy: (op, parent)."""
@@ -783,7 +793,15 @@ class MCTSSearch(_Search):
         self.state.setdefault("tree", {})        # path "i.j.k" -> [N, sum reward of good evals, n_bad]
         self.state.setdefault("exhausted", [])
         self.state.setdefault("iter", 0)
-        self.state.setdefault("policy", {"budget": budget, "c": c, "keys": self.keys, "n_grid": n_grid})
+        pol = {"budget": budget, "c": c, "keys": self.keys, "n_grid": n_grid, "choices": _jsonable(self.choices)}
+        old = self.state.get("policy")
+        # tree paths are indices into self.choices: other keys or grid values would silently remap them
+        if old and (old.get("keys") != self.keys or ("choices" in old and json.dumps(old["choices"], default=str)
+                                                     != json.dumps(pol["choices"], default=str))
+                    or ("choices" not in old and old.get("n_grid") != n_grid)):
+            raise RuntimeError("searched keys or their grid values differ from the saved MCTS tree; start a new "
+                               "workdir")
+        self.state["policy"] = pol
 
     @staticmethod
     def _pk(path: tuple) -> str:
@@ -821,6 +839,9 @@ class MCTSSearch(_Search):
 
     def _mark_exhausted(self, path: tuple):
         tree, ex = self.state["tree"], self.state["exhausted"]
+        if not self.keys:                        # nothing to search: the defaults are the whole space
+            self.state["stopped"] = "search space exhausted"
+            return
         if len(path) == len(self.keys) and self._pk(path) not in ex:
             ex.append(self._pk(path))
         while path:
