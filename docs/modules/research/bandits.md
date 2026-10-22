@@ -40,25 +40,29 @@ loop = Loop(runner, space, proposer=RacingProposer("successive_rejects", pulls_p
 
 Each implementation was checked against the paper's own algorithm box. The PDFs were read on 22 Oct 2026.
 
-- **UCB1**: Auer, Cesa-Bianchi & Fischer, *Finite-time analysis of the multiarmed bandit problem*, Machine Learning
-  47 (2002), Fig. 1 and Theorem 1. Play each arm once, then play argmax of mean_j + sqrt(2 ln n / n_j). Rewards are in
+- **UCB1**: Auer, Cesa-Bianchi & Fischer, *Finite-time analysis of the multiarmed bandit problem*, Machine Learning 47
+  (2002), Fig. 1 and Theorem 1. Play each arm once, then play argmax of mean_j + sqrt(2 ln n / n_j). Rewards are in
   [0, 1]. Here `scale` multiplies the bonus to cover other reward ranges.
-- **Thompson sampling, Beta**: Agrawal & Goyal, *Analysis of Thompson Sampling for the multi-armed bandit
-  problem*, COLT 2012 (PMLR 23), Algorithms 1 and 2. The posterior is Beta(S+1, F+1). A reward in [0, 1] becomes a
-  Bernoulli trial with that success probability. Here a reward is first rescaled from `bounds` to [0, 1].
-- **Thompson sampling, Gaussian**: Agrawal & Goyal, *Further optimal regret bounds for Thompson Sampling*,
-  AISTATS 2013 (PMLR 31), Algorithm 2. theta_i ~ N(mu_i, 1/(k_i+1)), with the update mu_i = (mu_i k_i + r)/(k_i + 2),
-  which equals the sum of rewards / (k_i + 1). Here `sigma` scales the variance to sigma^2/(k_i+1), and `prior_mean`
-  replaces the paper's prior mean of 0. The defaults (sigma 1, prior_mean 0, warmup 0) are the paper's algorithm.
-  `warmup` is an addition that is not in the paper.
-- **Successive rejects**: Audibert, Bubeck & Munos, *Best arm identification in multi-armed bandits*, COLT 2010,
-  Fig. 3 and Theorem 2. The phase lengths are n_k = ceil((n - K) / (logbar(K)(K + 1 - k))), with
-  logbar(K) = 1/2 + sum_{i=2..K} 1/i. After each phase the arm with the lowest empirical mean is dismissed, with ties
-  broken at random. A test checks the schedule against the formula and against the budget.
-- **LUCB1**: Kalyanakrishnan, Tewari, Auer & Stone, *PAC subset selection in stochastic multi-armed bandits*,
-  ICML 2012, §3.1 to §3.3, with m = 1. Initialise by sampling every arm once. In round t, h is the empirical best and
-  l is the arm other than h with the largest mean + beta. Stop iff UCB(l) - LCB(h) < epsilon; otherwise sample both.
-  The radius is beta(u, t) = sqrt(ln(k1 n t^4 / delta) / (2u)) with k1 = 5/4, where n is the number of arms. Here a
+- **Thompson sampling, Beta**: Agrawal & Goyal, *Analysis of Thompson Sampling for the multi-armed bandit problem*,
+  COLT 2012 (PMLR 23), Algorithms 1 and 2. The posterior is Beta(S+1, F+1). A reward in [0, 1] becomes a Bernoulli
+  trial with that success probability. Here a reward is first rescaled from `bounds` (default (0, 1) in your units,
+  also when `higher_is_better=False`) to [0, 1].
+- **Thompson sampling, Gaussian**: Agrawal & Goyal, *Further optimal regret bounds for Thompson Sampling*, AISTATS
+  2013 (PMLR 31), Algorithm 2. theta_i ~ N(mu_i, 1/(k_i+1)) with mu_i = sum of rewards / (k_i + 1), as the paper's
+  text defines it (derivation in §1.2, definition with Theorem 2 in §1.3). The algorithm box prints the update as
+  (mu_i k_i + r)/(k_i + 2), which does not give that mean from k_i = 1 on; the conjugate update of the text is (mu_i
+  (k_i + 1) + r)/(k_i + 2), and that is what is implemented. Here `sigma` scales the variance to sigma^2/(k_i+1), and
+  `prior_mean` replaces the paper's prior mean of 0. The defaults (sigma 1, prior_mean 0, warmup 0) are the paper's
+  algorithm. `warmup` is an addition that is not in the paper.
+- **Successive rejects**: Audibert, Bubeck & Munos, *Best arm identification in multi-armed bandits*, COLT 2010, Fig.
+  3 and Theorem 2. The phase lengths are n_k = ceil((n - K) / (logbar(K)(K + 1 - k))), with logbar(K) = 1/2 +
+  sum_{i=2..K} 1/i. After each phase the arm with the lowest empirical mean is dismissed, with ties broken at random.
+  A test checks the schedule against the formula and against the budget.
+- **LUCB1**: Kalyanakrishnan, Tewari, Auer & Stone, *PAC subset selection in stochastic multi-armed bandits*, ICML
+  2012, §3.1 to §3.3, with m = 1. Rounds 1 to K sample every arm once, and from round K + 1 on each round samples two
+  arms (§3.2, footnote 3), so the first stopping check uses t = K + 1. In round t, h is the empirical best and l is
+  the arm other than h with the largest mean + beta. Stop iff UCB(l) - LCB(h) < epsilon; otherwise sample both. The
+  radius is beta(u, t) = sqrt(ln(k1 n t^4 / delta) / (2u)) with k1 = 5/4, where n is the number of arms. Here a
   `scale` multiplies it for rewards that are not in [0, 1], and an optional `budget` cap is added.
 - **Uniform**: equal allocation that recommends the empirical best. It is the baseline used in Audibert et al. §7,
   analysed in Bubeck, Munos & Stoltz (ALT 2009).
