@@ -1,11 +1,14 @@
 """Runner helpers ported from sahne/kosucu/ortak.py: JSON-safe conversion, number/choice parsing from LLM
 output, percentile bootstrap CIs over personas, bootstrap win probability, sign test, segment breakdown,
-representative quotes, event emitter. All CIs here resample personas (the unit that varies in a panel).
+representative quotes, event emitter and a ready printer for it (`print_events`). All CIs here resample
+personas (the unit that varies in a panel).
 """
 from __future__ import annotations
 
 import math
 import re
+import sys
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -188,7 +191,9 @@ def split_halves(items):
 # ---------------------------------------------------------------- events
 class Emitter:
     """Runner events: {"type": "row", runner, pid, segment, summary, value}, {"type": "stage", runner, name},
-    {"type": "done", runner}. A failing callback never stops the run."""
+    {"type": "done", runner}. A failing callback never stops the run.
+    Progress in a background run (`python run.py > log`): pass `on_event=print_events`, which prints one flushed
+    line per event, or run with `python -u` / PYTHONUNBUFFERED=1 so other prints reach the log too."""
 
     def __init__(self, callback: Callable[[dict], None] | None, runner: str):
         self.callback = callback
@@ -209,3 +214,27 @@ class Emitter:
 
     def done(self, **kw):
         self.emit("done", **kw)
+
+
+def _fmt(v) -> str:
+    if isinstance(v, float):
+        return f"{v:.4g}"
+    return str(v)
+
+
+def print_events(event: dict, file=None) -> None:
+    """Ready `on_event=` callback: one line per runner event, flushed at once (visible in a redirected log).
+    `HH:MM:SS [runner] stage <name>` / `row <pid> <segment> <value>: <summary>` / `done k=v ...`."""
+    e = dict(event or {})
+    kind, runner = e.pop("type", "event"), e.pop("runner", "?")
+    if kind == "stage":
+        head = f"stage {e.pop('name', '')}"
+    elif kind == "row":
+        pid, sg, v, summ = e.pop("pid", ""), e.pop("segment", ""), e.pop("value", None), e.pop("summary", "")
+        head = f"row {pid} {sg} {_fmt(v) if v is not None else '-'}: {' '.join(str(summ).split())[:120]}"
+    else:
+        head = str(kind)
+    extra = " ".join(f"{k}={_fmt(v)}" for k, v in e.items() if not isinstance(v, (dict, list)))
+    line = f"{time.strftime('%H:%M:%S')} [{runner}] {head}" + (f" {extra}" if extra else "")
+    out = file if file is not None else sys.stdout
+    print(line, file=out, flush=True)
