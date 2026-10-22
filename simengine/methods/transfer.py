@@ -46,6 +46,22 @@ def _accepts(fn, name: str) -> bool:
         return False
 
 
+def _weight_kw(m, w: np.ndarray) -> dict:
+    """``fit`` keyword(s) that pass sample weights to ``m``: ``sample_weight=`` when ``m.fit`` takes it; for an sklearn
+    ``Pipeline`` (nested too) ``<last step>__sample_weight=`` (the last step's fit must take it). Else TypeError."""
+    steps = getattr(m, "steps", None)
+    if isinstance(steps, list) and steps and all(isinstance(t, tuple) and len(t) == 2 for t in steps):
+        name, last = steps[-1]
+        if last is None or last == "passthrough":
+            raise TypeError("oof_predict(weight=...): the pipeline's last step is 'passthrough'")
+        return {f"{name}__{k}": v for k, v in _weight_kw(last, w).items()}
+    if _accepts(m.fit, "sample_weight"):
+        return {"sample_weight": w}
+    raise TypeError(f"oof_predict(weight=...): {type(m).__name__}.fit takes no sample_weight. Use a model whose fit "
+                    "accepts sample_weight (sklearn regressors, methods.tabular TabularRidge / TabularGBDT / "
+                    "GroupStat; LogisticBaseline / LightGBMBaseline do not yet) or drop weight=")
+
+
 def _fresh(model):
     """Unfitted copy: a factory is called, sklearn estimators are cloned, anything else is deep-copied."""
     if not hasattr(model, "fit") and callable(model):
@@ -126,7 +142,8 @@ def _fold_splits(folds, df: pd.DataFrame, pos: np.ndarray):
 
 
 def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str, group: str | None = None,
-                n_splits: int | None = None, seed: int = 0, method: str = "predict", folds=None) -> pd.Series:
+                n_splits: int | None = None, seed: int = 0, method: str = "predict", folds=None,
+                weight=None) -> pd.Series:
     """Out-of-fold predictions: every row is predicted by a model that did not see its fold.
 
     ``group`` given -> ``GroupKFold(n_splits)`` on ``df[group]`` (no group is in both train and test of a fold;
@@ -147,6 +164,12 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
     taste vectors, member statistics; see ``item_holdout_features``) must be scored with the SAME folds, or rows
     whose features were built with the held-out items still present end up in training and dev is optimistic.
 
+    ``weight``: per-row training weights (a column name of ``df``, or an array / Series aligned with ``df``), passed
+    to ``fit`` as ``sample_weight=`` for each fold's training rows (e.g. ``1/(se^2 + tau^2)`` when row noise
+    varies). sklearn pipelines get it routed to their last step (``<step>__sample_weight``); a model whose fit
+    takes no ``sample_weight`` raises ``TypeError``. Missing or negative weights on rows with a target raise
+    ``ValueError``. Predictions are not weighted; weight the metric separately.
+
     Group-level scores of pooled group-held-out predictions are biased NEGATIVE under the null (pessimistic, not
     leakage): a held-out group's prediction leans on the mean of the other groups, which is lower when the held-out
     groups' own mean is higher. With a few dozen groups and no real group signal in the features, the group-level
@@ -166,6 +189,25 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
     d = df.iloc[pos]
     X, y = d[features], d[target].to_numpy()
     g = d[group].to_numpy() if group is not None else None
+    w = None
+    if weight is not None:
+        if isinstance(weight, str):
+            if weight not in df.columns:
+                raise KeyError(f"weight column {weight!r} not in df")
+            wv = df[weight]
+        elif isinstance(weight, pd.Series):
+            if not df.index.isin(weight.index).all():
+                raise ValueError("weight Series must have a value for every row of df (index alignment)")
+            wv = weight.reindex(df.index) if not weight.index.equals(df.index) else weight
+        else:
+            wv = np.asarray(weight)
+            if wv.ndim != 1 or len(wv) != len(df):
+                raise ValueError(f"weight has shape {wv.shape}; need one value per row of df ({len(df)})")
+        w = pd.to_numeric(pd.Series(np.asarray(wv)), errors="coerce").to_numpy(float)[pos]
+        bad = ~np.isfinite(w) | (w < 0)
+        if bad.any():
+            raise ValueError(f"weight: {int(bad.sum())} rows with a target have a missing, infinite or negative "
+                             "weight")
     if folds is not None:
         splits, labels = _fold_splits(folds, df, pos)
         if n_splits is not None and n_splits != len(splits):
@@ -198,6 +240,8 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
             raise ValueError(f"fold {labels[k]!r} has no training rows")
         m = _fresh(model)
         fkw = {"groups": g[a]} if g is not None and _accepts(m.fit, "groups") else {}
+        if w is not None:
+            fkw.update(_weight_kw(m, w[a]))
         m.fit(X.iloc[a], y[a], **fkw)
         pred = getattr(m, method)
         pkw = {"groups": g[b]} if g is not None and _accepts(pred, "groups") else {}
