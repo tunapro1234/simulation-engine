@@ -73,6 +73,7 @@ STEPS_MC = (
     "(\"Reasoning\")\n"
     "Step 4) Predict how the participant will actually respond in the survey. Predict based on the interview and "
     "your thoughts. (\"Response\")")
+# The paper reuses the choice task line for numeric items; this number-question wording is ours.
 TASK_NUM = (
     "Task: What you see above is an interview transcript. Based on the interview transcript, I want you to predict "
     "the participant's survey responses. The question asks for a number.")
@@ -227,6 +228,27 @@ class _InterviewBase(Injector):
         cap = None if self.budget_tokens is None else self.budget_tokens * CHARS_PER_TOKEN
         return _join(fit_budget(units, cap, self.truncate, seed=f"{self.seed}:{person.get('id')}"))
 
+    @staticmethod
+    def reflections(person: dict, question: dict, expert: str) -> tuple[list[str], list[str], bool]:
+        """(blocks, experts shown, fallback) from person['expert_reflections']. expert: 'auto' (question['expert']
+        or the keyword rule), 'all' or a name; when the chosen expert has no notes, every expert the person has."""
+        raw = person["expert_reflections"]
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"person {person.get('id')!r}: expert_reflections must be {{expert: [note, ...]}} "
+                            f"(build with interview.reflect_experts or prepare), not {type(raw).__name__}")
+        refl = {}
+        for k, v in raw.items():          # an expert with no usable notes counts as missing
+            notes = [str(n).strip() for n in ([v] if isinstance(v, str) else v or ())]
+            if any(notes):
+                refl[_expert_name(k)] = [n for n in notes if n]
+        chosen = list(refl) if expert == "all" else [keyword_expert(question) if expert == "auto" else expert]
+        fallback = not any(e in refl for e in chosen)
+        if fallback:                      # no notes from the routed expert: use what the person has
+            chosen = list(refl)
+        shown = [e for e in EXPERTS if e in chosen]
+        blocks = [f"Reflections of an expert {e}:\n" + "\n".join(f"- {n}" for n in refl[e]) for e in shown]
+        return blocks, shown, fallback
+
     def task_block(self, question: dict) -> str:
         """The paper's prediction prompt around one question, ending in the strict JSON line parse_option reads."""
         mc = bool(question.get("options"))
@@ -307,39 +329,31 @@ class InterviewExpertReflection(_InterviewBase):
         self.expert, self.with_transcript = expert, transcript
 
     def render(self, person: dict, question: dict) -> Prompt:
-        raw = person["expert_reflections"]
-        if not isinstance(raw, Mapping):
-            raise TypeError(f"person {person.get('id')!r}: expert_reflections must be {{expert: [note, ...]}} "
-                            f"(build with interview.reflect_experts or prepare), not {type(raw).__name__}")
-        refl = {}
-        for k, v in raw.items():          # an expert with no usable notes counts as missing
-            notes = [str(n).strip() for n in ([v] if isinstance(v, str) else v or ())]
-            if any(notes):
-                refl[_expert_name(k)] = [n for n in notes if n]
-        chosen = list(refl) if self.expert == "all" else [
-            keyword_expert(question) if self.expert == "auto" else self.expert]
-        fallback = not any(e in refl for e in chosen)
-        if fallback:                      # no notes from the routed expert: use what the person has
-            chosen = list(refl)
-        blocks = [f"Reflections of an expert {e}:\n" + "\n".join(f"- {n}" for n in refl[e])
-                  for e in EXPERTS if e in chosen]
+        blocks, experts, fallback = self.reflections(person, question, self.expert)
         parts = ([self.transcript(person)] if self.with_transcript else []) + blocks
-        return self.prompt(_join(parts), question, experts=[e for e in EXPERTS if e in chosen],
-                           expert_fallback=fallback)
+        return self.prompt(_join(parts), question, experts=experts, expert_fallback=fallback)
 
 
 @register
 class InterviewPlusSurvey(_InterviewBase):
-    """Survey-plus-interview agent (v3 of the paper): transcript + the person's other survey answers, target and
-    question['exclude'] removed through known_answers (the paper excluded the item's whole category)."""
+    """Survey-plus-interview agent (v3 of the paper): transcript + the person's other survey answers through
+    known_answers (target and question['exclude'] dropped). v3 held out every evaluated GSS item and, for the Big
+    Five, the item's trait block: pass those ids in `exclude`. expert= adds v3's expert reflections."""
     name = "interview_plus_survey"
     needs = ("interview", "answers")
     description = ("Transcript + the person's other survey answers (known_answers: target and exclude dropped); "
-                   "items={qid: question text} labels them, else the qid is shown.")
+                   "items={qid: question text} labels them, else the qid is shown; expert='auto'|'all'|name "
+                   "appends expert reflections as in v3.")
 
-    def __init__(self, items: Mapping[str, str] | None = None, **params: Any):
-        super().__init__(**({"items": dict(items)} if items else {}), **params)
+    def __init__(self, items: Mapping[str, str] | None = None, expert: str | None = None, **params: Any):
+        if expert is not None and expert not in ("auto", "all"):
+            expert = _expert_name(expert)
+        super().__init__(**({"items": dict(items)} if items else {}),
+                         **({"expert": expert} if expert else {}), **params)
         self.items = {str(k): str(v) for k, v in (items or {}).items()}
+        self.expert = expert
+        if expert:
+            self.needs = (*type(self).needs, "expert_reflections")
 
     @property
     def label(self) -> str:
@@ -352,7 +366,11 @@ class InterviewPlusSurvey(_InterviewBase):
         known = self.known_answers(person, question)
         lines = [f"- {self.items.get(str(k), k)}: {v}" for k, v in known.items()]
         survey = "The participant's answers to other survey questions:\n" + ("\n".join(lines) or "(none)")
-        return self.prompt(_join([self.transcript(person), survey]), question, n_answers=len(known))
+        meta: dict = {"n_answers": len(known)}
+        blocks: list[str] = []
+        if self.expert:
+            blocks, meta["experts"], meta["expert_fallback"] = self.reflections(person, question, self.expert)
+        return self.prompt(_join([self.transcript(person), survey, *blocks]), question, **meta)
 
 
 # ---------------------------------------------------------------- offline builders (LLM calls, run once)
