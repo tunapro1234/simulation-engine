@@ -15,7 +15,7 @@ def person(i=0, n_pairs=10):
     return {"id": f"u{i}", "interview": pairs,
             "answers": {"q0": "yes" if i % 2 else "no", "q1": "no", "qs": SECRET},
             "interview_summary": {"drives": "daily" if i % 2 else "never", "home_town": "small town"},
-            "reflections": {"psychologist": ["Values routine."], "behavioral economist": ["Saves carefully."],
+            "expert_reflections": {"psychologist": ["Values routine."], "behavioral economist": ["Saves carefully."],
                             "political scientist": ["Votes in every election."], "demographer": ["Lives alone."]}}
 
 
@@ -136,9 +136,11 @@ class TestRender(unittest.TestCase):
         self.assertNotIn("Interviewer:", only.system)
         self.assertIn("Saves carefully.", only.system)
         # routed expert has no notes -> fall back to what the person has
-        fb = inj({"id": "z", "interview": "hi", "reflections": {"demographer": "Lives alone."}}, q_pol)
+        fb = inj({"id": "z", "interview": "hi", "expert_reflections": {"demographer": "Lives alone."}}, q_pol)
         self.assertTrue(fb.meta["expert_fallback"])
         self.assertIn("Lives alone.", fb.system)
+        with self.assertRaises(TypeError):                         # a memory-style list is refused clearly
+            inj({"id": "z", "interview": "hi", "expert_reflections": [{"text": "x"}]}, q_pol)
 
     def test_summary(self):
         p = pi.get_injector("interview_summary")(person(1), Q_CAR)
@@ -186,9 +188,9 @@ class TestBuilders(unittest.TestCase):
         out = iv.prepare(llm, base)
         self.assertEqual(len(llm.calls), 1 + 4 + 4)               # b has no interview, c keeps its summary
         self.assertEqual(out[0]["interview_summary"], {"drives": "daily", "pets": "a dog"})
-        self.assertEqual(out[0]["reflections"]["demographer"], ["Lives alone.", "Works nights."])
+        self.assertEqual(out[0]["expert_reflections"]["demographer"], ["Lives alone.", "Works nights."])
         self.assertEqual(out[2]["interview_summary"], {"k": "v"})
-        self.assertNotIn("reflections", base[0])                  # inputs untouched
+        self.assertNotIn("expert_reflections", base[0])                  # inputs untouched
         self.assertIn("(with a PhD) taking notes", llm.calls[1][1])
         p = pi.get_injector("interview_expert_reflection", expert="demographer")(out[0], Q_CAR)
         self.assertIn("- Works nights.", p.system)
