@@ -115,6 +115,21 @@ class Step5Split(unittest.TestCase):
         rep = se.evaluate(_frame(split=False), ours="stack", task="binary", primary="auc")
         self.assertEqual(_audit(rep, "bölme bilgisi")["durum"], "atlandi")
 
+    def test_frame_snippet_has_every_arm_the_command_names(self):
+        import re
+        md = (Path(__file__).resolve().parents[1] / "examples" / "hackathon_day.md").read_text(encoding="utf-8")
+        step5 = md.split("## 5. Evidence card", 1)[1]
+        py = step5.split("```python", 1)[1].split("```", 1)[0]
+        sh = step5.split("```bash", 1)[1].split("```", 1)[0]
+        cols = set(re.findall(r'"pred_(\w+)"', py))
+        named = {re.search(rf"--{f} (\w+)", sh).group(1) for f in ("ours", "raw", "unlabeled-baselines")}
+        self.assertLessEqual(named, cols)                  # else the CLI stops with KeyError on a missing column
+        fr = _frame()
+        fr["pred_llm"], fr["pred_persistence"] = fr["pred_logistic"], fr["pred_stack"] * 0.9
+        rep = se.evaluate(fr, ours="stack", raw="llm", task="binary", primary="auc",
+                          unlabeled_baselines=["persistence"])
+        self.assertIn("denetim", rep)
+
 
 if __name__ == "__main__":
     unittest.main()

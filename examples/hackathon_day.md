@@ -138,12 +138,16 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
 - **With a learner:** stack the LLM output with the learner (`ABStack`, `TwinStack`, `DevStack`). Also build the
   stack without the LLM column. On Twin that fair LLM-free stack was what turned a claimed +0.071 into +0.006.
   `st = methods.DevStack("binary").fit([learner_dev, llm_dev], y_dev)` then `st.predict([learner_test, llm_test])`
-  (cross-fitted dev predictions in `st.dev_pred_`); one probability column is calibrated with
-  `methods.BinaryCalibrator().fit(p_dev, y_dev).predict(p_test)` (Platt below 1,000 dev rows, isotonic from 1,000).
+  (cross-fitted dev predictions in `st.dev_pred_`). `learner_dev` must come from a model that never saw the dev rows
+  (fit on train, or `oof_predict`): in-sample dev predictions look perfect and the stack trusts them. One probability
+  column is calibrated with `methods.BinaryCalibrator().fit(p_dev, y_dev).predict(p_test)` (Platt below 1,000 dev
+  rows, isotonic from 1,000). Below 200 dev rows the Platt slope is noisy (it warns); `method="ratio"` fixes the
+  level only and keeps the ranking.
 - **Distributions with a known population:** `methods.ShrunkDeviation(distribution=True).fit(base=pop, llm=llm_seg,
   y=true_seg, ref=llm_pop)` on training segments keeps the level from the population distribution and adds the LLM's
   segment deviation (`llm_seg − ref`) times an alpha picked on those segments (0 = ignore the LLM); rows are
-  renormalised. `predict(base=pop, llm=llm_new, ref=llm_pop)` for the test segments.
+  renormalised. `predict(base=pop, llm=llm_new, ref=llm_pop)` for the test segments. `pop` must be known before
+  the test answers are (a published overall, or the train respondents), never the mean of the held-out cells.
 - **As a prior in a small test:** `EarlyTestBayes` after `calibrate_prior` on past tests. The gain disappears at
   800+ impressions per arm.
 - **Personas:** `persona.from_table(df, id_col=..., segment=..., forbidden=[target])`, then `sim.survey` /
@@ -253,7 +257,8 @@ still gets `split="test"`; without the column the card's split check is skipped 
 automatic ladder fits on the train rows, and the card checks group overlap (with `group`) and time order (with `time`).
 
 ```python
-frame = pd.DataFrame({"truth": te.y, "pred_stack": p_stack, "pred_logistic": p_logit, "split": "test"})
+frame = pd.DataFrame({"truth": te.y, "pred_stack": p_stack, "pred_llm": p_llm, "pred_persistence": te.last,
+                      "pred_logistic": p_logit, "split": "test"})   # every arm the command below names
 frame.to_csv("data/frame.csv", index=False)
 ```
 
