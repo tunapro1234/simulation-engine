@@ -6,7 +6,7 @@ that combine an LLM prediction with a model learned from data.
 | component | what it is | verdict from the prep nights |
 |---|---|---|
 | `ConstantBaseline`, `MajorityBaseline`, `ItemMarginal`, `SegmentRate` | rate / median / class shares, per item or shrunk per segment | always report them; they are hard to beat on accuracy |
-| `uniform_distribution`, `weighted_distribution`, `overall_copy`, `segment_distributions`, `segment_empirical`, `select_m` | distribution baselines for group-level opinion; `mode="shrunk"` is segment empirical shrunk toward the population, `m` picked by K-fold 1-TVD | `overall_copy` wins against the uniform distribution and against neighbour transfer; with segment training data, shrunk segment empirical is the LLM-free arm to beat |
+| `uniform_distribution`, `weighted_distribution`, `overall_copy`, `segment_distributions`, `segment_empirical`, `select_m` | distribution baselines for group-level opinion; `mode="shrunk"` is segment empirical shrunk toward the population, `m` picked by K-fold cross-validation (`select_m`) | `overall_copy` wins against the uniform distribution and against neighbour transfer; with segment training data, report shrunk segment empirical next to `overall_copy`: they are the LLM-free arms to beat |
 | `PersistenceBaseline`, `persistence` | "tomorrow = yesterday" from the unit's own history | strongest single signal wherever history exists |
 | `basket_tensor`, `popularity`, `personal_frequency`, `decayed_frequency`, `tifu_knn` | next-basket / repeat-purchase scorers | decayed frequency beats P-TopFreq; TIFU-KNN adds nothing |
 | `LogisticBaseline`, `LightGBMBaseline`, `KNNBaseline`, `TextKNNRegressor` | supervised tabular / text baselines | GBDT ties persistence when history is available; text kNN on effect sizes is weak |
@@ -95,11 +95,17 @@ LightGBM defaults), the persona kit (`Medyan`), the deney kit (`KomsuDeney`), ka
 - **LLM-free distribution ladder (segment x item answer shares).** T0 uniform, T1 population copy
   (`mode="overall"`), T2 segment empirical (`mode="own"`), T2b shrunk segment empirical (`mode="shrunk"`,
   p = (n_s * own + m * overall) / (n_s + m), n_s = valid answers in the segment, Kish effective n with weights).
-  In the G5 rehearsal (1-TVD over segment x item cells, train households only) T2b with m = 20 was the strongest
-  LLM-free arm (seed 0: 0.912 against T1 0.906; on seed 1 T1 led), and the LLM hybrid did not beat it across
-  5 seeds (H - T2b mean -0.004, sd 0.008) **[G5]**. Report T2b as the baseline to beat for any distribution task with segment training data.
-  `select_m(train, items, segment, categories, unit_col=...)` picks m by K-fold 1-TVD over units (households, so
-  one never sits on both sides; `folds=None` is leave-one-unit-out); `segment_empirical(..., shrink=m)` is the
+  In the G5 rehearsal (1-TVD over segment x item cells, train households only) T2b with m = 20 led on seed 0
+  (0.912 against T1 0.906), T1 led on seed 1, and the LLM hybrid did not beat T2b across 5 seeds (H - T2b mean
+  -0.004, sd 0.008) **[G5]**. For any distribution task with segment training data report both T1 and T2b and
+  take the stronger as the baseline to beat.
+  `select_m(train, items, segment, categories, unit_col=...)` picks m by K-fold cross-validation over units
+  (households, so one never sits on both sides; `folds=None` is leave-one-unit-out). The default
+  `score="l2"` (squared distance to the held-out empirical) is proper: held-out noise shifts every m alike.
+  `score="tvd"` uses the task metric but rewards sharp predictions on small held-out cells and, with one answer
+  per cell, can only return an end of the grid; `result.tvd` reports held-out 1-TVD either way. Leave-one-unit-out
+  refits every grid value per unit, so it is slow on hundreds of households; 5 folds is the default.
+  `segment_empirical(..., shrink=m)` is the
   short alias. Cross segments: pass a list of columns (keys become tuples); for hierarchical shrinkage pass
   `prior={cell: parent_distribution}`, e.g. the one-column shrunk result of the cell's first column. `segments=`
   returns cells absent from the training rows (they get the target distribution).
