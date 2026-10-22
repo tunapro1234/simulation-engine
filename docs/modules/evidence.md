@@ -768,7 +768,9 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
 - **`mean_bias`** (binary and continuous): mean prediction − mean truth per arm, i.e. predicted rate − base rate
   on a binary task ("how many will buy"). It is a per-row metric, so every arm gets a cluster-bootstrap CI in the
   metric table (`rep["sonuclar"][col]["metrikler"]["mean_bias"]`). It is signed (`yon=0`; "a better" = closer to
-  0) and a diagnostic, not a primary metric. Paired difference of two arms:
+  0) and a diagnostic, not a primary metric: `evaluate(primary="mean_bias")` raises `ValueError`, as `bias` does
+  (a "lower is better" ranking would crown a large negative bias). The Markdown card (`card_markdown`) lists it
+  for every baseline, method and calibrated arm in a "Calibration-in-the-large" table. Paired difference of two arms:
   ```python
   ev.paired_ci(frame, "ours", "raw", metric="mean_bias")     # diff = mean(pred_ours) - mean(pred_raw), with CI
   ```
@@ -793,9 +795,13 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
 - **Class imbalance audit.** `dengesizlik(veri, birincil=None)` warns (majority share > 70 %) only when an
   accuracy-type metric (accuracy, macro-F1) is in play: with binary probability predictions, or a primary that is
   not accuracy-type, it is a `tamam` note (AUC, Brier, log loss and ECE are not misled by the class share).
-  Multiclass and hard-label binary keep the warning.
+  Multiclass and hard-label binary keep the warning. `evaluate` passes its primary metric, so the warning stays
+  when the primary is accuracy or macro-F1, including the automatic macro-F1 switch above a 60 % majority; the
+  probability-prediction note applies only to direct calls without `birincil`.
 - **Distribution entropy ratio** = mean entropy(prediction) / mean entropy(truth) over cells (ratio of means,
   `entropi_olcut="ortalamalarin_orani"`), with a cluster-bootstrap CI (`entropi_orani_alt/_ust`). The mean of
   per-cell ratios is not used: it explodes on small groups whose truth entropy is ~0. `ayrisma_orani` is the
   between-cell divergence ratio: within each item, sd across cells (groups) of E[position] for the prediction over
-  the same for the truth (pooled; < 1 = groups pulled together). The collapse audit row prints both with CIs.
+  the same for the truth (pooled; < 1 = groups pulled together). E[position], the within-cell sd ratio, the
+  distribution bias and the segment-gap correlation use the numeric option positions above when the frame has
+  them (rescaled to 0-1), else equal spacing. The collapse audit row prints both with CIs.
