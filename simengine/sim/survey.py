@@ -429,12 +429,13 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
 
     controls: control arms run after the persona arm. None (default) = ("no_persona", "persona_swap"); pass a
         subset (aliases: "swap", "personasiz", "persona_yok") or controls=[] to turn them off. no_persona asks a
-        neutral "typical adult" in batches of up to 20; persona_swap asks the personas with shuffled profiles.
-        `control_plan` keeps the two together near the persona arm's call count (persona_swap gets the budget
-        no_persona leaves, at least one pass at 20 per prompt), so the defaults roughly double the calls:
-        about 2 x ceil(n_personas / batch) x ceil(n_questions / question_group) per survey, plus re-asks.
-        Each arm repeats the persona arm's questions, so the upper bound is (1 + n_controls) x the persona arm's
-        calls; controls=[] is the cheapest run. The plan actually used is in result["controls"]["plan"].
+        neutral "typical adult" in batches of up to 20; persona_swap asks the personas with profiles shifted by
+        one. `control_plan` keeps the two together near the persona arm's call count (persona_swap gets the
+        budget no_persona leaves, at least one pass at 20 per prompt), so with many personas the defaults about
+        double the calls: about 2 x ceil(n_personas / batch) x ceil(n_questions / question_group), plus re-asks.
+        A panel that fits in one batch pays 3x. With batch <= 20 the upper bound is (1 + n_controls) x the
+        persona arm's calls; a batch above 20 can exceed it (control prompts hold at most 20 personas).
+        controls=[] is the cheapest run. The plan actually used is in result["controls"]["plan"].
 
     context: one text shown to everyone, or {persona_id: text} (a per-person stimulus).
     stimulus_col: name of a persona field / table column holding each persona's own stimulus (e.g. the message
