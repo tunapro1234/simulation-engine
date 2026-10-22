@@ -7,8 +7,8 @@ subscriptions per 100 people) or pass None for no upper bound.
 
     import simengine.abm.curves as C
     C.linear_trend(t, y, target, upper=200)          # subscriptions per 100 people can pass 100
-    C.constant_growth(t, y, target, last=3, phi=0.9) # last 3 years' log growth, damped
-    C.CurveBaseline("growth", phi=0.9, upper=None)   # fit / predict wrapper, keyword arguments go to the curve
+    C.constant_growth(t, y, target)                  # last 3 years' log growth, damped (phi 0.8, as in rehearsal D7)
+    C.CurveBaseline("growth", phi=1.0, upper=None)   # fit / predict wrapper, keyword arguments go to the curve
 
 Measured on OWID internet adoption (dev, 122 series, MAE pp; makro/RAPOR.md, M1 table): naive 20.42,
 linear trend 12.75, damped trend 13.69, logistic 16.96, Gompertz 12.39, Bass NLS 15.97, Bass + analogy 15.94.
@@ -56,12 +56,13 @@ def damped_trend(t, y, target, last=5, phi=0.9, upper=UPPER):
     return np.clip(yy[-1] + b * _damped_h(h, phi), 0, _upper(upper))
 
 
-def constant_growth(t, y, target, last=3, phi=1.0, offset=0.1, upper=UPPER):
-    """Constant growth rule: the last observed log growth rate is held (phi = 1) or damped by phi^i (phi < 1).
+def constant_growth(t, y, target, last=3, phi=0.8, offset=0.1, upper=UPPER):
+    """Constant growth rule: the last observed log growth rate damped by phi^i (default 0.8, the rehearsal D7
+    setting) or held (phi = 1).
 
     g = log((y_T + offset) / (y_b + offset)) / (t_T - t_b), b = the earliest point within `last` years before T;
     forecast (y_T + offset) * exp(g * sum_{i=1..h} phi^i) - offset, clipped to [0, upper]. `offset` (pp) keeps
-    zeros finite. Explodes near saturation unless upper / phi hold it back (a level of 42 can reach 150)."""
+    zeros finite. With phi = 1 it grows exponentially and overshoots near saturation; upper / phi < 1 hold it back."""
     t, y = np.asarray(t, float), np.asarray(y, float)
     if len(t) < 2:
         return naive(t, y, target)

@@ -47,15 +47,17 @@ class TestConstantGrowth(unittest.TestCase):
         t = np.arange(1990, 1998.0)
         y = 0.5 * 1.4 ** (t - 1990)
         h = np.arange(1998, 2003.0)
-        pred = C.constant_growth(t, y, h, offset=0.0, upper=None)
+        pred = C.constant_growth(t, y, h, phi=1.0, offset=0.0, upper=None)
         np.testing.assert_allclose(pred, 0.5 * 1.4 ** (h - 1990), rtol=1e-9)
 
     def test_last_window_and_damping(self):
         t = np.arange(1990, 1998.0)
         y = np.r_[np.full(4, 1.0), 2.0, 4.0, 8.0, 8.0]          # last 3 years: 2 -> 8, g = log(4)/3
         g = np.log(4.0) / 3
-        pred = C.constant_growth(t, y, [1998, 1999], offset=0.0)
+        pred = C.constant_growth(t, y, [1998, 1999], phi=1.0, offset=0.0)
         np.testing.assert_allclose(pred, 8 * np.exp(g * np.array([1, 2])))
+        np.testing.assert_allclose(C.constant_growth(t, y, [1998, 1999], offset=0.0),      # default phi 0.8
+                                   8 * np.exp(g * np.array([0.8, 0.8 + 0.64])))
         damped = C.constant_growth(t, y, [1998, 1999], phi=0.5, offset=0.0)
         np.testing.assert_allclose(damped, 8 * np.exp(g * np.array([0.5, 0.75])))
         far = C.constant_growth(t, y, [2050], phi=0.5, offset=0.0)
@@ -65,7 +67,7 @@ class TestConstantGrowth(unittest.TestCase):
         t = np.arange(2000, 2006.0)
         y = np.array([0, 0, 0.5, 5, 20, 60.0])
         self.assertEqual(C.constant_growth(t, y, [2010]).max(), 100.0)
-        self.assertGreater(C.constant_growth(t, y, [2010], upper=None)[0], 100.0)
+        self.assertGreater(C.constant_growth(t, y, [2010], phi=1.0, upper=None)[0], 100.0)
         np.testing.assert_allclose(C.constant_growth(t, np.zeros(6), [2007, 2008]), [0, 0])
         np.testing.assert_allclose(C.constant_growth([2000.0], [3.0], [2001, 2002]), [3, 3])
         self.assertTrue(np.isfinite(C.constant_growth(t, y, [2007])).all())
@@ -73,7 +75,7 @@ class TestConstantGrowth(unittest.TestCase):
     def test_registered_as_growth(self):
         self.assertIs(A.CURVES["growth"], C.constant_growth)
         hist = pd.DataFrame(dict(series="a", t=np.arange(1990, 1996.0), y=2.0 ** np.arange(6)))
-        b = A.CurveBaseline("growth", offset=0.0, upper=None)
+        b = A.CurveBaseline("growth", phi=1.0, offset=0.0, upper=None)
         np.testing.assert_allclose(b.predict(b.fit(hist, "a", 1995), [1])["y_pred"], [64.0])
 
 
