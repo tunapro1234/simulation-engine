@@ -926,8 +926,9 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
 itself. The bench upworthy task, `methods.LLMDirectAB` and `ABStack` give one row per pair instead (`y` = A won,
 prediction = P(A wins)). **`ab_pairs_frame(pairs, pred_cols, y="y", group="test_id", *, a_wins=None, keep=(),
 drop_ties=True)`** (`ab.py`) writes each pair as two rows: A gets truth y and pred p, B gets 1 - y and 1 - p.
-`pred_cols` is a column, a list (`p_llm` -> arm `llm`) or `{arm: column or array}`. A labelled truth column needs
-`a_wins=` (`y="winner", a_wins="a"`; "tie" / "draw" count as ties). Ties carry no pair-sign signal and are dropped
+`pred_cols` is a column, a list (`p_llm` -> arm `llm`) or `{arm: column or array}`. A labelled truth column (the
+bench `winner`: a / b / tie) works as is; labels compare case-insensitively, and any other label raises unless
+`a_wins=` names the label meaning A won (then everything else but "tie" / "draw" is a B win). Ties carry no pair-sign signal and are dropped
 unless `drop_ties=False`. The item is the *pair*, not the test: Upworthy tests hold several pairs, and one item per
 test would make `pair_sign` compare A of one pair with B of another. The test goes to `group`, the bootstrap
 cluster, so all pairs of a test move together. `arm` (A | B) feeds the arm-majority baseline. `pair_sign` then
@@ -936,9 +937,10 @@ equals the direct pair accuracy (p = 0.5 counts as a half). With `group=None` ev
 f = ev.ab_pairs_frame(test_pairs, {"llm": "p_llm", "stack": "p_stack", "tfidf": "p_tfidf"}, group="test_id")
 rep = ev.evaluate(f, task="ab", ours="stack", raw="llm")      # primary pair_sign; AUC/Brier stay on the pair table
 ```
-Until the aggregate-metric cluster-bootstrap fix lands (G3 #3: a test drawn twice merges its rows into one item
-and cross-copy pairs are counted), the CI with `group=` set can be too wide; the point value is exact. With
-`group=None` the CI is the binomial one.
+The CI with `group=` set uses the copy-aware cluster bootstrap (G3 #3 fix above): each pair is nested in one test,
+so a test drawn twice gives two separate copies of its pairs. Simulated coverage of the 95 % pair_sign CI
+(300 synthetic runs, 150 tests with 1-4 pairs each, test-level accuracy Beta around 0.65): 0.943, width 0.111.
+With `group=None` the CI is the binomial one.
 
 **`ab_memorization(llm, pairs, named_context, neutral_context, *, n=100, paraphrase=False, margin=0.0, seed=0,
 B=1000, batch=15, reverse=True, max_calls=500)`** asks the same n real pairs `LLMDirectAB`-style twice: once with
@@ -953,13 +955,20 @@ caveat "gain may come from recognition/memorization" to the badge reason (the "n
 flag stays while the split or contamination audit is skipped). `paraphrase=True` (the LLM rewrites every text, batched) or a `str -> str`
 callable adds a third arm: the named context on rewritten texts. Memorised wording is lost there, so
 accuracy(named) - accuracy(named, paraphrased) is a second gap (`paraphrase_gap`, CI); its lower bound above
-`margin` also gives "uyari". The planned call count is checked against `max_calls` before any call (cached replies
-count too).
+`margin` also gives "uyari". `paraphrased_share` is the share of texts the rewrite actually changed: an unparsed
+paraphrase reply keeps the original text and pulls `paraphrase_gap` toward 0, so a low share makes that gap no
+evidence. The planned call count is checked against `max_calls` before any call (cached replies count too).
+Simulated, test-clustered gap CI (synthetic hits, 25-150 tests with 1-4 pairs): with no memorization the
+"uyari" rate is 2.8-3.5 % and coverage 0.94-0.95; with a true +0.05 gap coverage is 0.92-0.95 and the lower bound
+lies above the truth in 2.4 % of runs (the misses are on the upper side, so the warning is not inflated).
 
 **`ab_memorization_items(pairs, n=100, seed=0)`** builds items for `memorization_audit` (the completion gap): each
 real pair ("which text won? reply with it", expected = the real winner) plus a control pair whose two texts come
-from two different tests, so no one can know a winner (expected = a coin flip). A model with taste also beats the
-controls on real pairs, so read this gap next to `ab_memorization`, which cancels taste. Text columns may be
+from two different tests, so no one can know a winner (expected = a coin flip). **Taste confound:** real pairs
+have a true winner and controls do not, so any better-than-chance model with no memory at all beats the controls
+(pair accuracy 0.65 gives a gap of about +0.15) and `memorization_audit` returns "uyari". That is not a
+memorization verdict: pass the `ab_memorization` dict, which cancels taste, to `evaluate(memorization=...)`, and
+read this gap only against the neutral-context pair accuracy - 0.5. Text columns may be
 `text_a/b`, `headline_a/b` or `metin_a/b`.
 ```python
 mem = ev.ab_memorization(llm, test_pairs, "Upworthy Research Archive (2013-2015) headline tests",
