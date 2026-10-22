@@ -7,7 +7,8 @@ Three dynamics share one lattice (``simengine.abm.grid`` convention: int (H, W),
   by default). Each step is one asynchronous sweep in a fresh random order; an agent that is unhappy when its turn
   comes moves (``movers="unhappy"``, Schelling / Mesa / NetLogo) or every agent tries (``movers="all"``, the
   Gauvin-Vannimenus-Nadal 2009 variant). Destination ``rule``: ``"random"`` empty cell, ``"satisfying"`` random
-  empty cell where it would be happy (stay if none), ``"nearest"`` closest such cell in squares traversed horizontally + vertically (Schelling 1971).
+  empty cell where it would be happy (stay if none), ``"nearest"`` closest such cell, distance = squares traversed
+  horizontally + vertically (Schelling 1971).
 * :class:`ZhangSwap` (Zhang 2004, JEBO 54:533). No vacancies; each period one random agent of type 0 and one of
   type 1 consider trading places. Payoff u(x) is kinked with a peak at a 50-50 neighbourhood
   (u = Z x/n for x <= n, (2Z - M) + (M - Z) x/n above, n = k/2, Z = 1, M = 0.6 as in his Table 4); the swap happens
