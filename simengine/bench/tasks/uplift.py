@@ -7,7 +7,8 @@ Three randomised-experiment datasets, one task each:
     criteo_uplift      Criteo Uplift v2.1 (Diemert et al. 2021): 13,979,592 users, treatment = targetable for ads
                        (85%), outcome visit (default) or conversion; 12 anonymised dense features
     x5_uplift          X5 RetailHero (ODS.ai 2019-20): 200,039 clients, treatment = SMS (50%), outcome = purchase;
-                       client profile features only (age, gender, card issue / first redeem dates)
+                       client profile features only (age, gender, card issue / first redeem dates, a first redeem
+                       after the 2019-03-18 end of the pre-campaign window masked as post-treatment)
 
     from simengine import bench
     from simengine.bench.tasks import uplift
@@ -27,7 +28,8 @@ row-count weights on a fixed sort, so a replicate is O(n)):
     qini     normalised Qini coefficient: (area under the Qini curve - random) / (perfect - random), the perfect curve
              allowing negative effects (Radcliffe 2007; same definition as scikit-uplift `qini_auc_score`)
     auuc     normalised area under the uplift curve, same normalisation (scikit-uplift `uplift_auc_score`)
-    uplift@30  treated minus control response rate among the top 30% by score (scikit-uplift `uplift_at_k`, overall)
+    uplift@30  treated minus control response rate among the top int(0.3 n) rows by score (scikit-uplift
+               `uplift_at_k`, strategy "overall")
 
 Baselines: random, two-model / T-learner (logistic, GBDT), class transformation (Jaskowski & Jaroszewicz 2012;
 treated / control reweighted to 50:50 when the treatment share is not one half), S-learner (GBDT with treatment as a
@@ -136,7 +138,7 @@ def _auuc_w(y, t, w, model, perf_y, perf_t):
 
 
 def uplift_at_k(y, treatment, score, k: float = TOP_K, weights=None) -> float:
-    """Treated minus control response rate among the top share k of rows by score (ties broken by sort order)."""
+    """Treated minus control response rate among the first int(k n) rows by score (ties broken by sort order)."""
     y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
     w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
     return _uak(y, t, w, np.argsort(s, kind="mergesort")[::-1], k)
@@ -144,7 +146,7 @@ def uplift_at_k(y, treatment, score, k: float = TOP_K, weights=None) -> float:
 
 def _uak(y, t, w, order, k):
     y, t, w = y[order], t[order], w[order]
-    top = (np.cumsum(w) - w) < k * w.sum()
+    top = np.cumsum(w) <= k * w.sum()  # unit weights: the first int(k n) rows, as scikit-uplift
     wt, wc = w * top * t, w * top * (1 - t)
     if wt.sum() == 0 or wc.sum() == 0:
         return float("nan")
@@ -273,12 +275,11 @@ def class_transformation(train, test, *, treatment: str, outcome: str, categoric
 
 
 def stratified_split(df: pd.DataFrame, by: list[str], test_frac: float, seed: int) -> np.ndarray:
-    """Boolean test mask: within every `by` stratum a random round(test_frac * n) rows (default_rng(seed))."""
+    """Boolean test mask: within every `by` stratum (taken in sorted order) a random round(test_frac * n) rows
+    (default_rng(seed))."""
     rng = np.random.default_rng(seed)
     test = np.zeros(len(df), bool)
-    key = df[by].astype(int).astype(str).agg("|".join, axis=1) if len(by) > 1 else df[by[0]].astype(str)
-    for _, idx in pd.Series(np.arange(len(df))).groupby(key.to_numpy()):
-        i = idx.to_numpy()
+    for _, i in sorted(df.reset_index(drop=True).groupby(by, sort=True).indices.items()):
         test[rng.permutation(i)[: int(round(test_frac * len(i)))]] = True
     return test
 
@@ -446,6 +447,9 @@ class X5Uplift(UpliftTask):
     NUMERIC = ["age", "issue_day", "redeem_day", "redeem_delay"]
     OUTCOMES = ("target",)
     SEGMENT = "gender"
+    # first_redeem_date runs to 2019-11 and spikes on 2019-03-21/22 (the SMS); the purchase history ends 2019-03-18.
+    # A later first redemption is post-treatment (more treated clients have one), so it is masked as "none yet".
+    CUTOFF = pd.Timestamp("2019-03-19")
 
     def _read(self, root: str) -> pd.DataFrame:
         base = os.path.join(root, "ham") if os.path.isdir(os.path.join(root, "ham")) else root
@@ -455,6 +459,7 @@ class X5Uplift(UpliftTask):
         ref = pd.Timestamp("2017-01-01")
         issue = pd.to_datetime(d.first_issue_date, errors="coerce")
         redeem = pd.to_datetime(d.first_redeem_date, errors="coerce")
+        redeem = redeem.where(redeem < self.CUTOFF)
         age = d.age.astype(float)
         return pd.DataFrame({
             "t": d.treatment_flg.astype(int), "target": d.target.astype(int),
