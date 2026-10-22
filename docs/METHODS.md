@@ -26,6 +26,16 @@ learners. Logistic regression was the best arm on bank marketing (AUC 0.748) whi
 drift (0.665), so try the simple model first when train and test periods differ. The purchase-history LightGBM is the
 strongest person-level model on talp73 (0.672). Text kNN on SocSci210 effect sizes was near zero (r 0.080).
 
+**Single-text binary** (`TfidfBinary`, `target_encode`). Word + character TF-IDF logistic on one text per row
+(a first search query, a review) for a 0/1 outcome, with optional extra and out-of-fold target-encoded columns and C
+chosen inside the training rows. On ShopCART query -> purchase it was the strongest LLM-free arm (test AUC 0.666 from
+30,365 training sessions), but it needs thousands of labels: 0.579 from 500 sessions, 0.51-0.54 from 50-200.
+
+**RCT transfer** (`rct_effects`, `rct_transfer`). When the same conditions were randomised in other blocks
+(countries, sites, periods), the within-block effects from those blocks are the forecast for new ones. On the
+climate many-labs data 32 countries ranked 11 messages at Spearman 0.845 in 31 new countries (noise ceiling 0.908);
+no LLM arm came close, and adding one hurt. A single source country is weak (median 0.28).
+
 ## A/B (`simengine.methods`)
 
 **TF-IDF pair model** (`TfidfAB`, `TfidfWordAB`). A logistic model on the TF-IDF difference of two texts. With a few

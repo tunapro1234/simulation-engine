@@ -18,6 +18,8 @@ that combine an LLM prediction with a model learned from data.
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, `next_action.sessions` / `funnel`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank; step table -> session table (first-k prefix, outcome) and per-step funnel | 26.94 vs **31.60** exact next action on OPeRA |
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
+| `TfidfBinary`, `target_encode` | one text per row -> P(y=1): word 1-2 + char_wb 3-5 TF-IDF (+ extra / target-encoded columns) logistic with in-train C choice; smoothed OOF mean encoding | G4 rehearsal (first search query -> purchase, 30,365 training sessions) test AUC **0.666** [0.617, 0.714]; 500 sessions 0.579 |
+| `rct_effects`, `rct_transfer` | RCT condition (x segment) effects vs control within blocks, averaged over blocks, with SE; "same test in another market" transfer baseline | G1 rehearsal (11 messages, 32 -> 31 countries) transfer Spearman **0.845** [0.43, 1.00], noise ceiling 0.908; one country alone median 0.28 |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
 | `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature` | multi-series demand forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon, rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 
@@ -33,6 +35,7 @@ that combine an LLM prediction with a model learned from data.
 - **[prova-d2]** = `uretim/prova/d2/NOTLAR.md` and `SIMENGINE-EKSIK.md` (blind rehearsal: new-country survey answers; code `kod/cv.py`, `cv_biz3.py`, `tahmin.py`)
 - **[prova-d4]** = `uretim/prova/d4/NOTLAR.md`, `SONUC-MAIN.md`, `SIMENGINE-EKSIK.md` (blind rehearsal: M5 weekly demand, 30,490 series, 4 weeks ahead, WMAPE; code `kod/ozellik.py`, `ses.py`, `kos.py`, `pm.py`, `ek.py`, `llm_olay.py`)
 - **[prova-d3]** = `uretim/prova/d3/SIMENGINE-EKSIK.md` (blind rehearsal: new-film ratings, item cold start; code `kod/ozellik.py`, `kod/model.py`)
+- **[G1]** = `uretim/recete/G1/RECETE.md`, `kart.md` (open recipe rehearsal: climate many-labs, 11 messages vs control, 32 training / 31 test countries); **[G4]** = `uretim/recete/G4/RECETE.md`, `kart.md`, `CAPRAZ-G1.md` (open recipe rehearsal: ShopCART first query -> purchase, 1,000 test sessions)
 
 Every number below comes from those files. This port re-measured nothing. The tests
 (`tests/test_methods_*.py`) only check behaviour on synthetic data.
@@ -600,6 +603,70 @@ these features beats the member-mean baseline (pair RMSE, item-level residual Sp
 **When it does not help.** When the audience of a new item is not known in advance (no raters at all), the
 composition is empty and only item metadata remains (`composition=()`). Sparse members (few ratings outside the
 fold) get noisy statistics; the SVD rank must stay below the number of items per fold.
+
+## Single-text binary outcome and target encoding (`binary.py`)
+
+For one text per row (first search query, a review, a message) and a 0/1 outcome. `TfidfAB` does not apply: it
+scores the difference of two texts and has no intercept.
+
+```python
+import simengine.methods as M
+tb = M.TfidfBinary("query", extra_cols=("n_steps",), encode_cols=("query",)).fit(train, train.y)
+p = tb.predict(test)                                    # P(y = 1); predict_proba gives two columns
+oof = M.oof_predict(M.TfidfBinary("query", C=1.0), train, features=["query"], target="y")
+tr_enc, te_enc = M.target_encode(train, test, "query", "y", m=20)   # OOF for train rows, full train for test
+```
+
+- **`TfidfBinary(text_col, C=None, extra_cols=(), *, encode_cols=(), word_ngrams=(1, 2), char_ngrams=(3, 5), ...)`**:
+  word + char_wb TF-IDF (sublinear tf; `min_df` (2, 3), 1 below 200 training rows), numeric extra columns
+  mean-imputed and standardised, non-numeric ones one-hot (unseen -> zeros), `encode_cols` target-encoded inside
+  `fit` (OOF over `te_folds`, smoothing `te_m`), then an L2 logistic regression with intercept. `C=None` picks `C_`
+  from `C_grid` (0.03 ... 10) by inner stratified CV on the training rows (ROC AUC; ties -> the smaller C); the
+  scores are in `cv_scores_`. `word_ngrams=None` / `char_ngrams=None` drops that vectoriser. A training set with one
+  class predicts its rate. It has `fit(X, y)` / `predict(X)` and no hidden state across fits, so `oof_predict`
+  deep-copies it per fold and every vectoriser, scaler and encoding is refit inside each fold.
+- **`target_encode(train, test, col, y, *, m=20, oof=True, folds=5, seed=0)`**: value = (sum y + m * prior) /
+  (n + m), prior = mean y of the rows the statistics come from, unseen categories -> prior. `col` may be a tuple
+  (joint key). Training rows are encoded out of fold (a row never sees its own label; `folds` = number of shuffled
+  folds or fold ids, e.g. the same column given to `oof_predict(folds=...)`), test rows from all training rows.
+  `oof=False` is in-sample and leaks: on a 300-level noise key it gives AUC > 0.65 where OOF gives 0.5 (test).
+  Returns `(train_encoding, test_encoding)` Series aligned with each frame.
+
+**Measured [G4].** ShopCART session -> purchase from the first search query, 30,365 training sessions, 1,000 test
+sessions: TF-IDF + query length + exact-query encoding, C chosen in train, test AUC 0.666 [0.617, 0.714]; the
+exact-query encoding alone 0.541, query length alone 0.577. Trained on 500 sessions it fell to 0.579 and on
+50-200 sessions to 0.51-0.54: the text learner needs thousands of labels.
+
+## RCT condition effects and cross-block transfer (`rct.py`)
+
+For randomised experiments (A/B, many-labs, multi-country trials): one row per person with the condition, the
+outcome and optionally the randomisation block (country, site, week) and segment columns.
+
+```python
+eff = M.rct_effects(df, "condition", "Control", "policy", block="country", by="ideology")
+tr = M.rct_transfer(df, "condition", "Control", "policy", block="country", test_blocks=test_countries)
+tr.attrs["spearman"], tr[["condition", "pred", "truth"]]
+```
+
+- **`rct_effects(df, cond, control, y, *, block=None, by=None, weights=None)`**: within each block (x segment)
+  mean(y | condition) - mean(y | control), averaged over the blocks that have both arms; `weights` `None` / `"size"`
+  (people in the two arms), `"equal"` or a mapping block -> weight. SE = sqrt(sum w_b^2 (s2_c/n_c + s2_0/n_0)) /
+  sum w_b with a normal 95% CI; a one-person cell borrows the arm's pooled within-block variance (SE NaN when there
+  is none). Block-wise differencing removes block offsets even when arm shares differ across blocks, where the
+  pooled difference (`block=None`) is confounded. Rows: (segment..., condition) with `effect`, `se`, `ci_low`,
+  `ci_high`, `mean_cond`, `mean_control`, `n_blocks`, `n_cond`, `n_control`.
+- **`rct_transfer(df, cond, control, y, *, block, test_blocks, train_blocks=None, by=None, weights=None,
+  per_block=False)`**: the effects estimated on the training blocks (default: all others) are the prediction for
+  the test blocks, next to the test-block truth (`pred`, `pred_se`, `truth`, `truth_se`, `n_blocks_train`,
+  `n_blocks_test`; `pred` NaN for a condition never seen with its control in training). `per_block=True` gives one
+  truth row per test block. `.attrs`: `spearman` (per-block mean in that mode, the values in the dict
+  `spearman_by_block`), `mae`, `train_blocks`, `test_blocks`.
+
+**Measured [G1].** Climate many-labs, 11 messages vs control, policy support, 32 training countries -> 31 test
+countries: transfer Spearman over the conditions 0.845 [0.43, 1.00] against a sampling-noise ceiling of 0.908;
+equal country weights 0.88-0.92. One training country alone: median 0.28, quartiles 0.06-0.48, so a single-market
+history is a weak baseline. Haiku's direct forecast scored 0.073, persona panels -0.127 / 0.227, and adding the LLM
+to the transfer baseline made it worse (-0.300 [-0.85, +0.05]).
 
 ## Not ported / gaps
 
