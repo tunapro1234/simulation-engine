@@ -180,6 +180,8 @@ class CellFewshot(_Cell):
         super().__init__(keys=keys, k=k, min_n=min_n, **params)
         self.people, self.questions = list(people), [q for q in questions if q.get("options")]
         self.k, self.min_n = int(k), int(min_n)
+        self._members: dict[str | None, list[dict]] | None = None
+        self._cache: dict[tuple, list] = {}       # (cell, target id, exclude ids) -> examples
 
     @property
     def label(self) -> str:
@@ -190,15 +192,22 @@ class CellFewshot(_Cell):
     def examples(self, person: dict, question: dict) -> list[tuple[dict, dict[str, float], int]]:
         """[(example question, cell distribution, n)] for the person's cell; never the target or exclude ids."""
         key = cell_key(person, self.keys)
-        members = [p for p in self.people if _safe_key(p, self.keys) == key]
         drop = {str(x) for x in (question.get("exclude") or ())} | {str(question.get("id"))}
+        ck = (key, str(question.get("id")), tuple(sorted(drop)), question.get("text"))
+        if ck in self._cache:
+            return list(self._cache[ck])
+        if self._members is None:                 # index the people by cell once
+            self._members = {}
+            for p in self.people:
+                self._members.setdefault(_safe_key(p, self.keys), []).append(p)
+        # leakage rule: each member's answers pass through known_answers for the TARGET question
+        known = [Injector.known_answers(m, question) for m in self._members.get(key, [])]
         cands = []
         for q in self.questions:
             if str(q.get("id")) in drop:
                 continue
             opts = [str(o) for o in q["options"]]
-            # leakage rule: each member's answers pass through known_answers for the TARGET question
-            ans = [Injector.known_answers(m, question).get(q.get("id")) for m in members]
+            ans = [kn.get(q.get("id")) for kn in known]
             ans = [str(a) for a in ans if a is not None and str(a) in opts]
             if len(ans) < self.min_n:
                 continue
@@ -210,7 +219,8 @@ class CellFewshot(_Cell):
         while len(chosen) < min(self.k, len(pool)):
             rest = [c for c in pool if c not in chosen]
             chosen.append(max(rest, key=lambda c: (min(_tvd_any(c[3], s[3]) for s in chosen), c[0], c[1])))
-        return [(c[2], c[3], c[4]) for c in chosen]
+        self._cache[ck] = [(c[2], c[3], c[4]) for c in chosen]
+        return list(self._cache[ck])
 
     def render(self, person: dict, question: dict) -> Prompt:
         opts = _options(question, self.name)
