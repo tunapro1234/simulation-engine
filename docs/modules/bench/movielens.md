@@ -141,6 +141,50 @@ Recently disliked (newest first): <title (year)> [1]; ...
 The tests run an LLM method end to end through `FakeLLM`: persona text plus `item_text`, one prompt per test row,
 parsed to a number, framed and scored.
 
+## Measured numbers
+
+These are from runs on the local MovieLens-1M copy (22 Oct 2026, `nice -n 19`, `OMP_NUM_THREADS=4`). Every value is shown as `value [95% CI]`, n = 6,040 users. Command (Python, from the repository
+root):
+
+```python
+from simengine.bench.tasks import movielens as ml
+for target in ("rating", "next_item"):
+    task = ml.MovieLens1M(target=target)                      # split="dev" for the dev rows
+    data = task.load("<catalogue>")
+    print(task.score_all(task.run(data=data)))
+    if target == "next_item":
+        for name in ("popularity", "item_knn", "random"):
+            print(name, ml.full_ranking(data, task.scorer(data, name)))
+```
+
+**Rating, test split** (202,451 test ratings; about 7 s end to end, 1.0 GB peak RSS):
+
+| baseline | RMSE | MAE |
+|---|---|---|
+| global_mean | 1.1464 [1.1332, 1.1600] | 0.9438 [0.9331, 0.9542] |
+| user_mean | 1.0743 [1.0641, 1.0848] | 0.8491 [0.8403, 0.8580] |
+| item_mean | 0.9897 [0.9785, 1.0006] | 0.7871 [0.7784, 0.7960] |
+| bias | 0.9210 [0.9119, 0.9300] | 0.7239 [0.7167, 0.7309] |
+| item_knn | **0.8827** [0.8747, 0.8902] | **0.6894** [0.6828, 0.6958] |
+
+Dev split with the final defaults (162,035 dev ratings): global_mean 1.1198, user_mean 1.0463, item_mean 0.9847,
+bias 0.9126 [0.9035, 0.9218], item_knn 0.8797 [0.8710, 0.8884].
+
+**Next item, test split** (100 candidates; about 12 s, 0.9 GB peak RSS):
+
+| baseline | hit@10 sampled (100 cand.) | NDCG@10 sampled | hit@10 full ranking (3,704 movies) | NDCG@10 full |
+|---|---|---|---|---|
+| random | 0.0990 [0.0917, 0.1066] | 0.0448 [0.0412, 0.0484] | 0.0038 [0.0025, 0.0055] | 0.0021 [0.0012, 0.0032] |
+| popularity | 0.4392 [0.4271, 0.4522] | 0.2400 [0.2322, 0.2480] | 0.0353 [0.0311, 0.0401] | 0.0174 [0.0151, 0.0202] |
+| item_knn | **0.6561** [0.6447, 0.6681] | **0.3825** [0.3742, 0.3909] | **0.0715** [0.0656, 0.0785] | **0.0359** [0.0323, 0.0398] |
+
+Dev split with the final defaults (sampled hit@10): random 0.0960, popularity 0.4592 [0.4469, 0.4714], item_knn
+0.6839 [0.6720, 0.6960]. The dev split was used to choose `next_k`, so it is optimistic for item_knn.
+
+The random row matches its expected values (hit@10 = 0.1 sampled, 10 / 3,704 ≈ 0.0027 full) within its CI. The
+order of the three baselines is the same under both protocols here. The absolute level is not: item_knn finds the
+next movie in its top 10 in 66% of users against 100 sampled candidates, but in 7% against the full catalogue.
+
 ## Limitations
 
 - **Cross-user leakage:** the split is per user, not a global time cut. Train contains other users' ratings made after
