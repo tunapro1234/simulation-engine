@@ -900,7 +900,8 @@ def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = Non
     `diff_vs_pre` = mean loss(arm) - mean loss(pre arm) on shared units with a paired bootstrap 95% CI
     (`diff_lo`, `diff_hi`, `diff_n`; negative = the deviation helped). Units with a missing loss are left out and
     counted in `n_missing`; arm rows whose key has no truth row are counted in `n_unmatched` (with a warning: a key
-    format mismatch such as "01" vs 1 would otherwise silently shrink the graded set).
+    format mismatch such as "01" vs 1 would otherwise silently shrink the graded set). When the arms end up scored
+    on different units, a warning says their mean columns are not comparable; `diff_vs_pre` uses shared units only.
 
     `cluster`: key column(s) whose rows are resampled together for the diff CI (`diff_cluster`, `diff_n_clusters`),
     e.g. "segment" when every segment has several items. Rows of one segment share its errors; the row bootstrap
@@ -973,6 +974,12 @@ def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = Non
             row.update(m if isinstance(m, dict) else {"score": m})
         losses[r["record_hash"]] = loss
         rows.append(row)
+    units = {r["arm"]: frozenset(losses[r["record_hash"]].index) for r in recs
+             if losses[r["record_hash"]] is not None}
+    if len(set(units.values())) > 1:          # side-by-side means over different units are not comparable
+        warnings.warn("grade_arms: arms are scored on different units (" +
+                      ", ".join(f"{a}: {len(u)}" for a, u in units.items()) + "); their mae/rmse/loss columns "
+                      "are not comparable, read diff_vs_pre (shared units only)", UserWarning, stacklevel=2)
     by_hash = {r["record_hash"]: r for r in recs}
     for r, row in zip(recs, rows):
         ref = r.get("deviation_of_record")

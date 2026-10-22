@@ -228,6 +228,16 @@ class TestGradeArmsReview(unittest.TestCase):
                 tab = grade_arms(d, truth.assign(code=["1", "2", "10", "11"]), ["code"])
             self.assertEqual(list(tab["n_unmatched"]), [2, 2])
 
+    def test_different_unit_sets_warn(self):
+        truth = pd.DataFrame({"k": range(10), "y": np.arange(10.0)})
+        pre, post = truth.assign(y=truth["y"] + 1).iloc[:6], truth.assign(y=truth["y"] + 0.5)
+        with tempfile.TemporaryDirectory() as d:
+            seal_deviation(pre, post, "x", d, reason="r", pre_name="a", post_name="b")
+            with self.assertWarnsRegex(UserWarning, "different units"):
+                tab = grade_arms(d, truth, ["k"])
+            self.assertEqual(tab.loc[1, "diff_n"], 6)
+            self.assertAlmostEqual(tab.loc[1, "diff_vs_pre"], -0.5)
+
 
 if __name__ == "__main__":
     unittest.main()
