@@ -107,6 +107,16 @@ class TestSingleRun(unittest.TestCase):
         res = identify_best(lambda i: 1.0, 1, 10, "successive_rejects")
         self.assertEqual((res.best, res.stopped), (0, "single arm"))
 
+    def test_thompson_warmup(self):
+        # a confident prior far below the rewards: without warmup the first sampled arm is never left (documented)
+        mk = lambda: SimulatedArms([0.3, 0.2, 0.25, 0.1], kind="gaussian", sigma=0.05, seed=0)
+        cold = thompson_gaussian(mk(), 4, 40, sigma=0.05, prior_mean=-1.0, seed=0)
+        warm = thompson_gaussian(mk(), 4, 40, sigma=0.05, prior_mean=-1.0, warmup=1, seed=0)
+        self.assertEqual(int((cold.pulls > 0).sum()), 1)
+        self.assertEqual(warm.arms[:4], [0, 1, 2, 3])
+        self.assertTrue((warm.pulls >= 1).all())
+        self.assertEqual(warm.budget_used, 40)
+
     def test_gaussian_prior_mean(self):
         arms = SimulatedArms([10.0, 10.5, 9.0], kind="gaussian", sigma=1.0, seed=4)
         res = thompson_gaussian(arms, 3, 400, prior_mean=10.0, seed=0)

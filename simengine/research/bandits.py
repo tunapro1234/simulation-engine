@@ -20,7 +20,9 @@ Algorithms (checked against the papers' algorithm boxes):
 - Thompson sampling, Beta (Agrawal & Goyal, COLT 2012, Algorithms 1-2): Beta(S + 1, F + 1) posteriors; a reward in
   [lo, hi] is rescaled to [0, 1] and turned into a Bernoulli trial with that success probability (Algorithm 2).
 - Thompson sampling, Gaussian (Agrawal & Goyal, AISTATS 2013, Algorithm 2): theta_i ~ N(mu_i, sigma^2 / (k_i + 1)),
-  mu_i = (prior_mean + sum of rewards) / (k_i + 1); sigma = 1, prior_mean = 0 is the paper's algorithm.
+  mu_i = (prior_mean + sum of rewards) / (k_i + 1); sigma = 1, prior_mean = 0 is the paper's algorithm. The prior has
+  the same variance as one reward, so with a small sigma and a prior_mean far from the rewards an unpulled arm is
+  almost never sampled again; `warmup=1` (both Thompson variants; not in the papers) pulls every arm once first.
 - Successive rejects (Audibert, Bubeck & Munos, COLT 2010, Fig. 3): K - 1 phases, n_k = ceil((n - K) /
   (logbar(K) (K + 1 - k))), logbar(K) = 1/2 + sum_{i=2..K} 1/i; each surviving arm is pulled n_k - n_{k-1} times,
   then the lowest empirical mean is dismissed (ties at random). Parameter-free, never exceeds the budget n.
@@ -142,16 +144,17 @@ def _init_round(st: _State, rows, rng=None, trial=False):
 
 
 def _run_regret(alg: str, st: _State, budget: int, rng, *, scale=1.0, sigma=1.0, prior=(1.0, 1.0),
-                prior_mean=0.0) -> dict:
+                prior_mean=0.0, warmup=0) -> dict:
     R, K = st.R, st.K
     rows = np.arange(R)
     t0 = 0
     trial = alg == "thompson_beta"
-    if alg == "ucb1":
-        m = min(K, budget)
-        for a in range(m):
-            st.pull(rows, np.full(R, a))
-        t0 = m
+    w = 1 if alg == "ucb1" else int(warmup)
+    for _ in range(w):
+        for a in range(K):
+            if t0 < budget:
+                st.pull(rows, np.full(R, a), rng, trial)
+                t0 += 1
     for t in range(t0, budget):
         if alg == "ucb1":
             idx = st.mean + scale * np.sqrt(2.0 * math.log(t) / np.maximum(st.n, 1))
@@ -252,7 +255,8 @@ def _run(alg: str, draw, R: int, K: int, budget: int | None, *, seed=0, bounds=(
     elif alg == "lucb":
         out = _run_lucb(st, budget, rng, **{k: kw[k] for k in ("delta", "epsilon", "scale") if k in kw})
     else:
-        allowed = {"ucb1": ("scale",), "thompson_beta": ("prior",), "thompson_gaussian": ("sigma", "prior_mean")}[alg]
+        allowed = {"ucb1": ("scale",), "thompson_beta": ("prior", "warmup"),
+                   "thompson_gaussian": ("sigma", "prior_mean", "warmup")}[alg]
         out = _run_regret(alg, st, budget, rng, **{k: kw[k] for k in allowed if k in kw})
     if "best" not in out:
         out["best"] = _argmax_rand(st.mean, rng)
