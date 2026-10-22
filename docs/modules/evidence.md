@@ -448,9 +448,13 @@ runner-up gives an `ok` row. With the warning, the badge is graded against the w
 the badge reason says so), the strongest-baseline row notes the tied set and the card
 gets the flag "en güçlü taban belirsiz". `fark` and the headline stay ours − the single strongest baseline. The
 point gap is the same (the point-best baseline is the closest one); the worst case widens the CI, since each
-replicate takes its own best tied baseline. It is conservative: in simulation (4 tied baselines, 300 rows) the lower
-bound held in 100% of runs, the two-sided percentile CI covered the true worst-case gap in about 81% (`ci="basic"`
-about 93%). It cannot see a baseline that is not on the card. In the D5
+replicate takes its own best tied baseline. The badge's lower bound is the lower of the two (worst case and single
+strongest baseline), so it is never easier than against that one baseline: `ci="basic"` reflects the per-replicate
+minimum around the point and can put the worst-case lower bound above the single one. In simulation (4 tied
+baselines, 300 rows, 300-600 runs) the badge's lower bound sat above the true worst-case gap in at most 0.7% of runs
+(nominal 2.5%), with either CI. The percentile worst-case CI is too low as a two-sided interval (covers about 76-79%
+when the baselines are truly equal, 95% when they differ a little); `ci="basic"` covers about 89-94%, but its own lower
+bound alone missed in up to 4%. It cannot see a baseline that is not on the card. In the D5
 rehearsal, four baselines were tied on dev, the card picked one, and a hidden learned baseline won on test.
 
 **Model/oracle ceiling.** `ceiling_col="pred_oracle"` (or any column name) gives a model ceiling in place of the
