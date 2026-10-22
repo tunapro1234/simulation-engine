@@ -118,8 +118,7 @@ else:
 
 # 4. Ask: one call per person and arm, all categories at once. L1 = demographics persona, L2 = persona + history;
 #    L0 = one no-persona call (the control: any L1 gain over it is the persona's own contribution).
-people = df.groupby("person_id").first()
-cats = sorted(df.category.unique())
+people, cats = df.groupby("person_id").first(), sorted(df.category.unique())
 hist = df.pivot(index="person_id", columns="category", values=["n_before", "n_recent"])
 persona = lambda p: "; ".join(f"{c[5:]}: {people.at[p, c]}" for c in demo)
 history = lambda p: "\n".join(f"- {c}: {hist.at[p, ('n_before', c)]} purchases, {hist.at[p, ('n_recent', c)]} in "
@@ -137,10 +136,10 @@ for r in replies:                                                    # unparsed 
     j = se.sim.parse_json(r.text)
     P.append({c: pd.to_numeric((j if isinstance(j, dict) else {}).get(c), errors="coerce") for c in cats})
 P = (pd.DataFrame(P) / 100).clip(0.01, 0.99)
-bad, n, P = int(P.isna().sum().sum()), len(people), P.fillna(0.5)
+bad, n, A = int(P.isna().sum().sum()), len(people), P.fillna(0.5).to_numpy()
 row = df.person_id.map({p: i for i, p in enumerate(people.index)}).to_numpy()
 col = [cats.index(c) for c in df.category]
-df["llm_l0"], df["llm_l1"], df["llm_l2"] = P.to_numpy()[0, col], P.to_numpy()[1 + row, col], P.to_numpy()[1 + n + row, col]
+df["llm_l0"], df["llm_l1"], df["llm_l2"] = A[0, col], A[1 + row, col], A[1 + n + row, col]
 print(f"LLM calls: {len(jobs)} (1 no-persona + {n} L1 + {n} L2) | unparsed category answers: {bad}")
 
 # 5. LLM-free baselines, fit on train persons' masked cells only: popularity, survey model, history model.
@@ -178,19 +177,22 @@ se.seal(frame.drop(columns="truth"), "purchase_pred test predictions (ours = sta
 
 # 9. Evidence card: baseline ladder, controls (L0 no-persona arm + automatic persona shuffle), person-bootstrap CIs,
 #    gap closed = (ours - best baseline) / (oracle - best baseline).
-report = se.evidence.evaluate(frame, title="purchase_pred (person x category, balanced mask)", ours="stack",
-                              raw="llm_l2", task="binary", primary="balanced_accuracy", B=a.B, prereg=registry,
-                              baselines_oof=["popularity", "survey", "history", "hist_survey"],
-                              ceiling_col="pred_oracle", ceiling_label="in-sample oracle (fit on test labels)")
+kw = dict(title="purchase_pred (person x category, balanced mask)", ours="stack", raw="llm_l2", task="binary",
+          primary="balanced_accuracy", B=a.B, prereg=registry, baselines_oof=arms[:4])
+try:
+    report = se.evidence.evaluate(frame, **kw, ceiling_col="pred_oracle", ceiling_label="in-sample oracle")
+except ZeroDivisionError:                                             # oracle ties the best baseline: no gap to close
+    print("oracle ties the best baseline exactly: gap closed undefined, card without a ceiling")
+    report = se.evidence.evaluate(frame.drop(columns="pred_oracle"), **kw)
 s = se.evidence.summary(report)
 print(f"\n{s['headline']}\nbalanced accuracy, test persons' masked cells ({len(te)} cells, {te.person_id.nunique()} "
       "persons), 95% person-bootstrap CI:")
 for r in s["ladder"]:
     print(f"  {str(r['label'] or r['column']):40} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
-gc = s["gap_closed"]
-gc_v = gc.get("deger") if isinstance(gc, dict) else gc
-print("gap closed:", "n/a" if gc_v is None else f"{100 * gc_v:.0f} %", "| badge:", s["badge"],
-      "| audits with warnings:", [d["check"] for d in s["audits"] if d["status"] == "warning"])
+g, pct = s["gap_closed"] or {}, lambda v: "?" if v is None else f"{100 * v:.0f}"
+print("gap closed:", "n/a" if g.get("deger") is None else f"{pct(g['deger'])} % [{pct(g.get('alt'))}, "
+      f"{pct(g.get('ust'))}]", "| badge:", s["badge"], "| audits with warnings:",
+      [d["check"] for d in s["audits"] if d["status"] == "warning"])
 se.evidence.card(report, out / "card.md", lang="en")
 se.evidence.dashboard([report], out / "dashboard.html")
 cost = f" | spend ${llm.ledger.total():.4f} of ${a.max_usd}" if a.live else ""
