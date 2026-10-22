@@ -92,6 +92,48 @@ class TestLeakage(unittest.TestCase):
         self.assertNotIn("ncars", p.meta["shown"])
 
 
+    def test_same_text_copy_under_other_id_dropped(self):
+        bank = BANK + [{"id": "car_retest", "text": "  do you OWN a car? ", "options": ["yes", "no"]}]
+        pers = {"id": "u1", "answers": {**person()["answers"], "car_retest": "yes"}}
+        for name in NAMES:
+            p = pi.get_injector(name, questions=bank)(pers, Q["car"])
+            self.assertNotIn("car_retest", p.meta["shown"], name)
+            self.assertEqual(p.meta["dropped_same_text"], ["car_retest"], name)
+            self.assertNotIn("OWN a car", p.system + "\n".join(t for _, t in p.history), name)
+            kept = pi.get_injector(name, questions=bank, drop_same_text=False)(pers, Q["car"])
+            self.assertIn("car_retest", kept.meta["shown"], name)       # opt-out restores the old behaviour
+            self.assertNotIn("dropped_same_text", kept.meta)
+        self.assertNotIn("dropped_same_text", make("own_answers_all")(person(), Q["car"]).meta)
+
+
+class TestAnswerValues(unittest.TestCase):
+    def test_none_and_nan_skipped(self):
+        pers = {"id": "u", "answers": {"car": None, "bus": float("nan"), "pets": "yes"}}
+        for name in NAMES:
+            p = make(name)(pers, Q["ncars"])
+            self.assertEqual(p.meta["shown"], ["pets"], name)
+            ctx = p.system + p.flatten()
+            self.assertNotIn("None", ctx)
+            self.assertNotIn("nan", ctx)
+
+    def test_only_missing_left_counts_as_none_known(self):
+        p = make("own_answers_all")({"id": "u", "answers": {"car": None}}, Q["ncars"])
+        self.assertEqual(p.meta["n_shown"], 0)
+        self.assertIn(oa.NONE_KNOWN, p.system)
+
+    def test_fewshot_reply_non_ascii_and_numpy(self):
+        p = make("own_answers_fewshot", select="first")({"id": "u", "answers": {"car": "Hayır"}}, Q["ncars"])
+        self.assertEqual(p.history[1][1], '{"answer": "Hayır"}')
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+        pers = {"id": "u", "answers": {"ncars": np.int64(2), "bus": np.float64("nan")}}
+        p = make("own_answers_fewshot", select="first")(pers, Q["car"])
+        self.assertEqual(p.meta["shown"], ["ncars"])
+        self.assertEqual(json.loads(p.history[1][1]), {"answer": 2})
+
+
 class TestAll(unittest.TestCase):
     def test_twin2k_text(self):
         p = make("own_answers_all")(person(), Q["ncars"])
@@ -174,6 +216,34 @@ class TestRag(unittest.TestCase):
         self.assertAlmostEqual(oa.score_tfidf("red car", ["red car"])[0], 1.0)
         self.assertEqual(oa.score_bm25("car", []), [])
         self.assertEqual(oa.tokens("The Cars, a bus!"), ["car", "bus"])
+
+    def test_tokens_non_ascii(self):
+        self.assertEqual(oa.tokens("Araç sahibi misiniz? Şehirde yaşıyor"), ["arac", "sahibi", "misiniz", "sehirde",
+                                                                            "yasiyor"])
+        self.assertEqual(oa.tokens("İstanbul"), oa.tokens("istanbul"))
+        self.assertEqual(oa.tokens("IŞIK"), oa.tokens("ışık"))
+        bank = [{"id": "a", "text": "Araç sahibi misiniz?"}, {"id": "b", "text": "Evcil hayvanınız var mı?"}]
+        p = pi.get_injector("own_answers_rag", questions=bank, k=1)(
+            {"id": "u", "answers": {"a": "evet", "b": "hayır"}}, {"id": "t", "text": "Kaç aracınız var? Araç"})
+        self.assertEqual(p.meta["shown"], ["a"])
+        self.assertGreater(p.meta["scores"][0], 0)
+
+    def test_tfidf_ignores_unseen_query_terms(self):
+        docs = ["red car", "blue bus"]
+        self.assertEqual(oa.score_tfidf("red car zebra", docs), oa.score_tfidf("red car", docs))
+        self.assertAlmostEqual(oa.score_tfidf("red car zebra", ["red car"])[0], 1.0)
+
+    def test_tfidf_matches_sklearn(self):
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+        except ImportError:
+            self.skipTest("scikit-learn not installed")
+        docs = [b["text"] for b in BANK]
+        query = "Does your household own cars or a garage?"
+        vec = TfidfVectorizer(tokenizer=oa.tokens, lowercase=False, token_pattern=None).fit(docs)
+        want = (vec.transform(docs) @ vec.transform([query]).T).toarray().ravel()
+        for got, w in zip(oa.score_tfidf(query, docs), want):
+            self.assertAlmostEqual(got, w, places=9)
 
 
 class TestCompare(unittest.TestCase):
