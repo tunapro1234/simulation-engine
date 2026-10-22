@@ -112,6 +112,20 @@ class TestThresholdModel(unittest.TestCase):
         r = S.Schelling(self.g, threshold=0.5, movers="all", rule="satisfying").run(5, seed=0, stop_when_still=True)
         self.assertEqual(r.steps, 5)                            # happy agents keep moving: never "still"
 
+    def test_frozen_state_converges_with_all_movers(self):
+        # no vacancy can satisfy a demand of 1: every agent is unhappy and nobody can move -> stop after one sweep
+        r = S.Schelling(self.g, threshold=1.0, movers="all", rule="satisfying").run(10, seed=0)
+        self.assertTrue(r.converged)
+        self.assertEqual(r.steps, 1)
+        np.testing.assert_array_equal(r.lattice, r.initial)
+
+    def test_lattice_validation(self):
+        bad = np.full((20, 20), 2)
+        with self.assertRaises(ValueError):
+            S.Schelling(self.g).run(1, lattice=bad)                # type 2 with two fractions
+        with self.assertRaises(ValueError):
+            S.Schelling(self.g).run(1, lattice=np.zeros((10, 10), int))
+
     def test_tipping_curve_shape(self):
         df = S.tipping_curve([0.2, 0.5, 0.9], seeds=[0, 1], grid=self.g, n_steps=60)
         m = df.groupby("threshold").same_share.mean()
@@ -125,6 +139,39 @@ class TestZhang(unittest.TestCase):
         u = S.zhang_payoff(np.arange(9), 4)
         np.testing.assert_allclose(u, [0, .25, .5, .75, 1, .9, .8, .7, .6])
         np.testing.assert_allclose(S.zhang_payoff(np.arange(5), 2), [0, .5, 1, .8, .6])
+
+    def test_potential_identity_brute_force(self):
+        # Zhang 2004 sec. 2.2: the pair's payoff gain = -M/(2n) x change in rho, for every black-white swap
+        for nb, n in (("moore", 4), ("von_neumann", 2)):
+            g = G.Grid((9, 11), torus=True, neighbourhood=nb)
+            rng = np.random.default_rng(0)
+            for _ in range(200):
+                lat = G.random_lattice(g, [0.5, 0.5], seed=rng)
+                a = tuple(rng.choice(np.argwhere(lat == 0)))
+                b = tuple(rng.choice(np.argwhere(lat == 1)))
+                if g.ravel(*b) in g.neighbour_table()[g.ravel(*a)]:
+                    continue                                    # Zhang pairs two different neighbourhoods
+                like = lambda L, c: int((L.ravel()[g.neighbour_table()[g.ravel(*c)]] == L[c]).sum())
+                new = lat.copy()
+                new[a], new[b] = 1, 0
+                gain = S.zhang_payoff([like(new, a), like(new, b)], n).sum() - \
+                    S.zhang_payoff([like(lat, a), like(lat, b)], n).sum()
+                drho = S.unlike_pairs(new, g) - S.unlike_pairs(lat, g)
+                self.assertAlmostEqual(gain, -0.6 / (2 * n) * drho)
+
+    def test_neighbours_never_trade(self):
+        g = G.Grid((5, 5), torus=True)
+        lat = np.zeros((5, 5), int)
+        lat[2, 2] = 1                                           # the only type-1 agent: every pair with a neighbour
+        lat[[0, 0, 0, 1, 1, 1, 3, 3, 3, 4, 4, 4], [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]] = 0
+        r = S.ZhangSwap(g, beta=0.0).run(5000, seed=0, lattice=lat, record_every=5000)
+        self.assertGreater(r.history.swaps.iloc[-1], 0)          # beta 0: half the non-neighbour pairs trade
+        g3 = G.Grid((3, 3), torus=True)                         # 3x3 Moore torus: everyone neighbours everyone
+        lat3 = np.zeros((3, 3), int)
+        lat3[0, 0] = 1
+        r3 = S.ZhangSwap(g3, beta=0.0).run(1000, seed=0, lattice=lat3, record_every=1000)
+        self.assertEqual(r3.history.swaps.iloc[-1], 0)
+        np.testing.assert_array_equal(r3.lattice, lat3)
 
     def test_incremental_rho_and_like_counts(self):
         g = G.Grid((12, 12), torus=True)
@@ -148,6 +195,8 @@ class TestZhang(unittest.TestCase):
             S.ZhangSwap(G.Grid((10, 10), torus=False)).run(10, seed=0)
         with self.assertRaises(ValueError):
             S.ZhangSwap(g, Z=0.5, M=0.6)
+        with self.assertRaises(ValueError):
+            S.ZhangSwap(g).run(10, seed=0, lattice=np.full((10, 10), 2))
 
 
 class TestParse(unittest.TestCase):
@@ -159,10 +208,15 @@ class TestParse(unittest.TestCase):
         self.assertEqual(S.parse_decision('{"choice": 7}', 3), S.Decision(False, valid=False))
         self.assertEqual(S.parse_decision('{"yes_rating": 7, "no_rating": 3}'), S.Decision(True))
         self.assertEqual(S.parse_decision('{"yes_rating": 2, "no_rating": 8}'), S.Decision(False))
+        self.assertEqual(S.parse_decision('{"choice": "Option 2"}', 3), S.Decision(True, 2))
+        self.assertEqual(S.parse_decision('{"choice": true}', 3), S.Decision(False, valid=False))
 
     def test_text_forms(self):
         self.assertEqual(S.parse_decision("Yes, I want to move."), S.Decision(True))
         self.assertEqual(S.parse_decision("I will stay here."), S.Decision(False))
+        self.assertEqual(S.parse_decision("I would not move."), S.Decision(False))
+        self.assertEqual(S.parse_decision("I don't want to leave my home."), S.Decision(False))
+        self.assertEqual(S.parse_decision("Moving makes sense."), S.Decision(True))
         self.assertEqual(S.parse_decision("Option 3 looks best", 3), S.Decision(True, 3))
         self.assertEqual(S.parse_decision("2", 3), S.Decision(True, 2))
         self.assertFalse(S.parse_decision("hmm", 0).valid)
@@ -196,7 +250,8 @@ class TestLLMMover(unittest.TestCase):
         users = [u for _, u in llm.calls]
         self.assertTrue(any("0 are red households (your group), 8 are green households, 0 are empty" in u
                             for u in users))
-        self.assertTrue(all(json.loads('{"move": false}') == {"move": False} for _ in users))
+        self.assertTrue(all(u.endswith('{"move": true} or {"move": false}.') for u in users))
+        self.assertTrue(all(json.loads(u[u.rindex("{"):-1]) == {"move": False} for u in users))
 
     def test_persona_hook_forms(self):
         for persona, check in (("likes quiet streets", lambda s, i, t: "likes quiet streets" in s),
