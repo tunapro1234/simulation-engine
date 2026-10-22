@@ -8,8 +8,10 @@ per-user temporal split, two targets and LLM-free baselines.
     task.score(frame, "bias")                          # {'metric': 'rmse', 'value', 'lo', 'hi', 'n': users}
     ml.persona_text(data, int(data.test["user_id"][0]))   # train-only profile text for an LLM method
 
-Each user's ratings are ordered by (timestamp, movie_id); ML-1M has many ratings in the same second, so the movie id
-breaks ties deterministically.
+Each user's ratings are ordered by timestamp. ML-1M has many ratings in the same second (42% of users end on such a
+burst), so ties are broken by a fixed hash of (user_id, movie_id): deterministic, independent of file order, and
+unrelated to the movie id (a movie-id tie-break makes the newest-id movie the "next" one and lets a score = movie id
+reach sampled hit@10 0.171 instead of 0.131).
 
 target='rating' (kind continuous): the last ceil(test_frac * n_u) ratings of every user are test (default 0.2), the
     rest train. Metrics RMSE (primary) and MAE, user-cluster bootstrap. Baselines global_mean, user_mean, item_mean,
@@ -79,8 +81,20 @@ def read_ml1m(root: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 
 # ---------------------------------------------------------------------- split
+def tie_key(user_ids, movie_ids) -> np.ndarray:
+    """splitmix64 hash of (user_id, movie_id): the within-second order, fixed and unrelated to either id."""
+    x = (np.asarray(user_ids).astype(np.uint64) << np.uint64(32)) ^ np.asarray(movie_ids).astype(np.uint64)
+    x = x + np.uint64(0x9E3779B97F4A7C15)
+    x = (x ^ (x >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    x = (x ^ (x >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    return x ^ (x >> np.uint64(31))
+
+
 def order_by_user_time(r: pd.DataFrame) -> pd.DataFrame:
-    return r.sort_values(["user_id", "timestamp", "movie_id"], kind="mergesort").reset_index(drop=True)
+    """Rows sorted by (user_id, timestamp, tie_key); same result for any input row order."""
+    k = tie_key(r["user_id"].to_numpy(), r["movie_id"].to_numpy())
+    return (r.assign(_k=k).sort_values(["user_id", "timestamp", "_k"], kind="mergesort").drop(columns="_k")
+            .reset_index(drop=True))
 
 
 def tail_mask(r: pd.DataFrame, frac: float | None = None, k: int | None = None) -> np.ndarray:
@@ -141,7 +155,8 @@ def residual_similarity(train: pd.DataFrame, mu: float, bu: pd.Series, bi: pd.Se
 
 
 def cooccurrence_cosine(train: pd.DataFrame, items: np.ndarray, k: int = 0) -> np.ndarray:
-    """Binary co-rating cosine n_ij / sqrt(n_i n_j) over `items`, diagonal 0; k > 0 keeps each column's k largest."""
+    """Binary co-rating cosine n_ij / sqrt(n_i n_j) over `items`, diagonal 0; k > 0 keeps each column's k largest
+    (values tied with the k-th are kept too)."""
     users = np.unique(train["user_id"].to_numpy())
     Bm = _sparse(train[_index(train["movie_id"], items) >= 0], users, items)
     co = (Bm.T @ Bm).toarray()
@@ -159,7 +174,7 @@ def cooccurrence_cosine(train: pd.DataFrame, items: np.ndarray, k: int = 0) -> n
 def item_knn_ratings(train: pd.DataFrame, test: pd.DataFrame, k: int = 40, shrink: float = 100.0,
                      lam: float = 5.0) -> np.ndarray:
     """Koren 2008 eq. 3: b_ui + sum_{j in S^k(i;u)} s_ij (r_uj - b_uj) / sum s_ij over the k most similar movies u
-    rated in train (positive s only); falls back to b_ui. Clipped to [1, 5]."""
+    rated in train (positive s only; equal s -> the more recent rating); falls back to b_ui. Clipped to [1, 5]."""
     mu, bu, bi = fit_biases(train, lam)
     items, S = residual_similarity(train, mu, bu, bi, shrink)
     base = _bias_pred(test, mu, bu, bi)
@@ -175,9 +190,11 @@ def item_knn_ratings(train: pd.DataFrame, test: pd.DataFrame, k: int = 40, shrin
             continue
         s = S[np.ix_(te_i[rows], tr_i[h])].astype(float)
         s[s < 0] = 0.0
-        if s.shape[1] > k:
-            cut = np.partition(s, s.shape[1] - k, axis=1)[:, s.shape[1] - k]
-            s = np.where(s >= cut[:, None], s, 0.0)
+        if s.shape[1] > k:                        # exactly k: ties (e.g. n_ij = 1 -> 1/101) go to the newer rating
+            h_new = s.shape[1] - 1 - np.argsort(-s[:, ::-1], axis=1, kind="stable")[:, :k]
+            keep = np.zeros(s.shape, bool)
+            np.put_along_axis(keep, h_new, True, axis=1)
+            s = np.where(keep, s, 0.0)
         w = s.sum(1)
         ok = w > 0
         out[rows[ok]] += (s[ok] @ tr_e[h]) / w[ok]
@@ -279,9 +296,14 @@ def _err_metric(power: int):
     return metric
 
 
+def _nan_last(x: np.ndarray) -> np.ndarray:
+    return np.where(np.isnan(x), -np.inf, x)
+
+
 def topk_per_user(frame: pd.DataFrame, col: str, k: int = TOP_K) -> pd.DataFrame:
-    """Per user (group): n_greater, n_tied, hit, ndcg of the truth == 1 row among that user's rows."""
-    s = frame[col].to_numpy(float)
+    """Per user (group): n_greater, n_tied, hit, ndcg of the truth == 1 row among that user's rows. NaN scores rank
+    last (as -inf), so a method cannot score a hit by returning NaN for the target."""
+    s = _nan_last(frame[col].to_numpy(float))
     g = pd.factorize(frame["group"])[0]
     y = frame["truth"].to_numpy(float) == 1
     tgt = np.full(g.max() + 1 if len(g) else 0, np.nan)
@@ -290,7 +312,7 @@ def topk_per_user(frame: pd.DataFrame, col: str, k: int = TOP_K) -> pd.DataFrame
     gt = np.bincount(g, (s > ts) & ~y, minlength=len(tgt))
     tie = np.bincount(g, (s == ts) & ~y, minlength=len(tgt))
     hit, ndcg = expected_topk(gt, tie, k)
-    ok = np.isfinite(tgt)
+    ok = np.bincount(g, y, minlength=len(tgt)) > 0
     return pd.DataFrame({"n_greater": gt, "n_tied": tie, "hit": hit, "ndcg": ndcg})[ok]
 
 
@@ -319,14 +341,14 @@ def full_ranking(data: TaskData, scorer: Callable, k: int = TOP_K, *, B: int = 1
     ti = _index(tgt["movie_id"], items)
     for lo in range(0, len(users), 1024):
         sl = slice(lo, lo + 1024)
-        M = np.asarray(scorer(users[sl], items), float)
-        M[seen[sl].toarray() > 0] = -np.inf
+        M = _nan_last(np.asarray(scorer(users[sl], items), float))
+        comp = seen[sl].toarray() == 0                     # competitors: movies the user has not rated in train
         r = np.arange(M.shape[0])
         t = np.where(ti[sl] >= 0, M[r, np.maximum(ti[sl], 0)], -np.inf)
         cold = ti[sl] < 0
-        M[r[~cold], ti[sl][~cold]] = -np.inf               # the target is not its own competitor
-        gt[sl] = np.where(cold, np.inf, (M > t[:, None]).sum(1))
-        tie[sl] = np.where(cold, 0, (M == t[:, None]).sum(1))
+        comp[r[~cold], ti[sl][~cold]] = False              # the target is not its own competitor
+        gt[sl] = np.where(cold, np.inf, ((M > t[:, None]) & comp).sum(1))
+        tie[sl] = np.where(cold, 0, ((M == t[:, None]) & comp).sum(1))
     hit, ndcg = expected_topk(np.minimum(gt, 10 ** 9), tie, k)
     hit[~np.isfinite(gt)], ndcg[~np.isfinite(gt)] = 0.0, 0.0
     mean = lambda d: d["v"].mean(-1)  # noqa: E731
@@ -354,7 +376,7 @@ def personas(data: TaskData, user_ids: Iterable[int] | None = None, *, n_liked: 
         want = np.asarray(list(user_ids))
         tr = tr[tr["user_id"].isin(want)]
     mv, us = data.meta["movies"], data.meta["users"]
-    tr = tr.sort_values(["user_id", "timestamp", "movie_id"], kind="mergesort")
+    tr = order_by_user_time(tr)
     title = tr["movie_id"].map(mv["title"]).fillna(tr["movie_id"].map(lambda x: f"movie {x}"))
     genres = tr["movie_id"].map(mv["genres"]).fillna("")
     out = {}
@@ -439,7 +461,7 @@ class MovieLens1M(BenchTask):
         hold = tail_mask(r, frac, k)
         train, test = r[~hold].reset_index(drop=True), r[hold].reset_index(drop=True)
         rule = (f"last ceil({frac} n_u) ratings per user" if k is None else "last rating per user (leave-last-out)")
-        meta = {"target": self.target, "split": f"{'dev' if dev else 'test'}: {rule} by (timestamp, movie_id); "
+        meta = {"target": self.target, "split": f"{'dev' if dev else 'test'}: {rule} by (timestamp, tie_key); "
                 + ("the test part was removed first" if dev else "train = the earlier ratings"),
                 "users": users, "movies": movies, "n_ratings": len(r), "n_users": int(r["user_id"].nunique()),
                 "n_items": int(r["movie_id"].nunique()), "source": self.source.strip()}
