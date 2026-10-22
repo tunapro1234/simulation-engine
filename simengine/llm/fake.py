@@ -81,7 +81,8 @@ def _questions(user: str) -> dict[str, dict]:
     """{"<field stem>": {"text", "options"}} from the '[<stem>] text' lines and their '   a) option' lines."""
     out: dict[str, dict] = {}
     cur = None
-    for ln in user.splitlines():
+    sec = user.split("\nQuestions:\n", 1)[-1].split("\n\nPeople:\n", 1)[0]
+    for ln in sec.splitlines():
         m = re.match(r"^\[([^\]]+)\] (.*)$", ln)
         if m:
             cur = out[m.group(1)] = {"text": m.group(2), "options": []}
@@ -119,8 +120,9 @@ def _spec(field: str, raw: str, qs: dict) -> dict | None:
     return None
 
 
-def _coerce(v: Any, d: dict, h: float):
-    """A value_fn / schema_responder value (None -> the hash `h` in [0, 1)) as an in-range field value."""
+def _coerce(v: Any, d: dict, h: float, strict: bool = False):
+    """A value_fn (`strict`: a bad value raises) or schema_responder value (None or unusable -> the hash `h` in
+    [0, 1)) as an in-range field value."""
     if d["kind"] == "choice":
         opts, letters = d["options"], d["letters"]
         if not letters:
@@ -132,19 +134,19 @@ def _coerce(v: Any, d: dict, h: float):
             s = v.strip()
             j = opts.index(s) if s in opts else (letters.index(s.lower()) if s.lower() in letters else None)
         if j is None or not 0 <= j < len(letters):
-            if v is not None and not isinstance(v, str):
+            if strict:
                 raise ValueError(f"value_fn returned {v!r} for {d['field']}; give an option, its letter or index")
             j = int(h * len(letters)) % len(letters)
         return letters[j]
     lo, hi = d["min"], d["max"]
-    if v is None:
-        v = lo + h * (hi - lo)
     try:
         v = float(v)
+        if math.isnan(v):
+            raise ValueError
     except (TypeError, ValueError):
-        raise ValueError(f"value_fn returned {v!r} for {d['field']}; give a number") from None
-    if math.isnan(v):
-        raise ValueError(f"value_fn returned NaN for {d['field']}")
+        if strict:
+            raise ValueError(f"value_fn returned {v!r} for {d['field']}; give a number") from None
+        v = lo + h * (hi - lo)
     if d["integer"]:
         return int(min(max(round(v), math.ceil(lo)), math.floor(hi)))
     v = min(max(v, lo), hi)
@@ -184,7 +186,7 @@ def survey_responder(value_fn: Callable[[str, str, dict], Any] | None = None, se
                     row.setdefault(f, f"(fake) {f} {pid}")
                     continue
                 v = value_fn(pid, d["stem"], dict(d)) if value_fn is not None else None
-                row[f] = _coerce(row.get(f) if v is None else v, d, _unit(seed, pid, f))
+                row[f] = _coerce(row.get(f) if v is None else v, d, _unit(seed, pid, f), strict=v is not None)
             out.append(row)
         return json.dumps(out)
 

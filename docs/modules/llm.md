@@ -239,6 +239,34 @@ free persona speech, false positives only skip caching (the reply is still retur
   `tag`, `sample`, `validate` and `cache_if` work as for `Claude`; `spend_log=`/`agent=`/`tag_prefix=` as for `Claude`. Other keyword
   arguments raise `TypeError`.
 
+## `FakeLLM` for survey dry runs: `FakeLLM.survey(value_fn=None, seed=0)`
+
+`FakeLLM()` with no responder returns hash text, so every `sim.survey` answer is `unparsed`;
+`FakeLLM(lambda s, u: "{}")` gives the same (G2 #1: 400/400 numeric answers unparsed). `FakeLLM.survey()` uses
+`survey_responder(value_fn, seed)` from `fake.py`. It reads the panel prompt (`### <id>` blocks, the
+`"<field>": <spec>` list, `[<field>] question` lines with `a) option` lines) and fills every scored field with a value
+in range: `<f>_value` ("number lo-hi"), `<f>_score` ("int 1-5") and `<f>_choice` ("one of a|b|c").
+
+```python
+llm = se.llm.FakeLLM.survey()                                  # hashed values, deterministic per seed
+llm = se.llm.FakeLLM.survey(lambda pid, qid, spec: 70 if qid == "wtp" else None)
+res = se.sim.survey(personas, questions, llm=llm)              # res["unparsed"] == 0
+```
+
+- **value_fn(persona_id, question_id, spec).** `question_id` is the field stem the prompt uses, which is the question
+  id when that id is a plain identifier (`sim._stats.field_name`). `spec` has `field`, `kind` (`numeric`, `likert5`,
+  `choice`), `text` and `spec`. Numeric and Likert specs add `min`, `max` and `integer`; choice specs add `options`
+  (texts) and `letters`. A number is clamped into `[min, max]` and rounded for int fields. A choice can be given as the
+  option text, its letter or its index. A value that cannot be used (an unknown option, a non-number) raises
+  `ValueError`. `None` keeps the default.
+- **Default.** The value `sim.schema_responder(seed)` gives (deterministic hash), clamped the same way. Free text
+  and every non-panel prompt (distribution, prediction, A/B) also come from `schema_responder`, so `FakeLLM.survey()`
+  can stand in for `FakeLLM(schema_responder())` anywhere.
+- **Contract.** `tests/test_llm_fake_survey.py` runs `sim.survey` with numeric, choice and Likert questions (control
+  arms included) and asserts 0 unparsed and every value in range. If the survey prompt layout changes, that test
+  fails, so a smoke test does not quietly go all `unparsed` (G2 #9). Use it for dry runs and tests only. It is not a
+  measurement.
+
 ## When it works and when it does not (measured)
 
 Every number below was measured in the research runs, not in this library. Apart from the opt-in live smoke test
