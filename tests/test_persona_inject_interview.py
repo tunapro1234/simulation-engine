@@ -128,6 +128,13 @@ class TestRender(unittest.TestCase):
         self.assertEqual(inj(person(), q_pol).meta["experts"], ["political scientist"])
         self.assertEqual(inj(person(), {**Q_CAR, "expert": "demographer"}).meta["experts"], ["demographer"])
         self.assertEqual(iv.keyword_expert({"text": "Are you happy?"}), "psychologist")
+        # short keys need a word or an inflection: 'bet' is not 'better', 'law' not 'lawn', 'live' not 'lively'
+        for text in ("Are things getting better?", "Is your lawn green?", "Are you lively?", "Is your agent kind?"):
+            self.assertEqual(iv.keyword_expert({"text": text}), "psychologist", text)
+        pol, eco, dem = "political scientist", "behavioral economist", "demographer"
+        for text, want in [("Did you go voting?", pol), ("More public policies?", pol), ("Do you like gambling?", eco),
+                           ("Do you place bets?", eco), ("Are you religious?", dem), ("Which cities?", dem)]:
+            self.assertEqual(iv.keyword_expert({"text": text}), want, text)
         p = pi.get_injector("interview_expert_reflection", expert="all")(person(), Q_CAR)
         self.assertEqual(p.meta["experts"], list(iv.EXPERTS))
         for note in ("Values routine.", "Saves carefully.", "Votes in every election.", "Lives alone."):
