@@ -214,6 +214,40 @@ class TestPromptbreeder(unittest.TestCase):
                                parallel=1)
         self.assertEqual(out["lamarckian_fallbacks"], 2)
 
+    def test_lamarckian_correct_workings_lower_is_better_and_cached(self):
+        # lower is better: "mixed" (0, 1, 0, 1, ...) beats "worse" (all 1); correct workings are its score-0 units,
+        # read from its cached batch evaluation (no full-train scoring)
+        sizes = []
+
+        def score(text, units):
+            sizes.append(len(units))
+            s = np.array([float(u % 2) if text == "mixed" else 1.0 for u in units])
+            return {"scores": s, "outputs": [f"u{u}:{int(v)}" for u, v in zip(units, s)]}
+        ev = pe.PromptEvaluator(score, list(range(8)), list(range(4)), higher_is_better=False)
+        llm = _const("new text")
+        out = pe.promptbreeder(llm, ev, "p", seeds=["mixed", "worse"], population=2, generations=1,
+                               operators=["lamarckian"], batch_size=4, crossover_p=0.0, parallel=1)
+        self.assertEqual(out["lamarckian_fallbacks"], 0)
+        work = llm.calls[-1][1]
+        self.assertIn("correct examples of his workings out", work)
+        self.assertIn(":0", work)
+        self.assertNotIn(":1", work)
+        self.assertNotIn(8, sizes)
+
+    def test_generation_pairs_each_unit_once(self):
+        n = {"k": 0}
+
+        def fresh(s, u):
+            n["k"] += 1
+            return f"text {n['k']}"
+        ev = pe.PromptEvaluator(lambda t, u: np.full(len(u), float(len(t))), list(range(8)), list(range(4)))
+        seeds = [f"seed {'x' * i}" for i in range(6)]                       # distinct fitness
+        for sd in range(10):
+            out = pe.promptbreeder(FakeLLM(fresh), ev, "p", seeds=seeds, population=6, generations=1,
+                                   operators=["first_order"], crossover_p=0.0, parallel=1, seed=sd)
+            kept = [u["task"] for u in out["population"] if u["task"] in seeds]
+            self.assertEqual(len(kept), 3, sd)                               # 3 disjoint pairs, 3 losers replaced
+
     def test_batches_and_bad_operator(self):
         _, _, out = self._run(["first_order"], batch_size=10)
         self.assertTrue(all(c.n_units == 10 for c in out["history"]))

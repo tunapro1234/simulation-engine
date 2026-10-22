@@ -250,6 +250,17 @@ class PromptEvaluator:
             self._cache[key] = {"scores": s, "outputs": None if o is None else list(o), "mean": _nanmean(s)}
         return self._cache[key]
 
+    def cached(self, text: str, split: str = "train") -> dict | None:
+        """The cached run of `text` on `split` that covers the most units (None if never scored)."""
+        hits = [v for (t, sp, _), v in self._cache.items() if t == text and sp == split]
+        return max(hits, key=lambda v: len(v["scores"]), default=None)
+
+    def best_score(self, split: str = "train") -> float:
+        """Best finite per-unit score cached on `split` over all texts (raw direction; nan if none)."""
+        v = [x["scores"][np.isfinite(x["scores"])] for (_, sp, _), x in self._cache.items() if sp == split]
+        v = np.concatenate(v) if v else np.empty(0)
+        return float("nan") if not len(v) else float(v.max() if self.hib else v.min())
+
     def candidate(self, text: str, method: str, origin: str, *, idx=None, step: int = 0, parent=None,
                   **meta) -> Candidate:
         r = self.scores(text, "train", idx)
@@ -481,12 +492,15 @@ def promptbreeder(llm: LLM, ev: PromptEvaluator, problem: str, *, population: in
                   parallel: int = 4, system: str = SYSTEM, **complete_kw) -> dict:
     """Promptbreeder-style binary tournament GA on the training split.
 
-    One generation = population // 2 tournaments: draw two units, mutate a copy of the fitter one with an operator
-    drawn uniformly from `operators`, apply prompt crossover with prob. `crossover_p` (task-prompt replaced by one of
+    One generation pairs the whole population at random (paper §4; an odd unit sits out) and runs one tournament
+    per pair: mutate a copy of the fitter unit with an operator drawn uniformly from `operators`, apply prompt
+    crossover with prob. `crossover_p` (task-prompt replaced by one of
     another unit chosen fitness-proportionately), score it and overwrite the loser. Fitness = mean score on a fresh
     random batch of `batch_size` training units (paper: 100), or on the full training split if None (deterministic).
-    Lamarckian mutation needs scorer outputs; units scoring >= `correct_at` (default: the best possible observed
-    score, max of the scores) count as correct workings. Without outputs it falls back to first-order generation.
+    Lamarckian mutation reads the scorer outputs of the parent's cached evaluation (no new scoring); units scoring
+    at least `correct_at` (at most, if lower is better; default: the best per-unit score cached on train over all
+    texts, i.e. 1 for exact match) count as correct workings. Without outputs or correct units it falls back to
+    first-order generation.
     Differences from the paper: one task-prompt per unit (the paper evolves two in sequence), no few-shot context
     shuffling, TF-IDF instead of BERT for the 0.95 diversity filter. Paper defaults: population 50, 20-30 generations."""
     if population < 2:
@@ -558,12 +572,13 @@ def promptbreeder(llm: LLM, ev: PromptEvaluator, problem: str, *, population: in
             m2 = clean_reply(calls.one(hyper)) or w.mutation
             return clean_reply(calls.one(f"{m2} INSTRUCTION: {w.task} INSTRUCTION MUTANT:")), m2, op
         if op == "lamarckian":
-            r = ev.scores(w.task, "train")
-            outs_w = r["outputs"]
-            s = r["scores"]
-            if outs_w and np.isfinite(s).any():
-                thr = np.nanmax(s) if correct_at is None else correct_at
-                ok = [i for i in np.flatnonzero(s >= thr) if outs_w[i]]
+            r = ev.cached(w.task, "train") or ev.scores(w.task, "train")
+            outs_w, s = r["outputs"], r["scores"]
+            thr = ev.best_score("train") if correct_at is None else correct_at
+            if outs_w and np.isfinite(thr):
+                with np.errstate(invalid="ignore"):
+                    good = s >= thr if ev.hib else s <= thr
+                ok = [i for i in np.flatnonzero(good) if outs_w[i]]
                 if ok:
                     pickd = rng.choice(ok, min(n_workings, len(ok)), replace=False)
                     work = "\n".join(str(outs_w[int(i)]) for i in pickd)
@@ -573,8 +588,8 @@ def promptbreeder(llm: LLM, ev: PromptEvaluator, problem: str, *, population: in
         raise ValueError(op)
 
     for g in range(1, generations + 1):
-        for _ in range(max(1, population // 2)):
-            i, j = rng.choice(len(pop), 2, replace=False)
+        perm = rng.permutation(len(pop))
+        for i, j in zip(perm[0::2], perm[1::2]):
             a, b = pop[int(i)], pop[int(j)]
             if a.fitness == b.fitness:
                 win, lose = (int(i), int(j)) if rng.random() < 0.5 else (int(j), int(i))
