@@ -58,6 +58,17 @@ class TestInjectors(unittest.TestCase):
         with self.assertRaises(ValueError):        # categorical value without levels
             pi.get_injector("caa_steer", traits=["region"])(people()[0], QUESTIONS[0])
 
+    def test_edge_params(self):
+        with self.assertRaises(ValueError):
+            pi.get_injector("centaur_qlora", max_turns=-1)
+        with self.assertRaises(ValueError):        # duplicate options would make two letters mean one answer
+            ft.option_letters({"id": "d", "options": ["yes", "yes"]})
+        coded = {"id": "c", "fields": {"party": 2}}
+        caa = pi.get_injector("caa_steer", traits=["party"], levels={2: -1.0, 1: 1.0})(coded, QUESTIONS[0])
+        self.assertEqual(caa.meta["steer"]["coefs"], {"party": -1.0})          # int-coded category via levels
+        with self.assertRaises(ValueError):
+            pi.get_injector("caa_steer", traits=["x"])({"id": "n", "fields": {"x": float("nan")}}, QUESTIONS[0])
+
     def test_subpop_styles_and_letters(self):
         p = people()[1]
         port = pi.get_injector("subpop_lora")(p, QUESTIONS[0])
@@ -193,7 +204,8 @@ class TestDatasetBuilders(unittest.TestCase):
         self.assertEqual(rows[0]["messages"][-1]["role"], "user")
         self.assertTrue(rows[0]["messages"][-1]["content"].endswith("Answer:"))
         for bad in ({("g_north", "q0"): {"maybe": 1}}, {("g_north", "q0"): {"yes": -1, "no": 2}},
-                    {("g_north", "q0"): {"yes": 0}}, {("g_north", "q2"): {"1": 1}}):
+                    {("g_north", "q0"): {"yes": 0}}, {("g_north", "q2"): {"1": 1}},
+                    {("g_north", "q0"): {"yes": float("nan"), "no": 1}}):
             with self.assertRaises(ValueError):
                 ft.distribution_rows(groups, QUESTIONS, bad)
         with self.assertRaises(KeyError):
@@ -233,6 +245,9 @@ class TestDatasetBuilders(unittest.TestCase):
         self.assertEqual(ft.holdout_split(rows, frac=0.2, seed=4), (train, test))
         with self.assertRaises(ValueError):
             ft.holdout_split(rows, frac=1.0)
+        two = ft.chat_rows(people(2), QUESTIONS[:1], "subpop_lora")
+        tr, te = ft.holdout_split(two, frac=0.9)                              # round(1.8) = 2 would empty train
+        self.assertEqual((len({r["person"] for r in tr}), len({r["person"] for r in te})), (1, 1))
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "rows.jsonl")
             self.assertEqual(ft.write_jsonl(train, path), len(train))

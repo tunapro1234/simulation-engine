@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import random
 import re
 import string
@@ -48,6 +49,8 @@ def option_letters(question: dict) -> list[tuple[str, str]]:
     opts = [str(o) for o in (question.get("options") or [])]
     if len(opts) > len(LETTERS):
         raise ValueError(f"question {question.get('id')!r} has more than {len(LETTERS)} options")
+    if len(set(opts)) != len(opts):
+        raise ValueError(f"question {question.get('id')!r} has duplicate options")
     return list(zip(LETTERS, opts))
 
 
@@ -178,6 +181,8 @@ class CentaurQLoRA(_Finetune):
 
     def __init__(self, texts: Mapping[str, str] | None = None, chat: bool = True, max_turns: int | None = None,
                  seed: int | None = None, **params: Any):
+        if max_turns is not None and int(max_turns) < 0:
+            raise ValueError("max_turns must be >= 0")
         given = {"chat": chat} if chat is not True else {}
         given.update({k: v for k, v in (("texts", dict(texts) if texts else None), ("max_turns", max_turns),
                                         ("seed", seed)) if v is not None})
@@ -245,13 +250,15 @@ class _Steer(_Finetune):
         out = {}
         for trait, key in self.traits.items():
             v = f[key]
-            if isinstance(v, str) and v in self.levels:
-                x = self.levels[v]
+            if str(v) in self.levels:           # levels keys are str, so int-coded categories map too
+                x = self.levels[str(v)]
             else:
                 try:
                     x = float(v)
                 except (TypeError, ValueError):
                     raise ValueError(f"{self.name}: field {key!r}={v!r} is not numeric; map it with levels=") from None
+            if not math.isfinite(x):
+                raise ValueError(f"{self.name}: field {key!r}={v!r} is not a finite number")
             out[trait] = round(self.multiplier * (x - self.center), 9)
         return out
 
@@ -373,7 +380,7 @@ def distribution_rows(groups: Sequence[dict], questions: Sequence[dict], dist: M
         if bad:
             raise ValueError(f"options {bad} not in question {qid!r}")
         w = {letters[str(o)]: float(v) for o, v in d.items()}
-        if any(v < 0 for v in w.values()) or sum(w.values()) <= 0:
+        if any(not math.isfinite(v) or v < 0 for v in w.values()) or sum(w.values()) <= 0:
             raise ValueError(f"dist for {(gid, qid)!r} needs non-negative weights with a positive sum")
         tot = sum(w.values())
         p = inj(g, q)
@@ -447,7 +454,7 @@ def holdout_split(rows: Sequence[dict], frac: float = 0.1, seed: int = 0) -> tup
         raise ValueError("frac must be in (0, 1)")
     ids = sorted({r["person"] for r in rows})
     random.Random(seed).shuffle(ids)
-    n = max(1, round(frac * len(ids))) if len(ids) > 1 else 0
+    n = min(len(ids) - 1, max(1, round(frac * len(ids)))) if len(ids) > 1 else 0   # both sides non-empty
     test_ids = set(ids[:n])
     return [r for r in rows if r["person"] not in test_ids], [r for r in rows if r["person"] in test_ids]
 
