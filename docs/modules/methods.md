@@ -245,6 +245,27 @@ adversarial check found that this biases *against* the hybrid **[deney 2.1]**.
   `simengine.evidence.section_markdown` renders. It shows accuracy at n0, the multiplier with its CI and
   censoring, n_calib and the calibration slope, so the traffic multiplier can sit next to the card.
 
+**Comparing priors, weak priors, censoring, the card.** These live in `simengine.methods.bayes_prior`:
+
+- `simulate_saving_calibrated(..., return_pairs=True)` also returns `hybrid_pairs` / `human_pairs` (per-pair
+  accuracy per n, means equal the aggregate) and `decisions_n0` (draws x reps x pairs, True = ship A).
+- `compare_priors({"tfidf": p1, "llm": p2}, ctr_a, ctr_b)` runs every prior on the same replays, tie coins,
+  calibration sets and bootstrap resamples. Each prior's numbers equal a separate `simulate_saving_calibrated`
+  call. `diffs` gives accuracy and multiplier minus the first prior, `vs_human` gives accuracy minus human-only,
+  both with paired 95% CIs. `cluster=<test id per pair>` resamples tests instead of pairs.
+- Weak-prior guard. A RuntimeWarning (also in `warnings`) fires when the free calibration slope k spans 0 over the
+  blocks x draws calibration sets (`k_calib`), or when prior-only accuracy is below 0.6. Calibrated on 20 tests,
+  such a prior can cost traffic. `mode="tiebreak"` is the safe choice there: the human decides and the prior only
+  breaks ties, so it cannot do worse than human-only in expectation as long as the prior is right on at least
+  half of the tied tests.
+- Censoring. When the hybrid beats the top of the human curve, `multiplier` is None, `multiplier_censored=True`
+  and `multiplier_lower_bound = max(ns) / n0` (16x with the defaults). Bootstrap replicates above the curve rank
+  above every finite one, and a CI endpoint in that tail is None (`ci_censored`). Earlier versions dropped those
+  replicates, which made the CI too low. `multiplier_at_floor` marks a value clamped at the bottom of the curve.
+- `saving_section(result)` turns either result into an evidence-card section that
+  `simengine.evidence.section_markdown` renders. It shows accuracy at n0, the multiplier with its CI and
+  censoring, n_calib and the calibration slope, so the traffic multiplier can sit next to the card.
+
 ## Hybrids (`hybrid.py`)
 
 These are the three ways an LLM prediction entered a data model during the prep nights, plus the generic
