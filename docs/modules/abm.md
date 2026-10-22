@@ -6,7 +6,7 @@ This module holds the agent-based models and the baselines they have to beat:
 |---|---|---|
 | `AdoptionABC`, `AdoptionABCAnalogy` | adoption-curve ABM on a small-world network, calibrated with rejection ABC, plus an optional analogy prior from other series | measured; best method on OWID internet |
 | `BassABC`, `BassABCAnalogy` | the same ABC with a closed-form Bass simulator (structure control) | measured |
-| `CurveBaseline`, `BassAnalogy`, `naive`, `linear_trend`, `damped_trend`, `logistic`, `gompertz`, `bass` | adoption-curve baselines | measured |
+| `CurveBaseline`, `BassAnalogy`, `naive`, `linear_trend`, `damped_trend`, `logistic`, `gompertz`, `bass`, `curves.constant_growth` | adoption-curve baselines | measured (constant growth: rehearsal only) |
 | `OpinionPanel`, `opinion_baselines`, `BoundedConfidenceABM` | opinion drift between two survey waves: persistence, mean shift and transition baselines vs a Deffuant-Weisbuch ABM | measured; the ABM loses |
 | `ElasticityShrinkage`, `shuffle_elasticities`, `elicit_elasticities`, `PreEventMean` | price-elasticity prior (category, LLM or mix), ridge-shrunk toward the event's own history; LLM-swap placebo | measured; the gain comes from shrinkage |
 | `MarketABM`, `market_sim` | repeat-purchase market ABM (WTP, reference price, loss aversion, stockpiling, promotion, social effect) with pooled calibration | measured; not the most accurate |
@@ -20,6 +20,7 @@ are unchanged. Shorthand used below:
 - **[abm RAPOR]** = `uretim/makro/abm/RAPOR.md`
 - **[M1 NOTLAR]** = `uretim/makro/abm/m1/NOTLAR.md`
 - **[RECETE]** = `uretim/makro/RECETE.md`
+- **[prova D7 NOTLAR]** = `uretim/prova/d7/NOTLAR.md` (rehearsal D7, fixed-origin adoption forecast; added with the calendar-origin backtest)
 - **[yayilim24 SONUC]** = `uretim/makro/abm/yayilim24/SONUC.md` (pre-registration `makro/onkayit/yayilim-24s.md`, commit 06224f7; run 21-22 Oct, added by the integrator after this module was written)
 
 Every number below comes from those files. This port did not re-measure anything.
@@ -44,6 +45,11 @@ m.scenario(fit, {"imitation": 1.2}); m.personas(fit)                # model-impl
 frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(), "bass_ctrl": abm.BassABCAnalogy(),
                                    "linear": abm.CurveBaseline("linear")})   # EvalFrame: truth, pred_<m>, group
 # then: simengine.evidence.evaluate(frame, ours="abm", ...)
+# fixed calendar origins (one cut year for every series), low alignment level, ineligible series counted
+frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(threshold=0.001),
+                                   "growth": abm.CurveBaseline("growth", phi=0.9, upper=200)},
+                              calendar_origins=range(1991, 1997), horizon=5, on_ineligible="skip")
+frame.attrs["n_ineligible"], frame.attrs["ineligible_series"]   # series the ABC could not align
 
 # --- opinion drift (one row per respondent, wave A / wave B columns per item, coded 1..k)
 panel = abm.OpinionPanel(df, {"econ": ("econ_20", "econ_22", 5)}, group="segment", weight="w", homophily="party")
@@ -107,17 +113,42 @@ later than year 28 and stores each curve on a 0.25-year grid aligned at its 1% c
   **[M1 NOTLAR]**. Smaller banks (`n_sim=300, n_agents=300`, as in the tests) were **not measured**.
 - **`personas()` and `scenario()`.** These are model-implied attributions and counterfactuals, not observed
   quantities. Label them so.
+- **Series below the alignment level.** A series must have reached `threshold` (a fraction, default 0.01 = 1%) by
+  the cutoff; otherwise `fit` raises `IneligibleSeries` (a `ValueError`). With fixed calendar origins this can be
+  most of the panel: in rehearsal D7 (country x technology, origin 1997) 198 of 361 series were below 1%.
+  `threshold=0.001` aligns the bank at the 0.1% crossing instead (one extra bank per level, cached separately);
+  only the 1% default was measured. `eligible(history, series, cutoff)` tells you in advance.
+
+**Backtests** *(this port)*. `adoption_backtest` cuts at t0(s) + k by default (relative cutoffs, research task
+M1). `calendar_origins=[1991, ..., 1996]` uses the same fixed calendar years for every series instead (all
+series by default; concatenate two calls for both kinds); `cutoff_rel` is then only a label. `on_ineligible`
+decides what happens when a method cannot align a (series, origin) block: `"raise"` (default, the old behaviour),
+`"skip"` (drop the whole block, so every method is scored on the same rows) or `"nan"` (keep the rows, NaN for that
+method, fill with your fallback). Either way `frame.attrs` lists `ineligible` ({series, cutoff, method}),
+`ineligible_series` and `n_ineligible`. `adoption.fit_many(method, history, cutoff, on_ineligible="skip")` does
+the same for one cutoff and returns `models`, `ineligible`, `n_ineligible`. `fit_many`, `IneligibleSeries` and
+`FitMany` live in `simengine.abm.adoption` (not re-exported from `simengine.abm` yet).
 
 ## Adoption baselines
 
 `curves.py` holds naive, linear trend (last 5 points), damped trend (phi 0.9 fixed), logistic, Gompertz and Bass
-NLS. All of them use multi-start least squares with m bounded below by the observed max. It also holds
+NLS. The S-curve fits use multi-start least squares with m bounded below by the observed max. It also holds
 `BassAnalogy`, which uses the median (log p, log q) of the other series as a penalty term.
+
+- **`upper=`** *(this port)*. Every curve clips to [0, upper] and bounds m above by it; the default 100 keeps the
+  research behaviour. Raise it for quantities that pass 100 (mobile subscriptions per 100 people), or pass `None`
+  for no bound. `CurveBaseline(name, **kw)` and `BassAnalogy(upper=)` pass it through.
+- **`constant_growth`** (`CurveBaseline("growth")`) *(this port)*. The last observed log growth rate (over the last
+  `last=3` years) is held (`phi=1`) or damped by phi^i (`phi<1`); `offset=0.1` pp keeps zeros finite. In rehearsal
+  D7 (361 country x technology series, fixed origins 1991-1996, h=1..5, per 100 people) a hand-written version
+  (last 3 years, damped) was the strongest simple baseline on dev: 1.731 MAE vs Gompertz 1.783, linear 1.885,
+  Bass 1.950, naive 2.610 **[prova D7 NOTLAR]**. The library version was not re-measured. Near saturation it
+  overshoots (a pooled log-growth model took 42 to 150 there), so keep `upper` and consider `phi<1`.
 
 Measured on the internet dev set (122 series) **[makro RAPOR M1]**: naive 20.42, linear 12.75, damped 13.69,
 logistic 16.96, Gompertz 12.39, Bass 15.97, Bass + analogy 15.94. On US households: linear 8.70 is the best
 baseline. Early in the curve (cutoff t0+3..8), S-curve fits rarely beat a straight trend **[RECETE]**. Always put
-`linear` and `gompertz` next to any adoption claim.
+`linear`, `gompertz` and `growth` next to any adoption claim.
 
 ## Opinion drift: bounded-confidence ABM vs persistence
 
