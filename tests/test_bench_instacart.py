@@ -128,6 +128,27 @@ class TestInstacart(unittest.TestCase):
         lastk = mine[mine.product_id == p].order_number.max()
         self.assertAlmostEqual(row.up_days_since_last, cum[lo.order_number - 1] - cum[lastk - 1], places=5)
 
+    def test_train_cut_excludes_label_orders(self):
+        # train-cut features count only orders before each user's last prior order, for every user (also the
+        # unlabelled 'test' users that feed product statistics); test-cut product statistics use all prior orders
+        data = Instacart(lgbm=False).load(self.root)
+        tr, te = data.train, data.test
+        pr = self.lines["prior"].merge(self.orders, on="order_id")
+        before = pr[pr.order_number < pr.groupby("user_id").order_number.transform("max")]
+        for p in tr.product_id.unique()[:10]:
+            self.assertEqual(tr[tr.product_id == p].p_n.iloc[0], (before.product_id == p).sum())
+            self.assertEqual(te[te.product_id == p].p_n.iloc[0], (pr.product_id == p).sum())
+        bu = before[before.user_id.isin(tr.user_id)]
+        want = bu.groupby(["user_id", "product_id"]).size()
+        got = tr.set_index(["user_id", "product_id"]).up_n
+        np.testing.assert_array_equal(got.reindex(want.index).to_numpy(), want.to_numpy())
+
+    def test_option_validation(self):
+        with self.assertRaises(ValueError):
+            Instacart(n_users=0)
+        with self.assertRaises(ValueError):
+            Instacart(threshold=float("nan"))
+
     def test_baselines_frame_score(self):
         task = Instacart(lgbm=False)
         data = task.load(self.root)
