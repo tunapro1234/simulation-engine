@@ -68,6 +68,8 @@ Decide which of these the brief is really asking for, because the measured answe
 | "what share of segment X would answer Y?" and you have no survey | `distribution` | `sim.segment_distribution` (3 framings) | closed 0.818 of the gap on CES, panel 0.55 |
 | "which of these two texts/offers wins?" with past tests | `ab` / `binary` | `methods.ABStack` (TF-IDF + LLM) | 0.817 on Upworthy; Haiku panel 0.522 |
 | the same, but with no past tests | `ab` | `LLMDirectAB` with a big model, then `EarlyTestBayes` | 2.27x traffic saving at 100 impressions per arm (prior calibrated on 20 tests) |
+| "rank N creatives / ads / pages against the current one (the control) and report the lift" | `ab`, as N−1 two-arm problems | `sim.ab_test(panel, {"control": ..., "C1": ..., ...}, llm=llm)` over all variants on one panel -> per-persona paired score differences vs the control with bootstrap CIs, Holm across the N−1 pairs -> with early real traffic, `EarlyTestBayes` / `simulate_saving_calibrated` on each creative-vs-control pair (recipe "N creatives against a control" in step 4) | the panel only ranks; the lift that counts is on real traffic. `controls=` are persona-control arms, not the control creative |
+| "where do people drop off in this sign-up / checkout flow?" (funnel, multi-step page) | `continuous` per step | `simengine.sim.funnel.funnel(personas, {variant: [step texts]}, llm=llm)` (per-step continue rate, reach, drop-off, paired comparison of final conversion) -> `funnel_frame(res)` for evidence; calibrate the level on real step counts if you have them | G4 rehearsal: the raw persona walk overstated purchase 3x (33.9 % vs 11.8 %), so report drop-off and voices, not the level |
 | "which headline / creative wins?" from a raw A/B archive (one row per variant, clicks and impressions) | `ab` | `simengine.methods.ab.ab_archive(df, test=..., text_a=..., clicks_a=..., n_a=..., significant_only=True)` (seeded random A/B sides, same-text pairs dropped) -> ladder `LengthAB`, `TfidfAB`, a frozen-embedding learner -> `LLMDirectAB(llm, reverse=True)` -> `ABStack` -> `evidence.ab_memorization(llm, pairs, named_context, neutral_context)` (to `memorization=`) -> `evidence.ab_pairs_frame(pairs, [...], group="test_id")` -> `evaluate(task="ab")`; traffic saving with `simengine.methods.bayes_prior.compare_priors({...}, ...)` (each bootstrap replicate re-draws the 20 calibration tests) and `bayes_prior.saving_section`. Dry run: `FakeLLM(simengine.methods.ab.ab_responder(len))` | G0/G3 rehearsals (Upworthy, one run): the strongest LLM-free rung depends on the data (frozen embedding 0.733 vs TF-IDF 0.568 on the same 300 tests); Sonnet stack − embedding +0.025 [−0.010, +0.062]; the Haiku prior's 0.82x equalled a shuffled placebo. The headline 2.27x CI was fixed-calibration, so too narrow |
 | "show the synthetic panel holds against reality" / say vs do, with a person table (stated answer and observed behaviour) | `continuous` | `persona.from_table(tab, id_col=..., forbidden=[say_col, do_col])` -> `sim.survey(ps, items, free_text=False)` (control arms on) -> `sim.survey_frame(r, level="person", kind="numeric")` -> `methods.oof_predict(simengine.methods.tabular.TabularRidge(), ...)` -> `simengine.evidence.extras.say_do(frame, say_col, do_col, item="item")` (gaps per item; z-score the items first) -> `evaluate(task="continuous", primary="spearman")`. Dry run: `FakeLLM.survey(value_fn)` with `value_fn(pid, qid, spec)` | G2 rehearsal (Twin-2K-500, 400 people, one run): ridge on demographics + self-report 0.594 [0.524, 0.655], raw panel 0.141; stack − ridge −0.003 [−0.009, +0.004]; "the panel simulates what people say, not what they do" |
 | "what would this experiment show on people?" (effect sizes of framing / anchoring / price tests) with a past human-experiment archive | `continuous` (one row per effect) | `sim.experiment(llm, personas, conditions, question)` (60+ personas per condition, `samples=1`) -> `sim.experiment_frame` -> `sim.exaggeration_ratio(sim_g, human_g, family=..., human_se=...)` -> `sim.correct_effects(sim_g, method="ratio", human_g=..., family=...)` -> `sim.effect_section(sim_g, human_g, human_se, family)` on the card; baseline = mean human effect of the other families | G9 rehearsal (Twin-2K-500, 16 experiments, one run): no-persona panel MAE 0.334 [0.229, 0.516] vs other-family mean 0.509, not separated on the card; ratio 0.43 [0.34, 0.91] (the panel shrinks effects). With 3-6 families the CIs are honest but wide, so expect "about right" |
@@ -201,6 +203,50 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
     makes it `dev:survey:<arm>` so dev and test runs split in the spend log.
 
 Skip discussion rounds and agent societies for accuracy: neither moved the result measurably.
+
+### Recipe: N creatives against a control
+
+The brief gives a control (the current ad, page or headline) and N−1 new creatives and asks which beat it and by
+how much. Run every variant on one panel, compare each creative with the control within persona, then treat each
+creative-vs-control pair as its own two-arm test when real traffic arrives.
+
+```python
+import numpy as np
+creatives = {"control": "...current page...", "C1": "...", "C2": "...", "C3": "..."}
+r = se.sim.ab_test(panel, creatives, llm=llm)            # all variants on the same personas; controls on
+ans = r["answers"]                                       # {pid: {"score": {variant: 1-10}, "choice", ...}}
+rng, rows = np.random.default_rng(0), []
+for v in creatives:
+    if v == "control":
+        continue
+    d = np.array([a["score"][v] - a["score"]["control"] for a in ans.values()
+                  if a["score"].get(v) is not None and a["score"].get("control") is not None])
+    boot = d[rng.integers(0, len(d), (2000, len(d)))].mean(1)            # persona bootstrap of the paired mean
+    rows.append({"variant": v, "lift": d.mean(), "ci": np.percentile(boot, [2.5, 97.5]),
+                 "p": min(1.0, 2 * min((boot <= 0).mean(), (boot >= 0).mean()))})
+m, run = len(rows), 0.0
+for k, row in enumerate(sorted(rows, key=lambda x: x["p"])):          # Holm step-down over the N−1 pairs
+    run = max(run, min(1.0, (m - k) * row["p"]))
+    row["p_holm"] = run
+```
+
+- **Lift is in score points** (1-10 scale), not CTR. Say "C1 scored 0.9 [−0.2, 2.2] points above the control", and
+  divide by the control's mean score only if you also show the absolute number.
+- **Multiple testing.** With N−1 comparisons, the chance that at least one clears an uncorrected 95 % CI with no
+  real difference is up to (N−1) × 5 %. Report the Holm-adjusted p next to each CI and call a creative a winner
+  only when its adjusted p is below 0.05; with 4+ creatives also widen the CIs (Bonferroni level
+  1 − 0.05 / (N−1)) or say that they are unadjusted.
+- **Real traffic, pair by pair.** For each creative, A = creative and B = control: fit `methods.EarlyTestBayes` on
+  past finished tests (`prior_prob` from `LLMDirectAB` or the panel, `lor, se = methods.true_lor(...)`), then
+  `b.posterior(prior_c, clicks_c, n_c, clicks_control, n_control)` gives P(creative better than control) and a
+  credible interval. `methods.simulate_saving_calibrated(ctr_a, ctr_b, prior)` on the archive says how many
+  impressions per arm the prior is worth. The N−1 pairs share the control arm, so their errors are correlated:
+  keep the control's traffic at least as large as any single creative's, and do not read the best of N−1
+  posteriors as if it were the only test (it is the same selection problem as above).
+- **Built-in option.** A `reference=` option (a variant id such as `"control"`) may exist in `sim.ab_test` in
+  your version and return the per-creative lift directly; see docs/modules/sim.md. The loop above works either way.
+- **Dry run:** `FakeLLM.survey()` gives every score in range; the lifts are noise around 0, which is the expected
+  null.
 
 ## 4b. Trap check before you seal (10 min)
 
