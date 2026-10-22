@@ -966,8 +966,10 @@ F.extrapolation_check(fr, dev_backtest["truth"], margin=0.25)        # or agains
   distribution with the dev target range).
 - `panel_from_long` is one pivot (D7's first row-by-row `.loc` version took 2+ minutes). Duplicate
   (id, time, variable) rows raise; series whose target is never observed are dropped (`dropna_series`).
-  Missing cells inside the panel still count as `fill_value` (0.0) in the forecasters; pass
-  `fill_value=float("nan")` when missing means unknown rather than zero.
+  Missing cells inside the panel still count as `fill_value` (0.0) in the lag / rolling features; pass
+  `fill_value=float("nan")` when missing means unknown rather than zero. The growth / logit targets take y[T]
+  as the last value observed at or before T, so a gap at the origin is not a fall to 0 (before this, a
+  `log_ratio` series with no row at the origin was forecast as 0).
 
 
 ## Repeated surveys: next-wave distributions (`waves.py`) [prova-d6]
