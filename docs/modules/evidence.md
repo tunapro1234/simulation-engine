@@ -247,6 +247,10 @@ The card has six rows: strongest simple baseline → raw → ours → human ceil
   **`below baseline`** (`summary()["below_baseline"]` is True), so a quoted badge does not understate a clear loss
 - `yuksek` (high confidence) only when the CI lower bound is above 0 and the difference is ≥ 0.02; if ours has
   its own worth-N value, its lower bound must also be ≥ 1.10× and above the baseline's lower bound
+- never `yuksek` when the ours − baseline CI has zero width (degenerate bootstrap) or there are fewer than 10
+  clusters (`ab`: the smaller of clusters and tests); it drops to `kararsiz` and the reason says why. Fewer than
+  10 clusters also adds the audit row "küme sayısı (bootstrap GA)" and a `UserWarning` ("only N tests; CI is not
+  meaningful")
 - another column's multiplier never supports the badge
 
 The Markdown card (`card(report, path, lang="mixed" | "en")`) also prints an English one-line summary with dot
@@ -259,7 +263,9 @@ neither `zincir.jsonl` (evidence.seal / `se.seal`) nor `chain.jsonl` (research.s
 
 Default primary metric per task when `primary` is not given: binary / multiclass `accuracy` (`macro_f1` when the
 majority class is above 60 %), distribution `one_minus_tvd`, continuous `pearson` (`one_minus_mae` when the truth
-lies in 0-1), ab `pair_sign`. The CLI warns when `--primary` is missing.
+lies in 0-1), ab `pair_sign`. The CLI warns when `--primary` is missing. `primary` takes the English name, a
+common alias (`log_loss`, `roc_auc`, `f1`, `brier_score`, ...; case and hyphens ignored) or the internal name; an
+unknown name raises a `ValueError` that lists the task's metrics and suggests the closest one.
 
 `panel_cost` converts extra answers to a public panel price ($0.95–2.86 per answer, a calculation).
 - *Measured:* under this rule none of the four example cards (Twin, OE value, OE class, OE LLM-500) is
@@ -540,6 +546,9 @@ absent or entirely missing (on test rows), `evaluate` returns an "awaiting truth
 - `tahmin_ozeti`, the per-method prediction summary (`summary()["predictions"]`)
 - the attached seals; the card says when the predictions are not sealed
 - an empty ladder and empty results
+
+A truth column that is present but entirely missing also emits a `UserWarning` (often a failed join on `unit`);
+frames built with `truth=None` (the `sim.*_frame` helpers) trigger it too, so drop the column to stay silent.
 
 The Markdown card adds a "Predictions (awaiting truth)" table, the dashboard shows a predictions section, and
 `simengine evaluate` accepts such a frame. A frame that has truth but whose `split` (`bolum`) column has no test
