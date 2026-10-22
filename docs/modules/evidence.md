@@ -204,8 +204,9 @@ Measured at n = 100 [kanit RAPOR §1a]:
 - *Does not work* for LLM personas answering surveys (about 1.0×). The LLM adds nothing on top of the stated
   intent: 1.69× for the statement alone vs 1.70× with the LLM [kanit RECETE 9]. Always put a "X alone" arm
   next to every "LLM + X" arm.
-- *Ours next to the strongest baseline:* `bedel.worth_vs_baseline(frame, "ours", "T2", n=100)` (or a list of
-  `(y, f_ours, f_base)` triples) measures both multipliers on the same labelled draws and the same bootstrap
+- *Ours next to the strongest baseline:* `bedel.worth_vs_baseline(frame, "ours", "T2", n=100)` (or one or a list
+  of `(y, f_ours, f_base)` triples; `from simengine.evidence import bedel`, not exported at package level yet)
+  measures both multipliers on the same labelled draws and the same bootstrap
   resamples. It returns `multiplier_ours`, `multiplier_baseline`, their CIs and "≈ humans", the paired
   `difference` with `difference_ci`, and `same_as_baseline` (True when that CI includes 0). `bedel.section(r)`
   turns it into an extras section ("worth ~X humans; strongest baseline alone ~Y; difference ..."), rendered
@@ -213,7 +214,10 @@ Measured at n = 100 [kanit RAPOR §1a]:
   arm, so the same multiplier held for that arm alone. `olc` and the card's default row are unchanged for now.
   Pass the rows the card scored (e.g. the test split): for a single item at the same seed the ours figure equals
   the card's row. The baseline must not be fitted on the target labels (circular, see below), or ours reads
-  "below baseline" against an inflated multiplier. The paired difference CI covered 95-98 % in simulation.
+  "below baseline" against an inflated multiplier. In simulation the paired difference CI covered
+  95-98 % with the unit bootstrap (1-3 items, incl. skewed and 0/1 truth) but only 92-93 % with the item
+  bootstrap at 25 heterogeneous items: there a CI edge just past 0 is weak evidence. Each item needs at least
+  2n complete rows (n = 100 → 200); pass a smaller `n` on a small test split.
 - *Circular priors* are excluded with `circular=`: models trained on the same population's target labels
   would inflate the multiplier (for example "OE GBDT 5×"). A prior that uses input collected after the
   target also leaks. A version using a later survey statement showed 5.02× and was withdrawn [kanit RECETE 4].
