@@ -178,6 +178,8 @@ for c in sorted(c for c in frame.columns if c.startswith("pred_")):
 # 6. Marketing what-ifs on the target market: spend x k -> innovation p x k^elasticity (model-implied, not causal).
 t0 = abm.adoption_t0(df)                                              # first period at >= 1 % per series
 target = a.target or max(t0, key=t0.get)                              # default: the most recent launch
+if target not in t0 or HORIZON > 10:                                  # scenario() simulates cutoff + 10 periods
+    sys.exit(f"what-ifs need a --target that crossed 1 % with >= 8 points ({sorted(t0)}) and HORIZON <= 10")
 if "spend" in df and df.groupby("series").spend.mean().nunique() >= 3:   # data check only: confounded by market
     fit_p = {s: abm.bass(g.t.to_numpy(float), g.y.to_numpy(float), [0.0], return_params=True)[1]
              for s, g in df.sort_values("t").groupby("series") if s in t0}
@@ -185,7 +187,7 @@ if "spend" in df and df.groupby("series").spend.mean().nunique() >= 3:   # data 
     el = np.polyfit(np.log(sp), np.log([fit_p[s]["p"] for s in sp.index]), 1)[0]
     print(f"\ncross-market spend elasticity of p (check only, confounded): {el:.2f}; used: {SPEND_ELASTICITY}")
 cut, abm_m = df[df.series == target].t.max(), methods["abm_analogy"]
-fit = abm_m.fit(df, target, cut)                                      # all data up to today; HORIZON <= 10 here
+fit = abm_m.fit(df, target, cut)                                      # all data up to today
 print(f"what-ifs for {target} (median adoption % at +{HORIZON // 2} / +{HORIZON} periods, 80 % band at +{HORIZON}):")
 for k in SPEND_WHATIFS:
     sc = abm_m.scenario(fit, {"innovation": k ** SPEND_ELASTICITY}, n_draws=100)
