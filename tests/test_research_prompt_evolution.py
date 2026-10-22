@@ -103,9 +103,14 @@ class TestOPRO(unittest.TestCase):
         self.assertTrue(p.endswith("has a score as high as possible. Write the text in square brackets."))
         q = pe.opro_meta_prompt(hist, [], show_scores=False, higher_is_better=False, score_scale=None)
         self.assertNotIn("score:", q.split("Write your new text")[0].replace("scores", ""))
-        low = pe.opro_meta_prompt(hist, [], higher_is_better=False, score_scale=None)
-        self.assertIn("lower scores", low)
-        self.assertIn("score:\n0.9", low)
+        # lower is better (OPRO Fig. 19-20): worst first, so raw scores descend, and the tail asks for a low score
+        lo = [pe.Candidate(t, s, -s, 10, True, "opro", "x") for t, s in (("b", 0.5), ("a", 0.9), ("c", 0.1))]
+        low = pe.opro_meta_prompt(lo, [], higher_is_better=False, score_scale=None)
+        self.assertIn("arranged in descending order based on their scores, where lower scores", low)
+        self.assertLess(low.index("score:\n0.9"), low.index("score:\n0.5"))
+        self.assertLess(low.index("score:\n0.5"), low.index("score:\n0.1"))
+        self.assertIn("has a score as low as possible.", low)
+        self.assertNotIn("descending", p)
 
     def test_search_calls_dedup_and_train_only(self):
         ev, _, _ = _toy()

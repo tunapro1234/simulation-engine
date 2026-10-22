@@ -47,14 +47,15 @@ from .stats import bootstrap_mean, is_better, paired_bootstrap_diff
 
 SYSTEM = "Follow the request in the user message. Reply with the requested text only."
 
-# OPRO Fig. 3 (GSM8K meta-prompt), generalised to any score direction / exemplar format.
-OPRO_HEAD = ("I have some texts along with their corresponding scores. The texts are arranged in ascending order "
+# OPRO Fig. 3 (GSM8K meta-prompt), generalised to any exemplar format. Lower-is-better follows Fig. 19-20: the
+# list is still worst-to-best, so the raw scores run in descending order and the tail asks for a lower score.
+OPRO_HEAD = ("I have some texts along with their corresponding scores. The texts are arranged in {order} order "
              "based on their scores, where {better} scores indicate better quality.")
 OPRO_HEAD_NOSCORE = "I have some texts. The texts are arranged in ascending order of quality."
 OPRO_EXEMPLARS = ("The following exemplars show how to apply your text: you replace {tag} in each input with your "
                   "text, then read the input and give an output. We say your output is wrong if your output is "
                   "different from the given output, and we say your output is correct if they are the same.")
-OPRO_TAIL = ("Write your new text that is different from the old ones and has a score as high as possible. "
+OPRO_TAIL = ("Write your new text that is different from the old ones and has a score as {high} as possible. "
              "Write the text in square brackets.")
 
 # APE Fig. 2 (top) and Fig. 3 / Appendix templates.
@@ -342,7 +343,9 @@ def opro_meta_prompt(history: Sequence[Candidate], exemplars: Sequence[tuple[str
             return "nan"
         return str(int(round(v * score_scale))) if score_scale else f"{v:.4g}"
     L = [task] if task else []
-    L.append(OPRO_HEAD.format(better="higher" if higher_is_better else "lower") if show_scores else OPRO_HEAD_NOSCORE)
+    hib = higher_is_better
+    L.append(OPRO_HEAD.format(order="ascending" if hib else "descending", better="higher" if hib else "lower")
+             if show_scores else OPRO_HEAD_NOSCORE)
     for c in top:
         L.append(f"\ntext:\n{c.text}" + (f"\nscore:\n{fmt(c.train)}" if show_scores else ""))
     if exemplars:
@@ -350,7 +353,7 @@ def opro_meta_prompt(history: Sequence[Candidate], exemplars: Sequence[tuple[str
         for x, y in exemplars:
             inp = f"{tag}\n{x}" if position == "q_begin" else f"{x}\n{tag}"
             L.append(f"\ninput:\n{inp}\noutput:\n{y}")
-    L.append("\n" + OPRO_TAIL)
+    L.append("\n" + OPRO_TAIL.format(high="high" if hib else "low"))
     return "\n".join(L)
 
 
