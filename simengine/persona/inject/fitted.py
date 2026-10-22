@@ -26,6 +26,8 @@ Injectors (family "fitted"; all render `key: value` lines like plain_fields, so 
 Scores: per (person, train question) cell, 1 if `parse(reply)` equals the truth, else 0 (unparsed and failed calls
 count as wrong, as in compare_injectors). Fit state is population-level (one config for everybody); no injector
 here shows a person's own answers. `fit(max_calls=)` refuses to start when the upper-bound call count is above it.
+LEAKAGE: a field named like the question being asked (or one of its `exclude` ids) is never shown, in fit scoring
+and at render, and is never a forest feature for that question (`hidden(question)`, as in inject.generated).
 """
 from __future__ import annotations
 
@@ -84,6 +86,14 @@ def split_questions(qids: Sequence[str], val_frac: float, seed: int = 0) -> tupl
     return [q for q in qids if q not in val], [q for q in qids if q in val]
 
 
+def hidden(question: dict) -> set[str]:
+    """Field names never shown for `question`: its id and its `exclude` ids (a field may BE the target answer)."""
+    out = {str(x) for x in (question.get("exclude") or ())}
+    if question.get("id") is not None:
+        out.add(str(question["id"]))
+    return out
+
+
 class _Fitted(Injector):
     """Shared machinery: question split, cells, cached scorer, held-out guard. Not registered."""
     family = "fitted"
@@ -101,15 +111,17 @@ class _Fitted(Injector):
         self.result: FitResult | None = None
 
     # ------------------------------------------------------------ rendering
-    def system_for(self, person: dict, cfg: dict) -> str:
+    def system_for(self, person: dict, cfg: dict, question: dict | None = None) -> str:
         f = self.person_fields(person)
-        lines = [f"- {k.replace('_', ' ')}: {f[k]}" for k in cfg["keys"] if k in f and f[k] not in (None, "")]
+        drop = hidden(question) if question is not None else set()
+        lines = [f"- {k.replace('_', ' ')}: {f[k]}" for k in cfg["keys"]
+                 if k in f and f[k] not in (None, "") and str(k) not in drop]
         if not lines:
             return ""
         return cfg.get("instruction", HEADER) + "\n" + "\n".join(lines) + "\n" + TAIL
 
     def _prompt(self, person: dict, question: dict, cfg: dict) -> Prompt:
-        return Prompt(system=self.system_for(person, cfg), user=self.question_block(question))
+        return Prompt(system=self.system_for(person, cfg, question), user=self.question_block(question))
 
     def render(self, person: dict, question: dict) -> Prompt:
         if self.result is None:
@@ -313,8 +325,9 @@ class FittedTopK(_Fitted):
         keys = [a for a in rank if weights[a] > 0][:self.k]
         if not keys:
             raise ValueError("fitted_topk: no fit question has two or more distinct answers to learn from")
+        # explicit val_questions are unused here (no LLM to validate) but stay refused like every fit question
         res = FitResult(method=self.name, config={"keys": keys}, train_questions=list(ctx.train_q),
-                        val_questions=[], train_score=None, val_score=None,
+                        val_questions=list(ctx.val_q), train_score=None, val_score=None,
                         meta={"weights": {a: round(weights[a], 6) for a in rank}})
         reg = kw.get("registry_dir")
         if reg is not None:
@@ -345,7 +358,10 @@ def forest_importance(cells: Sequence[dict], attrs: Sequence[str], fields_of: Ca
             continue
         rows = [fields_of(c["person"]) for c in cs]
         cols, owner = [], []
+        drop = hidden(cs[0]["question"])                 # the target is never its own predictor
         for a in attrs:
+            if str(a) in drop:
+                continue
             vals = [r.get(a) for r in rows]
             nums = [v for v in vals if v is not None and not isinstance(v, bool) and isinstance(v, (int, float))]
             if nums and len(nums) == sum(v is not None for v in vals):
@@ -357,6 +373,8 @@ def forest_importance(cells: Sequence[dict], attrs: Sequence[str], fields_of: Ca
                 for c in d.columns:
                     cols.append(d[c].astype(float))
                     owner.append(a)
+        if not cols:
+            continue
         X = pd.concat(cols, axis=1).to_numpy(float)
         rf = RandomForestClassifier(n_estimators=n_estimators, random_state=seed).fit(X, y)
         imp: dict[str, float] = {}
@@ -534,7 +552,8 @@ class FittedOpro(_Fitted):
 
         self._attrs = list(ctx.attrs)
         for u in ctx.cells["train"]:          # OPRO exemplars: persona lines + question -> real answer (train only)
-            u.setdefault("input", self.system_for(u["person"], {"instruction": "", "keys": ctx.attrs}).strip()
+            u.setdefault("input", self.system_for(u["person"], {"instruction": "", "keys": ctx.attrs},
+                                                  u["question"]).strip()
                          + "\n" + u["question"]["text"])
             u.setdefault("output", _key(u["truth"]))
         task = ("Each text is the opening sentence of a system prompt that describes a survey respondent by "
@@ -546,4 +565,4 @@ class FittedOpro(_Fitted):
 
 
 __all__ = ["FittedTopK", "FittedStepwise", "FittedGrips", "FittedOpro", "FitResult", "NotFitted", "HeldOutViolation",
-           "split_questions", "forest_importance", "HEADER", "TAIL"]
+           "split_questions", "forest_importance", "hidden", "HEADER", "TAIL"]
