@@ -485,10 +485,12 @@ _RECIPES = {
 
 def recipe(paper: str = "centaur", base_model: str = DEFAULT_BASE, **overrides: Any) -> dict:
     """Training config for one Colab T4 (16 GB, fp16, no bf16): the paper's hyperparameters plus T4 settings
-    (micro batch 4, gradient accumulation to the paper's batch, max_len 1024). Not measured in simengine."""
+    (one row per forward pass, gradient accumulation to the paper's batch, max_len 1024 keeping the end of each
+    row). Not measured in simengine."""
     if paper not in _RECIPES:
         raise ValueError(f"paper must be one of {sorted(_RECIPES)}")
-    cfg = {"paper": paper, "base_model": base_model, "fp16": True, "bf16": False, "micro_batch": 4,
+    # train_colab_t4 runs rows one at a time (no padding), so micro_batch stays 1 and grad_accum = batch
+    cfg = {"paper": paper, "base_model": base_model, "fp16": True, "bf16": False, "micro_batch": 1,
            "max_len": 1024, "seed": 0, **_RECIPES[paper]}
     cfg.update(overrides)
     cfg["grad_accum"] = max(1, int(cfg["batch"]) // int(cfg["micro_batch"]))
@@ -506,16 +508,25 @@ def _require(*mods: str):
     return out if len(out) > 1 else out[0]
 
 
+def _chat_ids(tok, messages: list[dict], **kw: Any) -> list[int]:
+    """apply_chat_template token ids; newer transformers return a BatchEncoding instead of a list."""
+    out = tok.apply_chat_template(messages, tokenize=True, **kw)
+    if isinstance(out, Mapping) or hasattr(out, "keys"):
+        out = out["input_ids"]
+    return list(out)
+
+
 def _tokenize_chat(tok, messages: list[dict], max_len: int) -> tuple[list[int], list[int]]:
-    """input_ids and labels with loss only on assistant turns (Centaur: only the participant's responses)."""
+    """input_ids and labels with loss only on assistant turns (Centaur: only the participant's responses).
+    Truncation keeps the last `max_len` tokens: the target turn is at the end."""
     ids: list[int] = []
     labels: list[int] = []
     for i in range(len(messages)):
-        full = tok.apply_chat_template(messages[:i + 1], tokenize=True)
+        full = _chat_ids(tok, messages[:i + 1])
         new = full[len(ids):]
-        ids = list(full)
+        ids = full
         labels += new if messages[i]["role"] == "assistant" else [-100] * len(new)
-    return ids[:max_len], labels[:max_len]
+    return ids[-max_len:], labels[-max_len:]
 
 
 def train_colab_t4(jsonl_path: str, out_dir: str, cfg: dict | None = None) -> dict:
@@ -525,6 +536,8 @@ def train_colab_t4(jsonl_path: str, out_dir: str, cfg: dict | None = None) -> di
     Returns {"steps", "last_loss", "out_dir"}. Lazy imports: torch, transformers, peft (bitsandbytes for 4-bit).
     Not measured in simengine."""
     cfg = cfg or recipe()
+    if int(cfg.get("micro_batch", 1)) != 1:
+        raise ValueError("train_colab_t4 runs one row per forward pass; use micro_batch=1 (grad_accum = batch)")
     torch, transformers, peft = _require("torch", "transformers", "peft")
     rows = read_jsonl(jsonl_path)
     torch.manual_seed(cfg["seed"])
@@ -557,7 +570,7 @@ def train_colab_t4(jsonl_path: str, out_dir: str, cfg: dict | None = None) -> di
             r = rows[j]
             with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=cfg["fp16"]):
                 if "target_dist" in r:
-                    ids = tok.apply_chat_template(r["messages"], tokenize=True, add_generation_prompt=True)
+                    ids = _chat_ids(tok, r["messages"], add_generation_prompt=True)
                     x = torch.tensor([ids[-cfg["max_len"]:]], device=dev)
                     logits = model(input_ids=x).logits[0, -1]
                     lets = sorted(r["target_dist"])

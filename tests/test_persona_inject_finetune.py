@@ -241,11 +241,29 @@ class TestDatasetBuilders(unittest.TestCase):
     def test_recipe(self):
         c = ft.recipe("centaur")
         self.assertEqual((c["r"], c["target"], c["epochs"], c["lr"]), (8, "all-linear", 1, 5e-5))
-        self.assertEqual((c["fp16"], c["bf16"], c["grad_accum"]), (True, False, 8))
-        s = ft.recipe("subpop", micro_batch=8)
-        self.assertEqual((s["alpha"], s["target"], s["loss"], s["grad_accum"]), (32, ["q_proj", "v_proj"], "forward_kl", 32))
+        # one row per forward pass, so the accumulation alone reaches the paper's effective batch
+        self.assertEqual((c["fp16"], c["bf16"], c["micro_batch"], c["grad_accum"]), (True, False, 1, 32))
+        s = ft.recipe("subpop")
+        self.assertEqual((s["alpha"], s["target"], s["loss"], s["grad_accum"]),
+                         (32, ["q_proj", "v_proj"], "forward_kl", 256))
         with self.assertRaises(ValueError):
             ft.recipe("nope")
+        with self.assertRaises(ValueError):        # micro batching is not implemented: refused before any import
+            ft.train_colab_t4("missing.jsonl", "out", ft.recipe("centaur", micro_batch=4))
+
+    def test_tokenize_chat_masks_and_keeps_the_target(self):
+        class Tok:                                 # one token per character, BatchEncoding-like return
+            def apply_chat_template(self, messages, tokenize=True, **kw):
+                return {"input_ids": [ord(c) for m in messages for c in f"[{m['role'][0]}]{m['content']}"]}
+        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "Q1"},
+                {"role": "assistant", "content": "<<a>>"}, {"role": "user", "content": "Q2"},
+                {"role": "assistant", "content": "<<b>>"}]
+        ids, labels = ft._tokenize_chat(Tok(), msgs, max_len=1000)
+        self.assertEqual(len(ids), len(labels))
+        shown = "".join(chr(t) for t in labels if t != -100)
+        self.assertEqual(shown, "[a]<<a>>[a]<<b>>")          # loss only on assistant turns
+        ids, labels = ft._tokenize_chat(Tok(), msgs, max_len=8)
+        self.assertEqual("".join(chr(t) for t in ids), "[a]<<b>>")   # truncation keeps the final target
 
 
 class TestLazyDeps(unittest.TestCase):
