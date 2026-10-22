@@ -19,16 +19,18 @@ pure. Generated texts live in person["generated"] = {"backstory": str, "persona"
 
 Paper facts the code follows (checked against the papers and the released CannyLab/anthology code):
 - Anthology backstory prompt "Question: <q>\\n\\nAnswer:" on a base model, q = "Tell me about yourself. How old
-  are you? Where did you grow up? What events made you who you are? What matters to you and what do you enjoy?";
-  the survey question follows the backstory, preceded by "Please answer the following question keeping in mind
-  your previous answers." Demographics of each backstory: the demographic survey asked 40 times per question.
+  are you? Where did you grow up? What events made you who you are? What matters to you and what do you enjoy?"
+  (the released default also puts "Are you a US citizen?" first: preamble=US_PREAMBLE); stop sequences
+  "Question", "Q:", "Interview"; stories of <= 40 tokens dropped. The survey question follows the backstory,
+  preceded by "Please answer the following question keeping in mind your previous answers." Demographics of each
+  backstory: the demographic survey asked 40 times per question.
   Edge weight human-story = prod_k P_story(human's trait k); greedy = argmax per human (stories reused),
   maximum weight matching = Hungarian (one-to-one).
 - Persona Hub text-to-persona "Who is likely to [read|write|like|dislike|...] the text?", persona-to-persona
   "Who is in close relationship with the given persona?"; the paper says its printed prompts are simplified,
   the wording here is ours around those questions. Dedup: MinHash on 1-grams at 0.9 (here exact Jaccard).
-- Li et al. 2025 system line "You are an AI assistant specialized in detailed and unbiased persona generation
-  for opinion simulations." (descriptive persona = free narrative from sampled demographics).
+- Li et al. 2025: descriptive persona = free narrative from demographic metadata, prompts verbatim from Appendix
+  B.1 (system) + B.4 (user); answering uses the B.5 opinion-simulation prompt (style="paper").
 LEAKAGE: generators read only `fields` and `text`, never `answers`. At render time a field named like the target
 question (or an `exclude` id) is never shown or matched on; generation happens before any question, so pass
 narrate_people(exclude=...) for fields that are targets.
@@ -36,6 +38,7 @@ narrate_people(exclude=...) for fields that are targets.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from typing import Any, Callable, Mapping, Sequence
@@ -50,6 +53,8 @@ LI2025 = "Li et al. 2025, LLM Generated Persona is a Promise with a Catch (arXiv
 BACKSTORY_QUESTION = ("Tell me about yourself. How old are you? Where did you grow up? What events made you who you "
                       "are? What matters to you and what do you enjoy?")
 BACKSTORY_QUESTION_SHORT = "Tell me about yourself."          # paper text / baseline config
+US_PREAMBLE = "Are you a US citizen?"                          # same config's preamble_question (US panels only)
+BACKSTORY_STOPS = ("Question", "Q:", "Interview")              # scripts/run_backstory_gen.py stop=[...]
 CONSISTENCY = "Please answer the following question keeping in mind your previous answers."
 DEMOGRAPHIC_SAMPLES = 40                                       # paper: each demographic question asked 40 times
 
@@ -60,11 +65,42 @@ PERSONA_TO_PERSONA = ("Who is in close relationship with the given persona? Name
                       "\"An\".\n\nPersona:\n{persona}")
 RELATIONS = ("read", "write", "like", "dislike")
 
+# Li et al. 2025, Appendix B.1 (system) and B.4 (descriptive persona), verbatim; {METADATA} = the person's fields
 NARRATIVE_SYSTEM = ("You are an AI assistant specialized in detailed and unbiased persona generation for opinion "
-                    "simulations.")
-NARRATIVE_USER = ("Profile:\n{lines}\n\nWrite a descriptive persona of this person in {words} words or fewer, in the "
-                  "second person (\"You are ...\"): background, daily life, values. Stay consistent with every "
-                  "profile value; do not state opinions on specific survey questions.")
+                    "simulations. Your task is to generate a specific, realistic, and diverse persona based on the "
+                    "provided demographic information and fill in a comprehensive JSON template.")
+NARRATIVE_USER = """### INSTRUCTIONS ###
+1. You will be provided with a persona meta file that has the core demographic information of a person.
+2. Your task is to create a detailed, diverse, and vivid persona that is fully consistent with ALL features in the given metadata.
+3. Elaborate on all metadata points, providing specific details that flesh out the persona while remaining true to the given information.
+4. For any ranges or categories provided in the metadata, select and specify exact values or details within those ranges/categories.
+5. Ensure diversity in perspectives, backgrounds, and personality traits. Provide enough specific details to make the persona feel real and three-dimensional.
+6. Maintain diversity by acknowledging various experiences within the demographic group, but commit to specific details for this individual persona.
+7. IMPORTANT: Place your entire response in the ### PERSONA GENERATION ### section below. Start your response with 'Persona:' and then provide only the persona description. Do not include any other prefixes, headers, or additional text.
+
+### RESPONSE FORMAT ###
+Persona: [A detailed, vivid, and diverse description of a specific individual. Ensure all details are consistent with and elaborate upon the provided metadata.]
+
+### PERSONA METADATA ###
+{METADATA}
+
+### PERSONA GENERATION ###
+"""
+# Li et al. 2025, Appendix B.5 (opinion simulation); the letter-format line is replaced by the strict answer line
+SIMULATION_SYSTEM = """You are an AI assistant tasked with generating realistic opinions based on a given persona and a specific topic.
+
+### TASK ###
+You will simulate a persona answering a multiple-choice opinion question. Select the answer that best matches your persona's viewpoint and interests.
+
+### GUIDELINES ###
+1. Be Faithful to the Persona: Ensure your answer is consistent with the persona's data.
+2. Focus on Relevant Aspects: Center your reasoning on the relevant factors that would influence the persona's opinion on that topic.
+3. Be Objective: Avoid injecting personal bias or overly politically correct views that may not align with the persona's standpoint.
+
+### INSTRUCTIONS ###
+- Choose ONE option that best fits the persona
+- If multiple answers are possible, randomly select based on their probability
+- Always pick an option, even in unclear cases - treat it as a forced-choice survey"""
 
 PLACEMENTS = ("prefix", "system", "history")
 GEN = "generated"
@@ -145,18 +181,28 @@ def _given(defaults: dict, values: dict) -> dict:
 
 # ---------------------------------------------------------------- Anthology: generation, demographics, matching
 def backstory_prompt(question: str = BACKSTORY_QUESTION, preamble: str | None = None) -> str:
-    """Base-model completion prompt "Question: <q>\\n\\nAnswer:" (optional preamble Q/A first, e.g.
-    "Are you a US citizen?" answered "Yes.")."""
+    """Base-model completion prompt "Question: <q>\\n\\nAnswer:" with an optional preamble Q/A first. The
+    released default config uses preamble US_PREAMBLE and samples its answer until it contains "yes"; here the
+    answer is fixed to "Yes." (default: no preamble, since the target population need not be US)."""
     head = f"Question: {preamble}\n\nAnswer: Yes.\n\n" if preamble else ""
     return f"{head}Question: {question}\n\nAnswer:"
+
+
+def cut_at_stops(text: str, stops: Sequence[str] = BACKSTORY_STOPS) -> str:
+    """Text up to the first stop string, as an API stop= would cut it (released code: "Question", "Q:",
+    "Interview" anywhere, not only after a newline)."""
+    text = str(text)
+    hits = [i for i in (text.find(s) for s in stops) if i >= 0]
+    return (text[:min(hits)] if hits else text).strip()
 
 
 def generate_backstories(llm, n: int, *, question: str = BACKSTORY_QUESTION, preamble: str | None = None,
                          min_words: int = 30, max_tokens: int = 512, start: int = 0,
                          parallel: int = 4, llm_kw: dict | None = None) -> list[dict]:
-    """n open-ended backstories [{"id": "bs<i>", "text": str}]; call i uses sample=start+i so the disk cache keeps
-    them apart. Replies under `min_words` words are dropped (the paper drops stories of <= 40 tokens), so the
-    result can be shorter than n."""
+    """n open-ended backstories [{"id": "bs<i>", "text": str, "question": question}]; call i uses sample=start+i
+    so the disk cache keeps them apart. Replies are cut at BACKSTORY_STOPS; those under `min_words` words are
+    dropped (the released loader keeps stories of > 40 tokens, about 30 words), so the result can be shorter
+    than n."""
     if n < 0:
         raise ValueError("n must be >= 0")
     prompt = backstory_prompt(question, preamble)
@@ -164,9 +210,9 @@ def generate_backstories(llm, n: int, *, question: str = BACKSTORY_QUESTION, pre
                    parallel=parallel)
     out = []
     for i, t in enumerate(texts):
-        t = re.split(r"\n\s*(?:Question|Q|Interview)\s*:", str(t))[0].strip()   # paper's stop sequences
+        t = cut_at_stops(t)
         if len(t.split()) >= min_words:
-            out.append({"id": f"bs{start + i}", "text": t})
+            out.append({"id": f"bs{start + i}", "text": t, "question": question})
     return out
 
 
@@ -182,7 +228,8 @@ def estimate_demographics(llm, stories: Sequence[dict], questions: Sequence[dict
                           parallel: int = 4, llm_kw: dict | None = None) -> list[dict]:
     """Ask every backstory each demographic question (`id` = the trait name matched against person fields,
     `options` = trait values) `samples` times; returns copies with "demographics": {trait: {value: share}} over
-    parsed replies ({} when nothing parsed). Needs a sampling LLM: replies at temperature 0 make it a point mass."""
+    parsed replies ({} when nothing parsed). The story follows its own elicitation question (story["question"],
+    else BACKSTORY_QUESTION). Needs a sampling LLM: replies at temperature 0 make it a point mass."""
     for q in questions:
         if not q.get("options") or "id" not in q:
             raise ValueError("demographic questions need an id (the trait) and options")
@@ -190,7 +237,7 @@ def estimate_demographics(llm, stories: Sequence[dict], questions: Sequence[dict
     for s in stories:
         demo = {}
         for q in questions:
-            prompt = backstory_question_prompt(s["text"], q)
+            prompt = backstory_question_prompt(s["text"], q, elicitation=s.get("question") or BACKSTORY_QUESTION)
             texts = _calls(llm, [("", prompt)] * samples, max_tokens, llm_kw, samples=list(range(samples)),
                            parallel=parallel)
             vals = [v for v in (parse(t, q) for t in texts) if v is not None]
@@ -305,7 +352,7 @@ def text_to_persona(llm, people: Sequence[dict], *, relation: str = "write", sou
 def persona_to_persona(llm, personas: Sequence[str], *, rounds: int = 1, max_tokens: int = 200,
                        parallel: int = 4, llm_kw: dict | None = None) -> list[str]:
     """Population expansion: each round asks for one close-relationship persona of every persona from the
-    previous round (paper: up to six rounds). Returns only the new personas, in order."""
+    previous round (paper: six rounds per text-to-persona persona). Returns only the new personas, in order."""
     out, frontier = [], [str(p) for p in personas]
     for _ in range(max(0, int(rounds))):
         prompts = [("", PERSONA_TO_PERSONA.format(persona=p)) for p in frontier]
@@ -316,7 +363,8 @@ def persona_to_persona(llm, personas: Sequence[str], *, rounds: int = 1, max_tok
 
 def dedup_personas(personas: Sequence[str], threshold: float = 0.9) -> list[str]:
     """Drop a persona whose word 1-gram Jaccard with an earlier kept one is >= threshold (paper: MinHash on
-    1-grams, 0.9; exact Jaccard here). Order kept."""
+    1-grams, 128 permutations, 0.9; exact Jaccard here; the paper's second, embedding-cosine > 0.9 pass is not
+    done). Order kept."""
     kept, sets = [], []
     for p in personas:
         s = set(re.findall(r"\w+", str(p).casefold()))
@@ -334,24 +382,40 @@ def _field_lines(fields: dict, keys: Sequence[str] | None, hide: set[str] = froz
             if k in fields and fields[k] not in (None, "") and str(k) not in hide]
 
 
-def narrative_prompt(person: dict, keys: Sequence[str] | None = None, words: int = 150,
+def _metadata(fields: dict, keys: Sequence[str] | None, hide: set[str]) -> dict:
+    keys = list(keys) if keys is not None else list(fields)
+    return {str(k): fields[k] for k in keys if k in fields and fields[k] not in (None, "") and str(k) not in hide}
+
+
+def narrative_prompt(person: dict, keys: Sequence[str] | None = None, words: int | None = None,
                      exclude: Sequence[str] = ()) -> tuple[str, str]:
-    """(system, user) asking for a descriptive persona from the person's fields only (never answers). The
-    narrative is written once per person, before any question: pass `exclude` = field names that are (or proxy)
-    target questions so they never reach the generator."""
-    lines = _field_lines(Injector.person_fields(person), keys, {str(x) for x in exclude})
-    if not lines:
+    """(system, user): the paper's descriptive-persona prompt (B.1 + B.4) with the person's fields as the
+    metadata (JSON; never answers). `words` adds a length line the paper does not have. The narrative is
+    written once per person, before any question: pass `exclude` = field names that are (or proxy) target
+    questions so they never reach the generator."""
+    meta = _metadata(Injector.person_fields(person), keys, {str(x) for x in exclude})
+    if not meta:
         raise MissingPersonField(f"narrative needs at least one field (person {person.get('id')!r})")
-    return NARRATIVE_SYSTEM, NARRATIVE_USER.format(lines="\n".join(lines), words=int(words))
+    user = NARRATIVE_USER.replace("{METADATA}", json.dumps(meta, ensure_ascii=False, indent=2, default=str))
+    if words is not None:
+        user = user.replace("### PERSONA GENERATION ###\n", f"Keep the persona under {int(words)} words.\n\n"
+                                                          "### PERSONA GENERATION ###\n")
+    return NARRATIVE_SYSTEM, user
 
 
-def narrate_people(llm, people: Sequence[dict], *, keys: Sequence[str] | None = None, words: int = 150,
-                   exclude: Sequence[str] = (), max_tokens: int = 400, parallel: int = 4,
+def strip_persona_label(text: str) -> str:
+    """Reply without the "Persona:" label the B.4 prompt asks the generator to start with."""
+    return re.sub(r"^\s*(?:#+\s*PERSONA GENERATION\s*#+\s*)?Persona\s*:\s*", "", str(text), flags=re.I).strip()
+
+
+def narrate_people(llm, people: Sequence[dict], *, keys: Sequence[str] | None = None, words: int | None = None,
+                   exclude: Sequence[str] = (), max_tokens: int = 1024, parallel: int = 4,
                    llm_kw: dict | None = None) -> dict[str, str]:
     """{person_id: narrative} written by `llm` from each person's fields (`keys` limits which, `exclude` drops
-    target-question fields)."""
+    target-question fields); the leading "Persona:" label is stripped."""
     prompts = [narrative_prompt(p, keys, words, exclude) for p in people]
-    return {str(p["id"]): t.strip() for p, t in zip(people, _calls(llm, prompts, max_tokens, llm_kw, parallel=parallel))}
+    return {str(p["id"]): strip_persona_label(t)
+            for p, t in zip(people, _calls(llm, prompts, max_tokens, llm_kw, parallel=parallel))}
 
 
 # ---------------------------------------------------------------- injectors
@@ -370,10 +434,11 @@ def _render_backstory(backstory: str, question: dict, placement: str, elicitatio
 
 
 class _BackstoryParams(Injector):
-    _DEFAULTS = {"placement": "prefix", "consistency": True, "elicitation": BACKSTORY_QUESTION}
+    """elicitation=None: the story's own question (pool stories carry one), else BACKSTORY_QUESTION."""
+    _DEFAULTS = {"placement": "prefix", "consistency": True, "elicitation": None}
 
     def __init__(self, placement: str = "prefix", consistency: bool = True,
-                 elicitation: str = BACKSTORY_QUESTION, **params: Any):
+                 elicitation: str | None = None, **params: Any):
         if placement not in PLACEMENTS:
             raise ValueError(f"placement must be one of {PLACEMENTS}")
         super().__init__(**_given(self._DEFAULTS, {"placement": placement, "consistency": consistency,
@@ -392,8 +457,8 @@ class AnthologyBackstory(_BackstoryParams):
                    "prefix (paper, user turn) | system | history (prior chat turn).")
 
     def render(self, person: dict, question: dict) -> Prompt:
-        p = _render_backstory(_generated(self, person, "backstory"), question, self.placement, self.elicitation,
-                              self.consistency)
+        p = _render_backstory(_generated(self, person, "backstory"), question, self.placement,
+                              self.elicitation or BACKSTORY_QUESTION, self.consistency)
         p.meta["placement"] = self.placement
         return p
 
@@ -444,7 +509,8 @@ class AnthologyGreedy(_BackstoryParams):
         if leak:
             raise ValueError(f"anthology_greedy keys {sorted(leak)} include the target / excluded question")
         story, w = _greedy_pick(self.person_fields(person), self.pool(), self.keys, self.seed, str(person["id"]))
-        p = _render_backstory(story["text"], question, self.placement, self.elicitation, self.consistency)
+        p = _render_backstory(story["text"], question, self.placement,
+                              self.elicitation or story.get("question") or BACKSTORY_QUESTION, self.consistency)
         p.meta.update(story=story["id"], weight=w, placement=self.placement)
         return p
 
@@ -481,27 +547,45 @@ class LLMNarrative(Injector):
     family = "generated"
     paper = LI2025
     needs = ("generated",)
-    description = ("person['generated']['narrative'] (narrate_people) in the system prompt; with_fields=True "
-                   "adds the source fields as key: value lines (needs 'fields').")
+    description = ("person['generated']['narrative'] (narrate_people); style paper (B.5 opinion-simulation "
+                   "prompt: guidelines in system, ### PERSONA ### + ### QUESTION ### in user) | system (narrative "
+                   "as the system prompt); with_fields=True adds the source fields as key: value lines.")
 
-    def __init__(self, with_fields: bool = False, keys: Sequence[str] | None = None, **params: Any):
-        super().__init__(**_given({"with_fields": False}, {"with_fields": with_fields}),
+    def __init__(self, style: str = "paper", with_fields: bool = False, keys: Sequence[str] | None = None,
+                 **params: Any):
+        if style not in ("paper", "system"):
+            raise ValueError("style must be 'paper' or 'system'")
+        super().__init__(**_given({"style": "paper", "with_fields": False}, {"style": style, "with_fields": with_fields}),
                          **({"keys": list(keys)} if keys else {}), **params)
-        self.with_fields, self.keys = bool(with_fields), (list(keys) if keys else None)
+        self.style, self.with_fields, self.keys = style, bool(with_fields), (list(keys) if keys else None)
         if self.with_fields:
             self.needs = ("generated", "fields")
 
     def render(self, person: dict, question: dict) -> Prompt:
-        system = _generated(self, person, "narrative")
+        persona = _generated(self, person, "narrative")
         if self.with_fields:
             lines = _field_lines(self.person_fields(person), self.keys, _hidden(question))
             if lines:
-                system += "\n\nProfile:\n" + "\n".join(lines)
-        return Prompt(system=system + "\n\nAnswer as this person would.", user=self.question_block(question))
+                persona += "\n\nProfile:\n" + "\n".join(lines)
+        if self.style == "system":
+            return Prompt(system=persona + "\n\nAnswer as this person would.", user=self.question_block(question))
+        return Prompt(system=_simulation_system(question),
+                      user=f"### PERSONA ###\n{persona}\n\n### QUESTION ###\n{self.question_block(question)}\n\n"
+                           "### YOUR RESPONSE ###")
+
+
+def _simulation_system(question: dict) -> str:
+    """B.5 system text; for a numeric question the multiple-choice wording and option rules are dropped."""
+    if question.get("options"):
+        return SIMULATION_SYSTEM
+    head = SIMULATION_SYSTEM.split("\n\n### INSTRUCTIONS ###")[0]
+    return head.replace("a multiple-choice opinion question. Select the answer",
+                        "an opinion question. Give the answer")
 
 
 __all__ = ["AnthologyBackstory", "AnthologyGreedy", "PersonaHub", "LLMNarrative", "BACKSTORY_QUESTION",
-           "BACKSTORY_QUESTION_SHORT", "CONSISTENCY", "POOLS", "age_bracket", "attach", "backstory_prompt",
-           "backstory_question_prompt", "generate_backstories", "estimate_demographics", "edge_weight",
-           "match_backstories", "register_pool", "released_pool", "text_to_persona", "persona_to_persona",
-           "dedup_personas", "narrative_prompt", "narrate_people"]
+           "BACKSTORY_QUESTION_SHORT", "BACKSTORY_STOPS", "US_PREAMBLE", "CONSISTENCY", "NARRATIVE_SYSTEM",
+           "NARRATIVE_USER", "SIMULATION_SYSTEM", "POOLS", "age_bracket", "attach", "backstory_prompt",
+           "cut_at_stops", "backstory_question_prompt", "generate_backstories", "estimate_demographics",
+           "edge_weight", "match_backstories", "register_pool", "released_pool", "text_to_persona",
+           "persona_to_persona", "dedup_personas", "narrative_prompt", "strip_persona_label", "narrate_people"]
