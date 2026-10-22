@@ -89,9 +89,21 @@ The default `waiting="empirical"` and the data rules come from the TALP grid ABM
 - a ring buffer of simulated new cells that later returns can pick.
 
 That file explored with a POI-gravity kernel over 5 x 5 super-cells. Here that kernel is replaced by the paper's
-isotropic jump. The port differs from the paper in three ways. The simulator emits a cell only at the slots where
+isotropic jump. The port differs from the paper in four ways. The simulator emits a cell only at the slots where
 the person was observed, because HuMob scores only those. History visit counts stay fixed during the simulation.
-Exploration does not reject cells the person already visited.
+Exploration does not reject cells the person already visited (in a synthetic check, 2-7 % of jumps from a cluster of
+20-80 seen cells land on a seen cell). Only the last `buffer` (16) simulated new cells can be returned to; the paper
+returns to any visited location. On the 2,000-user sample below `buffer=256` or 4096 changed EPR by at most 0.0015
+GEO-BLEU and 0.8 km DTW (inside the CIs; 256 and 4096 gave identical predictions), so the default stays 16.
+The waiting-time law starts at 1 slot (30 min); the paper fitted it on hourly records.
+
+**Mobility statistics** (review, 23 Oct 2026; one person moving at every record, no day reset, `buffer=4096`):
+the number of distinct cells grows as S ~ n^0.74-0.84 over n = 50..3,000 moves (5 seeds), against the paper's
+asymptotic n^(1/(1+gamma)) = n^0.83; with gamma = 0.6 it is n^0.58-0.63 (paper 0.63). The rank-frequency slope of
+visits over ranks 2-50 (n = 3,000) is 0.80-0.89, below the paper's asymptotic 1 + gamma = 1.21, but an abstract
+EPR written from the paper's two rules (no space, every exploration a new place) gives 0.73-0.98 at the same n, so
+the gap is finite size, not the port. With the default `buffer=16` that slope drops to 0.43-0.52, because forgotten cells stop
+collecting returns. A test checks the S growth for both gamma values.
 
 **Checks** (`tests/test_abm_mobility.py`, synthetic data only):
 
@@ -124,7 +136,8 @@ history and 464,032 test rows; `humob_test` has 1,674,256 and 436,511. Values ar
 user-bootstrap CI (B = 1000). GEO-BLEU is higher-better and DTW (km) lower-better. All are from one run on 22 Oct 2026.
 Loading took 74-100 s and all baselines about 30 s. Scoring both variants took about 50 s. Peak RSS was 6.2 GB
 (the full CSV is read before sampling). A second run of the same script on 22 Oct 2026 (review) reproduced every
-pool-`all` value in the table to the printed digits.
+pool-`all` value in the table to the printed digits. A third run on 23 Oct 2026 (review) reproduced every
+pool-`humob_test` value to the printed digits; with a warm file cache loading took 27 s and the whole run 47 s.
 
 Command (from the repo root, data copy under `<data-root>/yjmob100k/`):
 
@@ -196,7 +209,7 @@ The final 2023 ranking is published only as an image, so no final winner score i
   the slot mode (44.0 vs 51.6) exists only under humob23; with standard DTW it is far worse (115.7 vs 77.1).
 - EPR as a trajectory predictor is far behind every per-user baseline (about half the slot-mode GEO-BLEU, twice
   the DTW). By construction (Song et al.) it targets the statistics of mobility, such as S(t) growth and Zipf
-  visit frequencies, not the time of day; those statistics were not checked here. It is here as
+  visit frequencies, not the time of day (S growth checked above). It is here as
   a simulator for scenario and synthetic-population work and as an honest comparison, not as a forecaster.
   Power-law waiting lowers its humob23 DTW (-11 km) and leaves humob23 GEO-BLEU unchanged; under humob25 it raises
   GEO-BLEU (0.066 vs 0.055) and does not lower DTW (121.4 vs 119.7).
@@ -205,8 +218,9 @@ The final 2023 ranking is published only as an image, so no final winner score i
 
 - EPR parameters are the paper's population values (rho = 0.6, gamma = 0.21, alpha = 0.55, beta = 0.8). Nothing is
   fitted per user, and nothing was tuned on the dev split.
-- `EPRMobility` emits only at observed slots, keeps history visit counts fixed, and does not reject already-visited
-  cells on exploration (see Definitions). The jump length is in cells and ignores land use.
+- `EPRMobility` emits only at observed slots, keeps history visit counts fixed, does not reject already-visited
+  cells on exploration, and forgets simulated cells older than `buffer` (see Definitions). The jump length is in
+  cells and ignores land use.
 - Days carry no weekday. `d % 7` is a relative weekday at best and no baseline uses it.
 - The loader reads the whole CSV (peak 6.2 GB RSS) before sampling users. It is fine for one run, but cache the
   result if you load repeatedly.
