@@ -1145,6 +1145,17 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         out += ["", "A median point forecast can lower L1 metrics (MAE / WMAPE) but usually biases totals down "
                     "(bias = sum pred / sum truth − 1); here: " + "; ".join(_mean_median_here(r) for r in s["mean_median"])
                     + ". Report both and pick by the decision's loss."]
+    cil = [(c, v) for c, v in (report.get("sonuclar") or {}).items()
+           if v.get("tur") in ("baseline", "yontem", "kalibre") and "mean_bias" in (v.get("metrikler") or {})]
+    if cil:   # calibration-in-the-large: binary = predicted rate − base rate, every arm, cluster-bootstrap CI
+        out += ["", "| Calibration-in-the-large | Kind | Mean prediction − mean truth [95% CI] |", "|---|---|---|"]
+        for c, v in cil:
+            m = v["metrikler"]["mean_bias"]
+            out.append(f"| {_md(v.get('etiket'))} (`{c}`) | {v.get('tur')} | {_signed(m.get('deger'))}"
+                       + (f" [{m['alt']:+.3f}, {m['ust']:+.3f}]" if m.get("alt") is not None and m.get("ust") is not None
+                          else "") + " |")
+        out += ["", "Signed (0 = the mean is right; binary: + over-predicts the rate). Diagnostic, not a primary metric; "
+                    "`paired_ci(..., metric=\"mean_bias\")` compares two arms."]
     if s.get("comparisons"):
         out += ["", "## Registered comparisons / drop conditions", "",
                 "| Comparison | Kind | Metric | A − B [95% CI] | p | n clusters | Verdict |", "|---|---|---|---|---|---|---|"]
