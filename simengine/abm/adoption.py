@@ -18,16 +18,20 @@ d = gap to the previous observation (at most 10 years). Calendar year t maps to 
 delta, with delta on a 0.25-year grid in [0, d). A series that has not reached the level by the cutoff cannot be
 aligned: `fit` raises :class:`IneligibleSeries` (a ValueError). So does a cutoff or forecast more than R_MAX = 32
 years after the crossing (bank window; calendar origins on old series). `threshold=0.001` keeps more early series
-in, but only the 1% default was measured.
+in but is worse where 1% works: on synthetic Bass series that had reached both levels, aligning at 0.1% raised
+MAE (ABM 7.7 -> 9.0, Bass control 3.8 -> 4.2) and halved the ABM's 80% band coverage (0.50 -> 0.26). Use it only
+as the fallback for the series 1% cannot align (on_ineligible="nan", then fill), not for the whole panel.
 
 Backtests: `adoption_backtest` cuts at t0(s) + k (relative, research task M1) or at fixed calendar years
 (`calendar_origins=[1991, ..., 1996]`, one origin for every series). `on_ineligible="skip"` drops the
 (series, origin) blocks a method cannot align and lists them in `frame.attrs`; `fit_many` does the same for one
 cutoff.
 
-    frame = adoption_backtest(df, {"abm": AdoptionABCAnalogy(threshold=0.001), "growth": CurveBaseline("growth")},
-                              calendar_origins=range(1991, 1997), horizon=5, on_ineligible="skip")
-    frame.attrs["n_ineligible"], frame.attrs["ineligible_series"]
+    frame = adoption_backtest(df, {"abm": AdoptionABCAnalogy(), "abm01": AdoptionABCAnalogy(threshold=0.001),
+                                   "growth": CurveBaseline("growth")},
+                              calendar_origins=range(1991, 1997), horizon=5, on_ineligible="nan")
+    frame.attrs["n_ineligible"], frame.attrs["ineligible_series"]   # per method: frame.attrs["ineligible"]
+    frame["pred_abm_fb"] = frame["pred_abm"].fillna(frame["pred_abm01"]).fillna(frame["pred_growth"])
     fm = fit_many(AdoptionABCAnalogy(), history, cutoff=1997)          # fm.models, fm.ineligible, fm.n_ineligible
 
 Leakage: a fit only sees `history` (all series, t <= cutoff). m is never fixed; it comes from the prior.
@@ -40,6 +44,7 @@ seed-averaged series bootstrap -1.32, 95% CI [-1.83, -0.82]), linear trend 10.72
 from __future__ import annotations
 
 import hashlib
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -244,6 +249,9 @@ class AdoptionABC:
                  threshold=0.01):
         if not 0 < threshold < 1:
             raise ValueError(f"threshold is a fraction of the population (0.01 = 1%), got {threshold!r}")
+        if threshold > 0.05:                              # 0.1 here is 10%, not 0.1% (adoption_t0 takes percent)
+            warnings.warn(f"threshold={threshold!r} aligns at {100 * threshold:g}% of the population; "
+                          f"for 0.1% pass 0.001", stacklevel=2)
         self.n_sim, self.n_agents, self.accept, self.recent_weight = n_sim, n_agents, accept, recent_weight
         self.seed, self.cache_dir, self.threshold = seed, cache_dir, threshold
         self._last = None
@@ -481,7 +489,8 @@ def _check_on_ineligible(on_ineligible):
 def fit_many(method, history, cutoff, series=None, on_ineligible="skip") -> FitMany:
     """Fit `method` on every series (default: all series with data up to the cutoff). Series the method cannot align
     (IneligibleSeries) are skipped and listed (on_ineligible="skip") or re-raised ("raise")."""
-    _check_on_ineligible(on_ineligible)
+    if on_ineligible not in ("raise", "skip"):
+        raise ValueError(f"fit_many: on_ineligible must be 'raise' or 'skip', got {on_ineligible!r}")
     history = _norm(history)
     hist = history[history["t"] <= cutoff]
     series = list(series) if series is not None else sorted(hist["series"].unique(), key=str)
@@ -537,6 +546,10 @@ def adoption_backtest(df, methods, cutoffs=(3, 5, 8), horizon=10, series=None, t
                                     truth=after["y"].to_numpy(float)))
             keep = True
             for name, meth in methods.items():
+                if not keep:                              # block dropped: only list the other methods that cannot align
+                    if hasattr(meth, "eligible") and not meth.eligible(hist, s, c):
+                        bad.append(dict(series=s, cutoff=c, method=name))
+                    continue
                 try:
                     p = meth.predict(meth.fit(hist, s, c), h)
                 except IneligibleSeries:
@@ -545,7 +558,7 @@ def adoption_backtest(df, methods, cutoffs=(3, 5, 8), horizon=10, series=None, t
                     bad.append(dict(series=s, cutoff=c, method=name))
                     if on_ineligible == "skip":
                         keep = False
-                        break
+                        continue
                     out[f"pred_{name}"] = np.nan
                     continue
                 out[f"pred_{name}"] = p["y_pred"].to_numpy()

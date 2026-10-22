@@ -112,6 +112,8 @@ class TestThreshold(unittest.TestCase):
         for bad in (0, 1.0, 5):
             with self.assertRaises(ValueError):
                 A.AdoptionABC(threshold=bad)
+        with self.assertWarns(UserWarning):                                  # 0.1 = 10%, not 0.1%
+            A.AdoptionABC(threshold=0.1)
 
     def test_low_threshold_aligns_early_series(self):
         df = panel()
@@ -170,6 +172,13 @@ class TestCalendarBacktest(unittest.TestCase):
         self.assertEqual(sorted(late.cutoff.unique()), [1996.0])             # 1% reached in 1996
         self.assertFalse(ev[["pred_abm", "pred_growth", "lo80_abm"]].isna().any().any())
 
+    def test_skip_lists_every_method_that_cannot_align(self):
+        methods = {"abm": A.AdoptionABC(**SMALL), "bass_ctrl": A.BassABC(**SMALL), "growth": A.CurveBaseline("growth")}
+        ev = A.adoption_backtest(self.df, methods, calendar_origins=ORIGINS, horizon=3, on_ineligible="skip")
+        got = sorted((b["method"], b["cutoff"]) for b in ev.attrs["ineligible"])
+        self.assertEqual(got, [("abm", 1994.0), ("abm", 1995.0), ("bass_ctrl", 1994.0), ("bass_ctrl", 1995.0)])
+        self.assertEqual(ev.attrs["n_ineligible"], 1)
+
     def test_on_ineligible_nan_keeps_rows(self):
         ev = A.adoption_backtest(self.df, self.methods, calendar_origins=ORIGINS, horizon=3, on_ineligible="nan")
         late = ev[(ev.series == "late") & (ev.cutoff < 1996)]
@@ -219,6 +228,8 @@ class TestFitMany(unittest.TestCase):
         self.assertEqual(fm01.n_ineligible, 0)
         with self.assertRaises(AD.IneligibleSeries):
             AD.fit_many(A.AdoptionABC(**SMALL), df, cutoff=1994, on_ineligible="raise")
+        with self.assertRaises(ValueError):                                  # "nan" is a backtest option only
+            AD.fit_many(A.AdoptionABC(**SMALL), df, cutoff=1994, on_ineligible="nan")
 
 
 if __name__ == "__main__":
