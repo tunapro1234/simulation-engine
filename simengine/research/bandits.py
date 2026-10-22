@@ -26,10 +26,11 @@ Algorithms (checked against the papers' algorithm boxes):
 - Successive rejects (Audibert, Bubeck & Munos, COLT 2010, Fig. 3): K - 1 phases, n_k = ceil((n - K) /
   (logbar(K) (K + 1 - k))), logbar(K) = 1/2 + sum_{i=2..K} 1/i; each surviving arm is pulled n_k - n_{k-1} times,
   then the lowest empirical mean is dismissed (ties at random). Parameter-free, never exceeds the budget n.
-- LUCB1 (Kalyanakrishnan, Tewari, Auer & Stone, ICML 2012, §3, m = 1): sample every arm once; each round t take
-  h = empirical best, l = argmax over the others of mean + beta; stop iff (mean_l + beta_l) - (mean_h - beta_h) < eps,
-  else sample h and l. beta(u, t) = scale * sqrt(ln(k1 K t^4 / delta) / (2u)), k1 = 5/4. A `budget` caps the pulls
-  (then the empirical best is returned with stopped="budget").
+- LUCB1 (Kalyanakrishnan, Tewari, Auer & Stone, ICML 2012, §3, m = 1): rounds 1..K sample every arm once; each
+  later round t = K + 1, K + 2, ... take h = empirical best, l = argmax over the others of mean + beta; stop iff
+  (mean_l + beta_l) - (mean_h - beta_h) < eps, else sample h and l (§3.2 footnote 3: two arms per round from round
+  K + 1). beta(u, t) = scale * sqrt(ln(k1 K t^4 / delta) / (2u)), k1 = 5/4. A `budget` caps the pulls (then the
+  empirical best is returned with stopped="budget").
 - uniform: every arm floor(n/K) times (the remainder to random distinct arms), recommend the empirical best; the
   baseline of Audibert & Bubeck's experiments.
 Regret policies used for identification recommend the empirical best at the end of the budget.
@@ -205,12 +206,12 @@ def _run_lucb(st: _State, budget: int | None, rng, *, delta=0.05, epsilon=0.0, s
     if budget < K:
         raise ValueError(f"budget {budget} < number of arms {K}")
     rows = np.arange(R)
-    _init_round(st, rows)
+    _init_round(st, rows)               # rounds 1..K of the paper
     live = np.ones(R, bool)
     stopped = np.array(["budget"] * R, object)
     best = np.zeros(R, int)
     rounds = np.zeros(R, int)
-    t = 0
+    t = K
     while live.any():
         t += 1
         lr = np.flatnonzero(live)
@@ -227,7 +228,7 @@ def _run_lucb(st: _State, budget: int | None, rng, *, delta=0.05, epsilon=0.0, s
         fin = done | out
         best[lr[fin]] = h[fin]
         stopped[lr[done]] = "confident"
-        rounds[lr[fin]] = t - 1
+        rounds[lr[fin]] = t - K - 1   # two-arm rounds sampled
         live[lr[fin]] = False
         go = ~fin
         if go.any():
@@ -287,8 +288,8 @@ class BanditResult:
 def identify_best(pull: Callable[[int], float], n_arms: int, budget: int | None, algorithm: str = "successive_rejects",
                   *, higher_is_better: bool = True, seed: int = 0, bounds: tuple | None = None, **kw) -> BanditResult:
     """Run one bandit over `n_arms` arms with `pull(arm) -> reward` for at most `budget` pulls; return the
-    recommended arm. `bounds` = (lo, hi) of the reward in the caller's units (Thompson Beta rescaling; also sets
-    `scale` = hi - lo for UCB1 and LUCB unless given). Extra keywords: delta, epsilon (LUCB), scale (UCB1, LUCB),
+    recommended arm. `bounds` = (lo, hi) of the reward in the caller's units (default (0, 1); Thompson Beta
+    rescaling; also sets `scale` = hi - lo for UCB1 and LUCB unless given). Extra keywords: delta, epsilon (LUCB), scale (UCB1, LUCB),
     sigma, prior_mean (Thompson Gaussian), prior (Thompson Beta)."""
     sign = 1.0 if higher_is_better else -1.0
     arms_log, rew_log = [], []
@@ -302,12 +303,11 @@ def identify_best(pull: Callable[[int], float], n_arms: int, budget: int | None,
             out[i] = sign * r if math.isfinite(r) else -np.inf
         return out
 
-    b = (0.0, 1.0)
+    lo, hi = (0.0, 1.0) if bounds is None else (float(bounds[0]), float(bounds[1]))
+    if not hi > lo:
+        raise ValueError("bounds must be (lo, hi) with hi > lo")
+    b = (lo, hi) if higher_is_better else (-hi, -lo)   # default [0, 1] in the caller's units, also for losses
     if bounds is not None:
-        lo, hi = float(bounds[0]), float(bounds[1])
-        if not hi > lo:
-            raise ValueError("bounds must be (lo, hi) with hi > lo")
-        b = (lo, hi) if higher_is_better else (-hi, -lo)
         kw.setdefault("scale", hi - lo)
     if canonical(algorithm) == "thompson_gaussian":
         kw.pop("scale", None)
@@ -383,7 +383,8 @@ class SimulatedArms:
         return float(self.draw(None, [arm])[0])
 
     def hardness(self) -> dict:
-        """H1 = sum_{i != best} gap_i^-2 and H2 = max_i i * gap_(i)^-2 (Audibert et al. 2010)."""
+        """H1 = sum_i gap_i^-2 and H2 = max_i i * gap_(i)^-2 over all K arms, the best arm's gap taken as the
+        smallest other gap (Audibert et al. 2010 §2)."""
         g = np.sort(self.gaps)[1:]
         if (g <= 0).any():
             return {"H1": math.inf, "H2": math.inf}
