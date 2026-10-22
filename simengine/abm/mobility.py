@@ -110,7 +110,8 @@ def _gmean(p) -> float:
 
 
 def geobleu(pred, truth, max_n: int = 3, beta: float = 0.5) -> float:
-    """GEO-BLEU of one predicted vs true sequence of (x, y) (reference ``calc_geobleu_orig``)."""
+    """GEO-BLEU of one predicted vs true sequence of (x, y) (reference ``calc_geobleu_orig``). Unequal lengths use the
+    2025 normalisation (matched sum / predicted n-grams; the 2023 code divides by the number of matches)."""
     s, a = np.asarray(pred, float).reshape(-1, 2), np.asarray(truth, float).reshape(-1, 2)
     if len(s) == 0 or len(a) == 0:
         raise ValueError("empty trajectory")
@@ -178,6 +179,9 @@ def user_scores(uid, d, t, pred_xy, true_xy, variant: str = "humob23", metrics=(
     """Per-user HuMob scores: each metric computed day by day on the (d, t)-sorted rows and averaged over the user's
     days. Returns DataFrame uid, n_days, <metrics>; the task score is its column mean."""
     cfg = VARIANTS[variant]
+    metrics = (metrics,) if isinstance(metrics, str) else tuple(metrics)
+    if not metrics or set(metrics) - {"geobleu", "dtw"}:
+        raise ValueError(f"metrics must be a non-empty subset of ('geobleu', 'dtw'), got {metrics}")
     uid, d, t = np.asarray(uid), np.asarray(d, np.int64), np.asarray(t, np.int64)
     P, T = np.asarray(pred_xy, float).reshape(-1, 2), np.asarray(true_xy, float).reshape(-1, 2)
     if not (len(uid) == len(d) == len(t) == len(P) == len(T)):
@@ -402,8 +406,10 @@ class EPRMobility:
         whole slots; paper beta = 0.8, cutoff 17 h = 34 slots).
     day_reset : start each day from one of the user's observed first-of-day cells (TALP port).
     Returns of a simulated new cell use its simulated visit count; history counts stay fixed (TALP port).
+    buffer : how many simulated new cells are remembered (ring buffer, TALP port); an older one can no longer be
+        returned to, unlike the paper. A large buffer (>= the explorations per person) restores the paper's rule.
     Users without history get the global slot mode of the history. Exploration does not reject cells the user
-    already visited (on 40,000 cells this is rare; S still grows by one).
+    already visited (S still grows by one; 2-7 % of jumps from a 20-80 cell cluster land on a seen cell).
     """
 
     rho: float = 0.6
