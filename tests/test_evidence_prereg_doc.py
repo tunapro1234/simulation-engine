@@ -156,6 +156,43 @@ class TestPreregDoc(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ split=
+class TestShortOursName(unittest.TestCase):
+    """Rehearsal arms are named H, S, T1, L3: an explicit 'ours: H' marker counts, bare 'H' in prose does not."""
+
+    def setUp(self):
+        self.df = _cont().rename(columns={"pred_good": "pred_H", "pred_naive": "pred_T1", "pred_other": "pred_L3"})
+        self.t = tempfile.TemporaryDirectory()
+        self.root = Path(self.t.name)
+
+    def tearDown(self):
+        self.t.cleanup()
+
+    def _eval(self, desc, ours, doc_text=None):
+        reg = self.root / desc.replace(" ", "_").replace(":", "")
+        ev.seal(self.df.drop(columns=["truth"]), desc, registry=reg, store_copy=False)
+        prereg = reg
+        if doc_text is not None:
+            doc = self.root / "ONKAYIT.md"
+            doc.write_text(doc_text, encoding="utf-8")
+            research.lock_prereg(doc, overwrite=True)
+            prereg = [reg, doc]
+        return _sel(_quiet(ev.evaluate, self.df, ours=ours, prereg=prereg, **FAST))
+
+    def test_marker_in_seal_description(self):
+        for desc, ours in [("ours: H", "H"), ("bizim: H, tabanlar T1", "H"), ("primary: L3", "L3")]:
+            self.assertIn("önceden adlandırıldı", self._eval(desc, ours)["ayrinti"], desc)
+        self.assertIn("bulunamadı", self._eval("ours: h", "H")["ayrinti"])      # name stays case-sensitive
+
+    def test_bare_short_name_still_not_counted_and_hint(self):
+        s = self._eval("H yöntemi ile tahmin", "H")
+        self.assertIn("bulunamadı", s["ayrinti"])
+        self.assertIn("'ours: H'", s["ayrinti"])
+
+    def test_marker_in_locked_doc(self):
+        s = self._eval("tahmin", "H", "# Plan\n\nYığma H = T1 + L3.\n\nours: H\n")
+        self.assertIn("önceden adlandırıldı", s["ayrinti"])
+
+
 def _dist(n_items=12, seed=0):
     rng = np.random.default_rng(seed)
     rows = []

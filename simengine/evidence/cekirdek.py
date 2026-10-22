@@ -804,6 +804,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             den[-1]["bilgi"] = "B"
     if en_iyi_b and not (madde_den and en_iyi_b == "taban_marjinal"):
         den.append(denetim.fark_denetimi("en güçlü basit tabanı geçiyor mu", bc, en_iyi_b, tekrar, nokta, M, "bizim − taban"))
+    tb_den = denetim.taban_belirsizligi(tekrar, tabanlar_a, birincil, M.yon, etiket, bizim=bc, nokta=nokta,
+                                        ga_yontemi=ga_yontemi)   # ilk iki taban GA içinde mi (seçim gürültüsü)
+    if tb_den:
+        den.append(tb_den)
     if en_iyi_r:
         f_, a_, u_, p_ = fark(bc, en_iyi_r)
         den.append({"kontrol": "en güçlü diğer yöntem", "durum": "uyari" if M.yon * f_ < 0 else "tamam", "deger": f_,
@@ -1146,14 +1150,17 @@ def _onkayit_kaniti(bizim: str, onkayit: list | None, metinler: list | None, adl
     dosyaları aranır; mühürlenen sütun adları (sutunlar) ve kaynak yolu aranmaz: bütün aday sütunları içeren bir
     tablo mühürlemek hiçbir adı önceden seçmez. Zamanlı metin (dict {"metin", "zaman"}) en son mühürden SONRA
     yazıldıysa sayılmaz. Eşleşen metinde başka yöntem adları da geçiyor ve 'bizim' açıkça işaretlenmemişse
-    (ours:/primary:/bizim:/birincil: <ad>) belirsizdir.
+    (ours:/primary:/bizim:/birincil: <ad>) belirsizdir. Açık işaret 1-2 harfli adı da ön eksiz bulur ("ours: H"):
+    düz metinde tek harf sözcükle karışır, işaretin ardında karışmaz (ad büyük/küçük harf duyarlı).
     Dönüş: (kod, açıklama), kod ∈ {"adlandirildi", "bulunamadi", "sonra", "belirsiz"}."""
     import re as _re
     gecerli, gec = _onkayit_metinleri(onkayit, metinler)
     kalip = _ad_kalibi(bizim)
-    eslesen = [g for g in gecerli if kalip.search(g)]
+    isaret_k = _re.compile(r"(?i:ours|primary|bizim|birincil)\W{0,3}[:=]\s*[`'\"]?(?:pred_|tahmin_)?"
+                           + _re.escape(bizim) + r"(?![A-Za-z0-9_])")
+    eslesen = [g for g in gecerli if kalip.search(g) or isaret_k.search(g)]
     if not eslesen:
-        if any(kalip.search(g) for g in gec):
+        if any(kalip.search(g) or isaret_k.search(g) for g in gec):
             return "sonra", "ön kayıt metni son mühürden sonra yazılmış (pre-registration text is newer than the seal)"
         return "bulunamadi", ""
     isaret = _re.compile(r"(?i)(?:ours|primary|bizim|birincil)\W{0,3}[:=]\s*[`'\"]?(?:pred_|tahmin_)?"
@@ -1190,6 +1197,9 @@ def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yap
     elif kayit_var:
         durum, ad = "uyari", (f"doğrulanmadı: 'bizim' ({bizim}) ön kayıtta bulunamadı "
                               "(not verified: ours not found in the pre-registration; sealed column names do not count)")
+        if len(str(bizim)) <= 2:
+            ad += (f"; 1-2 harfli ad düz metinde sayılmaz: ön kayda 'ours: {bizim}' ya da 'pred_{bizim}' yazın "
+                   f"(short names need 'ours: {bizim}' or 'pred_{bizim}')")
     else:
         durum = "uyari" if en_iyi else "atlandi"
         ad = (f"doğrulanmadı: ön kayıt verilmedi (prereg=); 'bizim' ({bizim}) adının önceden seçildiği kanıtlanamaz "
