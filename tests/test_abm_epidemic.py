@@ -156,6 +156,8 @@ class TestGenerativeEpidemic(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(ep.parse_isolation("Reasoning: has a fever.\nResponse: Yes"), (True, "has a fever."))
         self.assertEqual(ep.parse_isolation("Reasoning: needs money\n**Response:** no")[0], False)
+        self.assertEqual(ep.parse_isolation("Reasoning: x\nResponse: [Yes]")[0], True)        # echoes the template
+        self.assertEqual(ep.parse_isolation("Reasoning: busy day\n**Response**: No"), (False, "busy day"))
         self.assertIsNone(ep.parse_isolation("I would rather not say.")[0])
 
     def test_prompt_by_condition(self):
