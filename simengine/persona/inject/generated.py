@@ -256,6 +256,14 @@ def _story_prob(story: dict, key: str, value: Any) -> float:
     return 1.0 if _norm(d) == want else 0.0                 # a point value (e.g. a released bracket)
 
 
+DERIVED = {"age_bracket": "age"}                            # trait -> the field it is derived from
+
+
+def _trait_sources(keys: Sequence[str]) -> set[str]:
+    """Field names a match on `keys` reads (a derived trait reads its source field too)."""
+    return {str(k) for k in keys} | {DERIVED[k] for k in keys if k in DERIVED}
+
+
 def _trait(fields: dict, key: str) -> Any:
     if key in fields and fields[key] not in (None, ""):
         return fields[key]
@@ -505,7 +513,7 @@ class AnthologyGreedy(_BackstoryParams):
                                      f"{missing} (person {person.get('id')!r})")
 
     def render(self, person: dict, question: dict) -> Prompt:
-        leak = _hidden(question) & set(self.keys)
+        leak = _hidden(question) & _trait_sources(self.keys)
         if leak:
             raise ValueError(f"anthology_greedy keys {sorted(leak)} include the target / excluded question")
         story, w = _greedy_pick(self.person_fields(person), self.pool(), self.keys, self.seed, str(person["id"]))
