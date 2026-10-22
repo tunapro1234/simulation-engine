@@ -9,8 +9,9 @@
     answers = src.ask(panel, "Rate this ad 1-10", {"score": "int 1-10"})
     texts = sp.sample_texts("homo_silicus", n=4, seed=1)                      # persona method zoo (methods/)
     people = sp.sample_bigfive(50, seed=0); res = sp.validate_bigfive(llm)    # Big Five + Mini-IPIP fidelity
+    res = sp.compare_injectors(llm, people, qs, "answers", ["plain_fields"])   # persona injection zoo (inject/)
 """
-from . import methods
+from . import inject, methods
 from .bigfive import (DOMAINS as BIGFIVE_DOMAINS, PROFILES, SOTO_JOHN_2017_CORR, SOTO_JOHN_2017_NORMS,
                       US_ADULT_NORMS, bfi2_text, bigfive_audience, bigfive_traits, sample_bigfive)
 from .builders import (POOL_METHODS, TALP_FIELDS, Mapping, age_band, apply_value_labels, auto_mapping, from_row,
@@ -18,6 +19,8 @@ from .builders import (POOL_METHODS, TALP_FIELDS, Mapping, age_band, apply_value
                        warn_unlabelled)
 from .history import (LEVELS, from_history, purchase_history_text, summarize_purchases,
                       survey_profile_text)
+from .inject import (CompareResult, Injector, MissingPersonField, Prompt, compare_injectors, get_injector,
+                     list_injectors)
 from .schema import (ABSOLUTE_WORDS, AGE_BAND, BRAND_AWARENESS, COMMITMENT, ENUMS, GENDER, HOUSEHOLD,
                      INCOME_TIER, LABELS, PERSONA_MODE, USAGE, Audience, AudienceSpec, Authored, Behavioral,
                      Disposition, Evidence, Identity, Persona, Trait, Trigger, Triggers, dump_personas, enum_for,
@@ -52,4 +55,7 @@ __all__ = [
     "bfi2_text", "bigfive_traits", "sample_bigfive", "bigfive_audience", "PROFILES", "US_ADULT_NORMS",
     "SOTO_JOHN_2017_NORMS", "SOTO_JOHN_2017_CORR", "BIGFIVE_DOMAINS", "MINI_IPIP", "score_mini_ipip",
     "validate_bigfive", "to_card_row",
+    # persona injection zoo (inject/)
+    "inject", "Prompt", "Injector", "MissingPersonField", "list_injectors", "get_injector", "compare_injectors",
+    "CompareResult",
 ]
