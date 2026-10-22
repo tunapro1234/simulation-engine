@@ -238,7 +238,11 @@ person_distribution_frame(p)  # pid x item: p, status, segment, one column per s
   E[position] (`pos`: None = option index 0..K-1, a sequence, or {item: positions}) and then runs the usual
   statistics; it adds `within_cell_w1` / `within_cell_w1_max` (mean pairwise W1 between a cell's samples, divided
   by the position range: `w1_ordinal` for equally spaced options). A missing vector becomes NaN. The default
-  `kind="probability"` is unchanged.
+  `kind="probability"` is unchanged, and raises a ValueError naming `kind="distribution"` when `p` holds vectors.
+  Each `samples` row carries `filled` (share of that repeat's framing answers that are uniform filler) and the
+  retest reports `filled_share`: filler counts as an answer there, so drop rows with `filled > 0` to retest real
+  replies only.
+- **Scheme names** must not be `pid`, `item`, `p`, `status`, `segment` or `E_pos` (the person frame's columns).
 
 **Cost per arm.** `ask_panel` passes `tag=` to `llm.map`. `survey` uses `survey:persona`,
 `survey:no_persona` and `survey:persona_swap`. `survey(..., tag="dev")` makes them `dev:survey:<arm>`, so the
