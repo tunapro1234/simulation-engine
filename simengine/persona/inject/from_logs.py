@@ -536,6 +536,8 @@ class LogStats(_LogInjector):
                    "top-brand and repeat shares, rating mean; optional per-category lines (persona.history).")
 
     def __init__(self, top_k: int = 5, per_category: bool = True, like_at: float = 4, **params: Any):
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1")
         super().__init__(top_k=top_k, per_category=per_category, like_at=like_at, **params)
         self.top_k, self.per_category, self.like_at = top_k, per_category, like_at
 
@@ -607,6 +609,8 @@ class LogAgent4Rec(_SummaryInjector):
                  cuts: dict | None = None, **params: Any):
         if taste not in ("summary", "items"):
             raise ValueError("taste must be 'summary' or 'items'")
+        if n_items < 1:
+            raise ValueError("n_items must be >= 1")
         super().__init__(taste=taste, n_items=n_items, like_at=like_at, seed=seed,
                          **({"cuts": dict(cuts)} if cuts else {}), **params)
         self.taste, self.n_items, self.like_at, self.seed = taste, n_items, like_at, seed
@@ -662,6 +666,8 @@ class LogPaars(_SummaryInjector):
     style = "paars"
 
     def __init__(self, include_raw: bool = True, n_raw: int = 30, **params: Any):
+        if n_raw < 1:                                  # [-0:] would show the whole log; include_raw=False for none
+            raise ValueError("n_raw must be >= 1")
         super().__init__(include_raw=include_raw, n_raw=n_raw, **params)
         self.include_raw, self.n_raw = include_raw, n_raw
 
@@ -685,6 +691,8 @@ class LogTaskSummary(_SummaryInjector):
     style = "task"
 
     def __init__(self, k: int = 0, **params: Any):
+        if k < 0:
+            raise ValueError("k must be >= 0")
         super().__init__(k=k, **params)
         self.k = k
 
@@ -716,8 +724,8 @@ def _paars_prefs_prompt(hist: str, profile: str) -> str:
             "(\"You ...\") that says how much each factor matters to them.")
 
 
-def _agent4rec_prompt(sample_text: str, n: int) -> str:
-    return (f"{n} items this user rated (liked = rating 3 or above):\n{sample_text}\n\n"
+def _agent4rec_prompt(sample_text: str, n: int, like_at: float = 3) -> str:
+    return (f"{n} items this user rated (liked = rating {_num(like_at)} or above):\n{sample_text}\n\n"
             "Summarise the user's tastes and rating habits in 3 to 4 sentences written to the user (\"You ...\").")
 
 
@@ -742,13 +750,15 @@ def summarize_logs(llm, people: Sequence[dict], style: str = "paars", *, cutoff:
         raise ValueError(f"style must be one of {STYLES}")
     if style == "task" and not task:
         raise ValueError("style 'task' needs task='<what the summary will be used for>'")
+    if n < 1 or n_items < 1:                           # evs[-0:] would be the whole log
+        raise ValueError("n and n_items must be >= 1")
     window = {"cutoff": cutoff, "items": list(hide_items), "exclude": list(hide_qids)}
     plans = []
     for p in people:
         evs = visible_events(p, window)
         if style == "agent4rec":
             used = agent4rec_sample(p, evs, n_items, seed)
-            first = _agent4rec_prompt(liked_text(used, like_at), len(used))
+            first = _agent4rec_prompt(liked_text(used, like_at), len(used), like_at)
         else:
             used = evs[-n:]
             first = (_paars_profile_prompt(sessions_text(used)) if style == "paars"
