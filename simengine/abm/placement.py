@@ -36,7 +36,11 @@ home-cell grid: pressure = adopter share in the 3x3 neighbourhood (Moore), a non
 1 - exp(-q * pressure). An optional cumulative kernel F (e.g. :func:`simengine.abm.diffusion.power_kernel`) decays an
 adopter's influence with age; `wom=` replaces the neighbourhood rule (the hook).
 
-Not measured against real campaign outcomes: there is no adoption ground truth here. The holdout scores reach only.
+STATUS: measured by this port on a YJMob100K subsample (first 4,000 users, days 0-59 -> 60-74, one seed; tables and
+command in docs/modules/abm/placement.md). Test-day reach share at k = 50 on 500 m cells: lazy greedy 0.739, top-50
+most visited 0.597 (difference [+0.126, +0.157]), random 0.152, greedy fitted on the test days 0.790. Greedy on
+EPR-simulated trajectories (simengine.abm.mobility) 0.741. Not measured against real campaign outcomes: there is no
+adoption ground truth here, so the holdout scores reach only.
 """
 from __future__ import annotations
 

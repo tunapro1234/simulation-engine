@@ -120,6 +120,111 @@ run = pl.adoption(freq, pl.home_cells(traj, grid, ex.users), grid, runs=50)   # 
 The audience is the users with at least one test exposure. `diff_lo` / `diff_hi` are the 95% paired
 user-bootstrap CI of `test_reach_share(lazy_greedy) - test_reach_share(method)`.
 
+## Measured (this port, 22 Oct 2026)
+
+**Data.** YJMob100K dataset1 (Yabe et al. 2024, Sci Data; CC BY 4.0), first 4,000 users (`uid < 4000`),
+4,841,963 rows, no masked rows. Train is days 0-59, test is days 60-74, `unit="day"`, `k` cells, one seed. Two
+grids were measured:
+
+- `size=1`: the raw 200 x 200 grid, 500 m cells, 23,797 cells visited in train;
+- `size=4`: 50 x 50 grid, 2 km cells, 2,108 cells visited.
+
+In every table the audience is all 4,000 users, since all are active in test. The CI is the 95% paired
+user-bootstrap (1,000 draws) of greedy minus method.
+
+Command (the data are read at runtime, nothing is shipped):
+
+```python
+import pandas as pd, simengine.abm.placement as pl
+parts = []
+for ch in pd.read_csv("$SIMENGINE_DATA/yjmob100k/yjmob100k-dataset1.csv.gz", chunksize=1_000_000):
+    parts.append(ch[ch.uid < 4000])
+    if ch.uid.iloc[-1] >= 4000: break
+t = pd.concat(parts)
+for size in (1, 4):
+    g = pl.CellGrid(1, 1, 200 // size, 200 // size, size)
+    print(pl.holdout(t, g, train_days=range(60), test_days=range(60, 75), ks=(5, 10, 25, 50, 100),
+                     random_seeds=10, n_boot=1000))
+```
+
+### Test-day reach share, 500 m cells (`size=1`)
+
+| k | lazy_greedy | top_visits | top_visitors | random (10 draws) | oracle_test (in-sample) | greedy - top_visits [95% CI] |
+|---|---|---|---|---|---|---|
+| 5 | 0.315 | 0.311 | 0.311 | 0.017 | 0.333 | [-0.007, +0.017] |
+| 10 | 0.431 | 0.348 | 0.358 | 0.036 | 0.437 | [+0.070, +0.097] |
+| 25 | 0.602 | 0.462 | 0.427 | 0.076 | 0.630 | [+0.124, +0.156] |
+| 50 | 0.739 | 0.597 | 0.527 | 0.152 | 0.790 | [+0.126, +0.157] |
+| 100 | 0.831 | 0.712 | 0.652 | 0.278 | 0.922 | [+0.106, +0.135] |
+
+### Test-day reach share, 2 km cells (`size=4`)
+
+| k | lazy_greedy | top_visits | top_visitors | random | oracle_test | greedy - top_visits [95% CI] |
+|---|---|---|---|---|---|---|
+| 5 | 0.557 | 0.478 | 0.478 | 0.100 | 0.557 | [+0.066, +0.091] |
+| 10 | 0.681 | 0.517 | 0.546 | 0.181 | 0.695 | [+0.148, +0.179] |
+| 25 | 0.850 | 0.653 | 0.641 | 0.369 | 0.870 | [+0.181, +0.212] |
+| 50 | 0.923 | 0.821 | 0.723 | 0.563 | 0.962 | [+0.089, +0.113] |
+| 100 | 0.958 | 0.887 | 0.824 | 0.767 | 0.998 | [+0.061, +0.081] |
+
+What the tables show:
+
+- **Greedy against the baselines.** Coverage greedy beats top-k-visited by 7-20 points of test reach from `k = 10`
+  on, at both grid sizes. At `k = 5` on 500 m cells it ties, with a CI that includes 0. Random is far behind.
+- **Cost of the temporal shift.** The in-sample oracle is 1-9 points above greedy, with the gap growing with `k`.
+  Train reach overstates test reach: at 500 m and `k = 50`, train reach is 0.954 while test reach is 0.739.
+- **Frequency.** Top-k cells deliver about 2x the frequency of greedy. At 500 m and `k = 50`, test frequency is
+  9.04 for top_visits against 3.92 for greedy. The effective reach at 3+ is about the same: 0.390 against 0.384.
+- **Capped objective (`r=3`).** At 500 m and `k = 50`, test reach is 0.759 and effective reach at 3+ is 0.421,
+  against 0.739 / 0.384 for `r = 1`. At 2 km it is 0.948 / 0.818 against 0.923 / 0.776.
+
+### Placement from simulated trajectories (`simengine.abm.mobility`)
+
+Each simulator was fitted on train days and asked for the real test-day `(uid, d, t)` query rows. Greedy then
+placed cells on the simulated test-day positions, and the cells were scored on the real test days. The simulator
+therefore knows **when** each user was active in test, but not **where**. One seed.
+
+| grid, k | greedy on real train | greedy on sim slot_mode | sim markov_sample | sim EPR | top_visits (train) | oracle_test |
+|---|---|---|---|---|---|---|
+| 500 m, 10 | 0.431 | 0.395 | 0.430 | 0.416 | 0.348 | 0.437 |
+| 500 m, 50 | 0.739 | 0.697 | 0.751 | 0.741 | 0.597 | 0.790 |
+| 2 km, 10 | 0.681 | 0.664 | 0.685 | 0.689 | 0.517 | 0.695 |
+| 2 km, 50 | 0.923 | 0.923 | 0.941 | 0.933 | 0.821 | 0.962 |
+
+Paired CIs (real-train greedy minus simulated source):
+
+- **slot_mode** is worse in 3 of 4 cases: for example [+0.024, +0.049] at 500 m and `k = 10`.
+- **EPR** ties at 500 m and `k = 50`, [-0.017, +0.011]. It is slightly better at 2 km and `k = 50`,
+  [-0.020, -0.002].
+- **markov_sample** is better at 2 km and `k = 50`, [-0.026, -0.010].
+
+Every source beats the top-k baseline. A stochastic simulator (Markov sample, EPR) is about as good as the raw
+history for this purpose. It may be a little better at coarse cells, where sampling smooths over the user's whole
+60-day history. This is a single seed, and the query timing leak noted above applies.
+
+### Speed (32-core box shared with other jobs, 3 repeats, `size=1`, 767,420 non-zeros)
+
+| k | lazy greedy | plain greedy | evaluations (lazy / plain) |
+|---|---|---|---|
+| 50 | 0.30-0.40 s | 0.61-0.82 s | 63,040 / 2,000,000 |
+| 200 (stops at 104 cells, full coverage) | 0.47-0.56 s | 1.26-1.33 s | 88,115 / 4,160,000 |
+
+The lazy count includes one full pass over the 40,000 cells. The first call in a fresh process was slower: 2.4 s
+lazy against 1.0 s plain, which is not understood. The load average was about 70 at the time. The holdout over 5 values of `k` took 6-10 s per grid.
+
+### Adoption illustration (uncalibrated, no ground truth)
+
+Setup: 2 km cells, `k = 10` chosen on train, exposures counted on test days, home cells from train nights,
+`p_exposure = 0.01`, `q = 0.3`, 10 steps, 50 runs.
+
+| cells | adopters from the ad | adopters from word of mouth | total |
+|---|---|---|---|
+| greedy | 138 | 941 | 1,079 |
+| top_visits | 202 | 1,064 | 1,266 |
+
+Under a nearly linear exposure response, total exposures matter more than reach. The reach-optimal set is then not
+the adoption-optimal one. Pick the objective (`r`, or adoption itself) to match the assumed response curve.
+
 ## Provenance
 
 New code in this port, not a port of research code. `simengine.abm.mobility` names
