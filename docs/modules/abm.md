@@ -47,7 +47,7 @@ frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(), "bass_ctrl":
 # then: simengine.evidence.evaluate(frame, ours="abm", ...)
 # fixed calendar origins (one cut year for every series), low alignment level, ineligible series counted
 frame = abm.adoption_backtest(df, {"abm": abm.AdoptionABCAnalogy(threshold=0.001),
-                                   "growth": abm.CurveBaseline("growth", phi=0.9, upper=200)},
+                                   "growth": abm.CurveBaseline("growth", upper=200)},
                               calendar_origins=range(1991, 1997), horizon=5, on_ineligible="skip")
 frame.attrs["n_ineligible"], frame.attrs["ineligible_series"]   # series the ABC could not align
 
@@ -118,6 +118,9 @@ later than year 28 and stores each curve on a 0.25-year grid aligned at its 1% c
   most of the panel: in rehearsal D7 (country x technology, origin 1997) 198 of 361 series were below 1%.
   `threshold=0.001` aligns the bank at the 0.1% crossing instead (one extra bank per level, cached separately);
   only the 1% default was measured. `eligible(history, series, cutoff)` tells you in advance.
+- **Series far past the alignment level.** Bank curves end 32 years (`R_MAX`) after the crossing. A cutoff or
+  forecast beyond that (calendar origins on a technology that crossed 1% decades earlier) raises `IneligibleSeries`
+  too; before this check it returned a flat value at the grid end. Use the curve baselines for those series.
 
 **Backtests** *(this port)*. `adoption_backtest` cuts at t0(s) + k by default (relative cutoffs, research task
 M1). `calendar_origins=[1991, ..., 1996]` uses the same fixed calendar years for every series instead (all
@@ -139,11 +142,12 @@ NLS. The S-curve fits use multi-start least squares with m bounded below by the 
   research behaviour. Raise it for quantities that pass 100 (mobile subscriptions per 100 people), or pass `None`
   for no bound. `CurveBaseline(name, **kw)` and `BassAnalogy(upper=)` pass it through.
 - **`constant_growth`** (`CurveBaseline("growth")`) *(this port)*. The last observed log growth rate (over the last
-  `last=3` years) is held (`phi=1`) or damped by phi^i (`phi<1`); `offset=0.1` pp keeps zeros finite. In rehearsal
-  D7 (361 country x technology series, fixed origins 1991-1996, h=1..5, per 100 people) a hand-written version
-  (last 3 years, damped) was the strongest simple baseline on dev: 1.731 MAE vs Gompertz 1.783, linear 1.885,
+  `last=3` years) is damped by phi^i (default `phi=0.8`, the rehearsal setting) or held (`phi=1`); `offset=0.1` pp
+  keeps zeros finite (this port's choice). In rehearsal D7 (361 country x technology series, fixed origins
+  1991-1996, h=1..5, per 100 people) a hand-written version (last 3 years, phi 0.8) was the strongest simple
+  baseline on dev: 1.731 MAE vs Gompertz 1.783, linear 1.885,
   Bass 1.950, naive 2.610 **[prova D7 NOTLAR]**. The library version was not re-measured. Near saturation it
-  overshoots (a pooled log-growth model took 42 to 150 there), so keep `upper` and consider `phi<1`.
+  overshoots (a pooled log-growth model took 42 to 150 there), so keep `upper` and do not drop `phi` to 1 lightly.
 
 Measured on the internet dev set (122 series) **[makro RAPOR M1]**: naive 20.42, linear 12.75, damped 13.69,
 logistic 16.96, Gompertz 12.39, Bass 15.97, Bass + analogy 15.94. On US households: linear 8.70 is the best
