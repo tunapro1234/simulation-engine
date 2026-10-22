@@ -1,7 +1,8 @@
 """Küme bootstrap motoru. Bütün sütunlar ve metrikler AYNI yeniden örneklerle hesaplanır (eşleşik).
 
 birim metrikler: küme toplamları × örnek sayıları (hızlı yol, B=1000).
-toplu metrikler: her tekrar için satır indeksi açılır (döngü, B_toplu).
+toplu metrikler: her tekrar için satır indeksi açılır (döngü, B_toplu). Tek kümede yuvalı maddenin her bootstrap
+kopyası ayrı madde kodu alır (Orneklem.satirlar): ab çifti kopyalar arasında kurulmaz.
 """
 from __future__ import annotations
 
@@ -40,15 +41,45 @@ class Orneklem:
     def sayim(self, b: int) -> np.ndarray:
         return np.bincount(self.secim(b), minlength=self.G).astype(float)
 
-    def satirlar(self, b: int):
-        """b. tekrarın satır indeksleri ve (gerekirse) yeniden etiketlenmiş madde kodları."""
+    def satirlar(self, b: int, madde=None, ic=None):
+        """b. tekrarın satır indeksleri ve kopya farkında madde kodları.
+
+        madde verilirse: tek kümede yuvalanmış maddenin (ic[madde] True) her kopyası ayrı madde olur
+        (kod = (madde, o kümenin kaçıncı çekimi)); birden çok kümeye yayılan madde (ör. kişi kümesi × soru)
+        ortak kalır. Böylece bir kez çekilen kümeler maddeyi paylaşır, k kez çekilen yuvalı küme k ağırlık
+        alır (k² değil: A₁-B₂ gibi kopyalar arası çift kurulmaz). madde yoksa madde_kume=True eski davranış:
+        her çekim ayrı kod."""
         sec = self.secim(b)
         L = self.uzunluk[sec]
         top = int(L.sum())
         kayma = np.repeat(self.baslangic[sec] - (np.cumsum(L) - L), L)
         idx = self.sirali[kayma + np.arange(top)]
-        yeni = np.repeat(np.arange(len(sec)), L) if self.madde_kume else None
-        return idx, yeni
+        if madde is None:
+            return idx, (np.repeat(np.arange(len(sec)), L) if self.madde_kume else None)
+        madde = np.asarray(madde)
+        if ic is None:
+            ic = madde_yuvali(self.kume, madde)
+        sira = np.argsort(sec, kind="stable")                       # çekimin kümesi içindeki sırası (0, 1, ...)
+        s = sec[sira]
+        bas = np.flatnonzero(np.r_[True, s[1:] != s[:-1]])
+        kac = np.empty(len(sec), int)
+        kac[sira] = np.arange(len(sec)) - np.repeat(bas, np.diff(np.r_[bas, len(sec)]))
+        m = madde[idx]
+        if not kac.any():
+            return idx, m
+        kopya = np.repeat(kac, L) * ic[m]
+        return idx, np.unique(m * (int(kopya.max()) + 1) + kopya, return_inverse=True)[1].reshape(-1)
+
+
+def madde_yuvali(kume: np.ndarray, madde: np.ndarray) -> np.ndarray:
+    """madde kodu → bütün satırları tek kümede mi (bootstrap kopyaları ayrı madde sayılır)."""
+    madde, kume = np.asarray(madde, int), np.asarray(kume, int)
+    if not len(madde):
+        return np.zeros(0, bool)
+    n = int(madde.max()) + 1
+    ilk = np.full(n, -1)
+    ilk[madde[::-1]] = kume[::-1]                                     # her maddenin ilk satırının kümesi
+    return np.bincount(madde, kume != ilk[madde], n) == 0
 
 
 def ga(degerler: np.ndarray, alfa: float = 0.05, nokta: float | None = None, yontem: str = "percentile"):
@@ -160,18 +191,18 @@ def hesapla(orn: Orneklem, girdiler: dict, metrikler: list, madde=None, agirlik=
                     f = _hizli_metrik(m, kod)
                     if f is not None:
                         hizli[(s, m.ad)] = f
+        # hızlı yoldaki metrikler maddeyi kullanmaz; madde gruplu olanlar (cift_isaret, kazanan_top1, ...) aşağıda
         yavas = {s: [m for m in toplu if (s, m.ad) not in hizli] for s in girdiler}
+        mk = None if madde is None else _madde_kod(madde)
+        ic = None if mk is None else madde_yuvali(orn.kume, mk)
         for b in range(orn.B_toplu):
             if any(yavas.values()):
-                idx, yeni = orn.satirlar(b)
+                idx, yeni = orn.satirlar(b, mk, ic)
                 for s, (y, p, maske) in girdiler.items():
                     if not yavas[s]:
                         continue
                     ii = idx if maske is None else idx[maske[idx]]
-                    if yeni is not None:
-                        mm = yeni if maske is None else yeni[maske[idx]]
-                    else:
-                        mm = None if madde is None else madde[ii]
+                    mm = None if yeni is None else (yeni if maske is None else yeni[maske[idx]])
                     yy, pp = _al(y, ii), _al(p, ii)
                     for m in yavas[s]:
                         tekrar[s][m.ad][b] = _guvenli(m, yy, pp, mm)
@@ -183,6 +214,11 @@ def hesapla(orn: Orneklem, girdiler: dict, metrikler: list, madde=None, agirlik=
                     except (ValueError, ZeroDivisionError, IndexError, FloatingPointError):
                         tekrar[s][ad][b] = np.nan
     return nokta, tekrar
+
+
+def _madde_kod(madde) -> np.ndarray:
+    """Madde etiketleri → 0..n−1 tamsayı kodları (sıra korunur)."""
+    return np.unique(np.asarray(madde), return_inverse=True)[1].reshape(-1)
 
 
 def _sira_kodu(y, p, maske):
