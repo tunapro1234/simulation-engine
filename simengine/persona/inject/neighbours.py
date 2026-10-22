@@ -1,8 +1,9 @@
 """Neighbour injectors: answers of similar *other* people in the prompt (kNN / collaborative-filtering style).
 
-Every injector here takes a `pool` of person dicts at construction; the target person is never in the
-neighbour set (matched by id) and similarity is computed from the target's fields and `known_answers` only,
-so the target's own answer to the target question is never shown nor used.
+Every injector here takes a `pool` of person dicts at construction; the target person (and any id in the
+question's optional "exclude_people") is never in the neighbour set (matched by id) and similarity is computed
+from the target's fields and `known_answers` only, so the target's own answer to the target question is never
+shown nor used. Question ids and answer keys compare as strings, as in `known_answers`.
 
     import simengine.persona.inject as pi
     inj = pi.get_injector("similar_respondents", pool=people, k=5)          # neighbours' profiles + answers
@@ -44,6 +45,11 @@ def _num(v: Any) -> float | None:
 
 def _fmt(v: Any) -> str:
     return str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)
+
+
+def _skeys(d: Any) -> dict[str, Any]:
+    """Dict with str keys (question and field ids compare as strings, as in `known_answers`)."""
+    return {str(k): v for k, v in (d or {}).items()}
 
 
 def _digest(v: Any) -> str:
@@ -129,7 +135,7 @@ class _Neighbours(Injector):
 
     def similarity(self, vec: dict[tuple[str, str], Any], other: dict) -> tuple[float, int]:
         """(mean similarity over the target's keys, number of keys the other person has)."""
-        f, a = self.person_fields(other), other.get("answers") or {}
+        f, a = _skeys(self.person_fields(other)), _skeys(other.get("answers"))
         total, overlap = 0.0, 0
         for key, v in vec.items():
             src = f if key[0] == "f" else a
@@ -142,15 +148,15 @@ class _Neighbours(Injector):
         return hashlib.sha256(f"{self.seed}|{person.get('id')}|{question.get('id')}|{other['id']}".encode()).hexdigest()
 
     def candidates(self, person: dict, question: dict, min_overlap: int = 1) -> list[tuple[float, dict]]:
-        """Pool members other than the target who answered the target question, with similarity, most similar
-        first (ties by seeded hash)."""
-        qid, pid = question.get("id"), str(person.get("id"))
+        """Pool members other than the target (and question["exclude_people"]) who answered the target question,
+        with similarity, most similar first (ties by seeded hash)."""
+        skip = {str(person.get("id"))} | {str(x) for x in question.get("exclude_people") or ()}
         vec = self._vector(person, question)
         out = []
         for o in self.pool:
-            if str(o["id"]) == pid:
+            if str(o["id"]) in skip:
                 continue                                   # leakage guard: never the target person
-            ans = (o.get("answers") or {}).get(qid)
+            ans = self._answer(o, question)
             if ans in (None, ""):
                 continue                                   # complete cases on the target item only
             s, ov = self.similarity(vec, o)
@@ -161,7 +167,8 @@ class _Neighbours(Injector):
 
     @staticmethod
     def _answer(other: dict, question: dict) -> Any:
-        return other["answers"][question.get("id")]
+        qid = question.get("id")
+        return None if qid is None else _skeys(other.get("answers")).get(str(qid))
 
     def _profile(self, person: dict) -> str:
         return "; ".join(f"{str(k).replace('_', ' ')}: {v}" for k, v in self._fields(person).items())
@@ -326,9 +333,9 @@ class AnswerNeighbours(_Neighbours):
         if chosen:
             lines.append(f"\n{len(chosen)} other participants who answered most like you:")
             for n, (s, o) in enumerate(chosen, 1):
-                oa = o.get("answers") or {}
-                shared = [i for i in items if oa.get(i) not in (None, "")]
-                parts = "; ".join(f"{self._item(i)}: {_fmt(oa[i])}" for i in shared)
+                oa = _skeys(o.get("answers"))
+                shared = [i for i in items if oa.get(str(i)) not in (None, "")]
+                parts = "; ".join(f"{self._item(i)}: {_fmt(oa[str(i)])}" for i in shared)
                 lines.append(f"Participant {n} (agreement {round(100 * s)}%): {parts}; "
                              f"this question: {_fmt(self._answer(o, question))}")
         else:
