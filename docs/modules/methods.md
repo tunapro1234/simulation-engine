@@ -1002,7 +1002,8 @@ frame = merge_frames([t0, t2, t4b, mx])                              # one row p
 bt = transition_backtest(df, waves=[2009, 2017, 2021], **cols, methods={
     "t0": (wave_persistence, {}), "t2": (pooled_shrunk, {"k": 4}),
     "t4b": (same_regime, {"regime": PRES, "k": 4}),
-    "mx": (subgroup_mixture, {"subgroup": "pid3", "swap": {"Rep": "Dem", "Dem": "Rep"}})})
+    "mx": (subgroup_mixture, {"subgroup": "pid3", "swap": {"Rep": "Dem", "Dem": "Rep"},
+                              "swap_items": ["approval_pres", "economy_retro"]})})
 bt.by_wave      # wave x method mean 1-TVD
 bt.summary      # mean, sd, min over waves, waves led, mean rank
 ```
@@ -1015,14 +1016,17 @@ bt.summary      # mean, sd, min over waves, waves led, mean rank
   falls back to the last k waves and warns. `frame.attrs["waves"]` lists the waves pooled.
 - `subgroup_mixture`: segment s, item i -> sum_g w[s][g] P(answer | g, i). The conditionals are pooled over the
   last k waves at population level, or per segment x subgroup shrunk toward it with `m=`. Weights default to each
-  segment's subgroup composition in the last training wave. `weights="target"` uses the target wave's composition
-  (only when it is known before the answers, e.g. from the sample frame). A dict sets fixed weights, for every
-  segment or per segment. `swap` applies `role_swap` (out[g] = cond[mapping[g]]) to `swap_items`.
+  segment's subgroup composition in the last training wave. `weights="target"` uses the subgroup labels of the target
+  wave's rows, answered or not (only when they are known before the answers, e.g. from the sample frame). A dict sets
+  fixed weights, for every segment or per segment. `swap` applies `role_swap` (out[g] = cond[mapping[g]]) to
+  `swap_items`, which `swap` requires: swapping a stable item (party ID itself, religion) hands each party the
+  other's answers.
   `mixture_reweight(cond, weights)` and `role_swap(cond, mapping)` are the pure pieces.
 - `transition_backtest`: `methods` maps a name to `(predictor, kwargs)` (the column arguments, `target` and
   `method` are filled in) or to `callable(df, target) -> frame`. Every backtest wave must be in the data. `frame` is
-  the long frame over all waves. For one `evaluate` over several years, make `unit` unique (prefix the wave) and
-  cluster by year if year-to-year spread is the question.
+  the long frame over all waves. For one `evaluate` over several years, make `unit` unique
+  (prefix the wave). `block_col="wave"` puts the year-to-year spread into the CIs, but with three switch years
+  the card says the CI is not reliable across blocks (< 5); report `bt.by_wave` year by year instead.
 
 What was measured (D6, one run, [prova-d6] `SONUC-MAIN.md`, 2025 test, cell TVD, lower is better): copying 2024
 0.1315 (presidential approval alone 0.295); a backward-looking rule ladder 0.0892; party-ID-mediated 0.0872; the
