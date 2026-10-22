@@ -104,6 +104,51 @@ class TestLeakage(unittest.TestCase):
         self.assertEqual(all_text(a), all_text(b))
         self.assertEqual(a.meta["neighbours"], b.meta["neighbours"])
 
+    def test_target_answer_changes_nothing_anywhere(self):
+        """Every injector and basis: rewriting the target's answer to the target question (in the person and in
+        their own pool row) leaves the prompt and the neighbour set unchanged."""
+        for q in (Q_CAR, Q_NUM):
+            for name, kw in [("similar_respondents", {"basis": "both", "k": 4}),
+                             ("similar_respondents", {"basis": "answers", "k": 4, "format": "multi"}),
+                             ("neighbour_votes", {"basis": "both", "k": 4}),
+                             ("answer_neighbours", {"k": 4, "min_overlap": 1, "questions": QUESTIONS})]:
+                outs = []
+                for val in ("yes", "no", 3, 8):
+                    tgt = {**self.target, "answers": {**self.target["answers"], q["id"]: val}}
+                    pool = [tgt if p["id"] == "u3" else p for p in self.pool]
+                    outs.append(pi.get_injector(name, pool=pool, **kw)(tgt, q))
+                self.assertEqual({all_text(o) for o in outs}, {all_text(outs[0])}, (name, q["id"]))
+                self.assertEqual({tuple(o.meta["neighbours"]) for o in outs}, {tuple(outs[0].meta["neighbours"])})
+
+    def test_exclude_people_and_swap(self):
+        """question["exclude_people"] keeps those ids out; a swap-style render (donor's persona, scored person
+        excluded) then never shows the scored person's own answer."""
+        pool = people()
+        q = {**Q_CAR, "exclude_people": ["u5", "u7"]}
+        for name, kw in [("similar_respondents", {"k": 11}), ("neighbour_votes", {"k": 11}),
+                         ("answer_neighbours", {"k": 11, "min_overlap": 1})]:
+            inj = pi.get_injector(name, pool=pool, **kw)
+            got = inj(pool[1], q).meta["neighbours"]
+            self.assertEqual(len(got), 9, name)
+            self.assertFalse({"u1", "u5", "u7"} & set(got), name)
+            donors = pi.derangement([p["id"] for p in pool])
+            by_id = {p["id"]: p for p in pool}
+            for p in pool:
+                shown = inj(by_id[donors[p["id"]]], {**Q_CAR, "exclude_people": [p["id"]]}).meta["neighbours"]
+                self.assertNotIn(p["id"], shown, name)
+
+    def test_int_keys_and_ids(self):
+        """Answer keys and question ids compare as strings (as in known_answers): int keys still match."""
+        pool = [{**p, "answers": {i: v for i, v in enumerate(p["answers"].values())}} for p in people()]
+        for qid in (0, "0"):
+            q = {**Q_CAR, "id": qid}
+            v = pi.get_injector("neighbour_votes", pool=pool, k=5, basis="answers")(pool[1], q)
+            self.assertIn("were: yes 5, no 0.", v.system)
+            a = pi.get_injector("answer_neighbours", pool=pool, k=2)(pool[1], q)
+            self.assertEqual(len(a.meta["neighbours"]), 2)
+            self.assertIn("this question: yes", a.system)
+            self.assertNotIn("u1", a.meta["neighbours"])
+
     def test_int_ids_match(self):
         pool = [{**p, "id": i} for i, p in enumerate(people())]
         p = pi.get_injector("similar_respondents", pool=pool, k=11)({**pool[0], "id": "0"}, Q_CAR)
