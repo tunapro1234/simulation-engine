@@ -118,6 +118,18 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(summ["reward"], 0.5)
         self.assertEqual(summ["n_goal_opts"], 1)
 
+    def test_new_query_after_browser_back_is_a_search(self):
+        # the start page reached by browser back is not logged: results for other keywords follow a results / item page
+        self.assertEqual(wb.classify_step("search_results", "search_results", _sr(["mug"], 2)["content"],
+                                          _sr(["red", "mug"], 1)["content"]), "search")
+        self.assertEqual(wb.classify_step("item_page", "search_results", _item("P1")["content"],
+                                          _sr(["red", "mug"], 1)["content"]), "search")
+        self.assertEqual(wb.classify_step("item_page", "search_results", _item("P1")["content"],
+                                          _sr(["mug"], 1)["content"]), "back")
+        one = {"keywords": "mug", "page": "1", "asin": "P1", "options": {}}     # one-word query: bare string
+        self.assertEqual(wb.classify_step("item_page", "search_results", one, _sr(["mug"], 1)["content"]), "back")
+        self.assertEqual(wb.classify_step("search_results", "search_results", {"page": 1}, {"page": 1}), "other")
+
     def test_state_features_use_only_the_past(self):
         lines, want = _hand()
         st = wb.parse_trajectory(lines, "s")[0].set_index("t")
@@ -142,6 +154,8 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(len(names[1]), 5)
         self.assertIsNone(wb.map_uxagent_action({"type": "terminate", "name": None}))
         self.assertEqual(wb.map_uxagent_action({"type": "click", "name": "cart.proceed_to_checkout"}), "other")
+        for f in ("product_form.quantity", "shipping_information", "payment_info", "checkout_input"):
+            self.assertEqual(wb.map_uxagent_action({"type": "type_and_submit", "name": f}), "other")
 
     def test_session_summary_and_transitions(self):
         s = wb.session_summary([[A["search"], A["click_item"], A["buy"]], []])
@@ -301,6 +315,9 @@ class TestLLM(unittest.TestCase):
         self.assertEqual(wb.parse_action("probably: back").argmax(), A["back"])
         self.assertIsNone(wb.parse_action("no idea"))
         self.assertIsNone(wb.parse_action(None))
+        v = wb.parse_action('{"reason": "looks right", "buy": 0.8, "back": NaN, "other": Infinity}')
+        self.assertTrue(np.isfinite(v).all())
+        np.testing.assert_allclose(v, 0.8 * np.eye(K)[A["buy"]])
 
     def test_prompts_carry_only_the_past(self):
         t = WebShopNextAction()
