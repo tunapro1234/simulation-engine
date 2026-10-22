@@ -70,6 +70,8 @@ def write_goqa(d: str, seed: int = 1) -> None:
             sel[c] = [float(v) for v in p]
         if i == 0:
             sel["Elbonia"] = [0.0] * m
+        if i % 2:                                           # a second sample of Atlantis on half the questions
+            sel["Atlantis (Non-national sample)"] = sel["Atlantis"]
         opts = [f"Option {j}" for j in range(m - 1)] + ["DK/Refused"]
         if i == 1:
             opts[0] = 0.0                                   # numeric option label, as in some WVS rows
@@ -113,6 +115,32 @@ class TestDistances(unittest.TestCase):
         self.assertAlmostEqual(sp.js_distance([1, 0], [0, 1]), 1.0)
         self.assertAlmostEqual(sp.tvd([1, 0], [0, 1]), 1.0)
         self.assertEqual(sp.js_distance([.3, .7], [.3, .7]), 0.0)
+
+    def test_ordinal_wd_matches_reference_loop(self):
+        """Line-by-line port of SubPOP's ordinal_emd (sort, drop negatives, renormalise, cumulative loop)."""
+        def ref(l1, l2, ov):
+            if max(ov) == min(ov):
+                return float("nan")
+            ov, l1, l2 = zip(*sorted(zip(ov, l1, l2)))
+            k = next((i for i, v in enumerate(ov) if v >= 0), 0)
+            ov, l1, l2 = ov[k:], np.array(l1[k:]) / sum(l1[k:]), np.array(l2[k:]) / sum(l2[k:])
+            c1, c2 = np.cumsum(l1), np.cumsum(l2)
+            return sum(abs(c1[i] - c2[i]) * (ov[i + 1] - ov[i]) for i in range(len(l1) - 1)) / (max(ov) - min(ov))
+        rng = np.random.default_rng(3)
+        for _ in range(200):
+            m = int(rng.integers(3, 7))
+            ov = list(rng.choice([1.0, 1.5, 2.0, 3.0, 4.0, -1.0], m))
+            if len({v for v in ov if v >= 0}) < 2:
+                continue
+            p, q = rng.dirichlet(np.ones(m)), rng.dirichlet(np.ones(m))
+            self.assertAlmostEqual(sp.ordinal_wd(p, q, ov), ref(p, q, ov), places=12)
+
+    def test_degenerate_predictions(self):
+        # no mass on the ordered options, or NaN: scored as uniform (SubPOP's code would return NaN and drop the row)
+        u = sp.ordinal_wd([.2, .3, .5], [1 / 3] * 3, [1, 2, 3])
+        self.assertAlmostEqual(sp.ordinal_wd([.2, .3, .5], [0, 0, 0], [1, 2, 3]), u)
+        self.assertAlmostEqual(sp.ordinal_wd([.2, .3, .5], [np.nan, .5, .5], [1, 2, 3]), u)
+        self.assertAlmostEqual(sp.ordinal_wd([.2, .3, .5, 0], [0, 0, 0, 1], [1, 2, 3, -1]), u)
 
     def test_pairwise_matches_scalar(self):
         rng = np.random.default_rng(1)
@@ -175,20 +203,33 @@ class TestSubPOP(_Fixture):
         te = self.data.test
         preds = self.task.baselines(self.data)
         self.assertEqual(set(preds), {"uniform", "overall", "nearest_group"})
-        # nearest group of Female is Male (and vice versa); its prediction is Male's own row on that question
+        # default peers='blocks': Female's twin Male is in her block (SEX) and never her prediction
         for i, r in te.iterrows():
+            rows = te[(te.item == r["item"]) & (te.block != r.block)]
+            self.assertTrue(any(np.allclose(preds["nearest_group"][i], p) for p in rows["dist"]))
+        # peers='all': nearest group of Female is Male (and vice versa); its prediction is Male's own row
+        ta = sp.SubPOPOpinionQA(peers="all")
+        da = ta.load(self.root)
+        pa = ta.baselines(da)
+        for i, r in da.test.iterrows():
             twin = {"Female": "Male", "Male": "Female"}.get(r.group)
             if twin:
-                want = te[(te.item == r["item"]) & (te.group == twin)]["dist"].iloc[0]
-                np.testing.assert_allclose(preds["nearest_group"][i], want)
+                want = da.test[(da.test.item == r["item"]) & (da.test.group == twin)]["dist"].iloc[0]
+                np.testing.assert_allclose(pa["nearest_group"][i], want)
+        fa = ta.run(data=da)
+        self.assertLess(ta.score(fa, "nearest_group")["value"], ta.score(fa, "overall")["value"])
         # overall = the file's Overall row (mean of the five synthetic groups incl. AGE)
         x = te.iloc[0]
         self.assertEqual(len(x.overall), 4)
         fr = self.task.run(data=self.data)
         sc = {m: self.task.score(fr, m)["value"] for m in preds}
-        self.assertLess(sc["nearest_group"], sc["overall"])
-        self.assertLess(sc["overall"], sc["uniform"])
+        self.assertLess(sc["overall"], sc["uniform"])         # SEX's only other blocks lean +-1.2: no near twin
+        self.assertEqual(self.data.meta["peers"], "blocks")
         manual = np.mean([sp.ordinal_wd(t, p, o) for t, p, o in zip(fr.truth, fr.pred_overall, fr.ordinal)])
+        short = fr.assign(pred_short=pd.Series([p[:1] for p in fr.pred_uniform], dtype=object))
+        for m in ("wd", "tvd", "js_sim"):                    # a 1-vector would broadcast in tvd / js
+            with self.assertRaises(ValueError):
+                self.task.score(short, "short", m)
         self.assertAlmostEqual(sc["overall"], manual, places=12)
         r = self.task.score(fr, "uniform")
         self.assertEqual(r["n"], te["item"].nunique())
@@ -197,10 +238,25 @@ class TestSubPOP(_Fixture):
         self.assertEqual(len(self.task.score_all(fr)), 3 * 3)
 
     def test_others_and_no_self_read(self):
-        x = self.data.test.iloc[0]
-        o = self.task.others(self.data, x["item"], x.group)
-        self.assertNotIn(x.group, set(o.group))
-        self.assertEqual(len(o), (self.data.test.item == x["item"]).sum() - 1)
+        te = self.data.test
+        x = te[te.group == "Male"].iloc[0]
+        on_q = te[te.item == x["item"]]
+        o = self.task.others(self.data, x["item"], x.group, "SEX")
+        self.assertEqual(set(o.group), {"Democrat", "Republican"})       # Female (same block) hidden too
+        oa = sp.SubPOPOpinionQA(peers="all").load(self.root)
+        self.assertEqual(len(sp.OpinionDistTask.others(oa, x["item"], "Male")), len(on_q) - 1)
+        da = sp.SubPOPOpinionQA(setting="A").load(self.root)
+        self.assertEqual(len(sp.OpinionDistTask.others(da, x["item"], "Male")), 0)
+        with self.assertRaises(ValueError):
+            self.task.others(self.data, x["item"], "Nobody")
+        # the leak the block rule closes: Overall row = weighted sum of a block's groups, so with peers='all' a
+        # complete partition hands over the target by subtraction (here Overall is the mean of the five groups)
+        o61 = sp.SubPOPOpinionQA(peers="all", groups="61").load(self.root)
+        r = o61.test[(o61.test.item == x["item"])]
+        self.assertEqual(len(r), 5)
+        back = 5 * np.asarray(r.overall.iloc[0]) - np.sum([p for g, p in zip(r.group, r.dist) if g != "Male"], 0)
+        np.testing.assert_allclose(back, x.dist, atol=1e-6)
+        self.assertNotIn("SEX", set(o.block))
         # nearest_group never returns the target's own distribution
         D, N = sp.group_distances(self.data.train)
         self.assertTrue(np.allclose(np.diag(D.to_numpy()), 0))
@@ -246,12 +302,25 @@ class TestGlobal(_Fixture):
         self.assertNotIn(df[df.question == "Lonely question?"]["item"].iloc[0], items)
         self.assertEqual(len(items), N_Q)
 
-    def test_overall_is_leave_one_out(self):
+    def test_overall_is_leave_block_out(self):
         te = self.data.test
+        self.assertEqual(set(te.block[te.group.str.startswith("Atlantis")]), {"Atlantis"})
         for _, g in te.groupby("item"):
-            P = np.stack(g["dist"].to_numpy())
+            P, b = np.stack(g["dist"].to_numpy()), g["block"].to_numpy()
             for i, ov in enumerate(g["overall"]):
-                np.testing.assert_allclose(ov, np.delete(P, i, 0).mean(0))
+                np.testing.assert_allclose(ov, P[b != b[i]].mean(0))
+        # neither Atlantis sample is read for the other (it is a copy here), unless peers='all'
+        q = te[te.group == "Atlantis (Non-national sample)"]["item"].iloc[0]
+        self.assertNotIn("Atlantis", set(self.task.others(self.data, q, "Atlantis (Non-national sample)").block))
+        preds = self.task.baselines(self.data)
+        for i, r in te.iterrows():
+            if r.block == "Atlantis":
+                self.assertGreater(sp.tvd(preds["nearest_group"][i], r.dist), 1e-6)
+        ta = sp.GlobalOpinionQA(peers="all")
+        da = ta.load(self.root)
+        pa = ta.baselines(da)
+        i = int(np.flatnonzero((da.test.group == "Atlantis (Non-national sample)").to_numpy())[0])
+        self.assertLess(sp.tvd(pa["nearest_group"][i], da.test.dist[i]), 1e-9)
 
     def test_baselines(self):
         fr = self.task.run(data=self.data)
@@ -261,7 +330,8 @@ class TestGlobal(_Fixture):
         js = self.task.score(fr, "nearest_group", "js_sim")
         self.assertTrue(0 < js["value"] < 1)
         D, _ = sp.group_distances(self.data.train, ordinal=False)
-        self.assertEqual(D.loc["country:Borduria"].drop("country:Borduria").idxmin(), "country:Atlantis")
+        self.assertEqual(D.loc["country:Borduria"].drop(["country:Borduria", "country:Atlantis (Non-national sample)"])
+                         .idxmin(), "country:Atlantis")
 
 
 @unittest.skipUnless(os.environ.get("SIMENGINE_DATA"), "$SIMENGINE_DATA not set")
