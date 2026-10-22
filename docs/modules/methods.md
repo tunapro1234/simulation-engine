@@ -14,7 +14,7 @@ that combine an LLM prediction with a model learned from data.
 | `EarlyTestBayes`, `simulate_saving_calibrated`, ... | LLM prior + small early test, normal-normal Bayes on the log-odds ratio | **about 2.3x** impression saving at 100 impressions/arm, no gain at 800+ |
 | `ShrunkDeviation`, `ridge_to_prior`, `select_lambda`, `LLMFeatureGBDT`, `DevStack`, `BinaryCalibrator` | ways of letting an LLM prediction into a data model, tuned on dev | the LLM term mostly adds ~0 once a strong data baseline exists; tuning keeps it from hurting |
 | `TwinStack`, `pooled_logistic_oof`, `column_correlation`, ... | person-level digital twin: matrix completion + kNN + optional LLM column, ridge-stacked per column | Twin-2K-500 fair LLM-free baseline **0.342** corr; LLM adds +0.006 |
-| `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout`; `conjoint_hb.HBMNL`, `conjoint_hb.MixedLogit` | conditional multinomial logit for conjoint / discrete choice; hierarchical Bayes MNL (person posterior for known persons, population mixture for new ones) and an xlogit mixed-logit wrapper | 0.509 new-person accuracy on camera conjoint (HB 0.519); same person, new task MNL 0.482 vs **HB 0.715** |
+| `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout`; `conjoint.wtp`, `conjoint.simulate_shares`, `conjoint.elasticity`; `conjoint_hb.HBMNL`, `conjoint_hb.MixedLogit` | conditional multinomial logit for conjoint / discrete choice with Hessian standard errors, WTP (delta / person-cluster bootstrap CI), share simulation and price elasticities; hierarchical Bayes MNL (person posterior for known persons, population mixture for new ones) and an xlogit mixed-logit wrapper | 0.509 new-person accuracy on camera conjoint (HB 0.519); same person, new task MNL 0.482 vs **HB 0.715** |
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, `next_action.sessions` / `funnel`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank; step table -> session table (first-k prefix, outcome) and per-step funnel | 26.94 vs **31.60** exact next action on OPeRA |
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
@@ -62,12 +62,21 @@ twin = M.TwinStack(seed=0).fit(features, targets, llm=llm_twin_or_None, nominal=
 point, sample = twin.predict(test_person_ids)
 M.column_correlation(truth.loc[test_person_ids], point)
 
-# --- conjoint
+# --- conjoint (self-contained): long rows, one per (task, alternative); task ids unique across persons
+import numpy as np, pandas as pd
+rs = np.random.default_rng(0)
+rows = pd.DataFrame([{"person": t // 8, "task": t, "alternative": j, "price": rs.uniform(50, 150),
+                      "quality": rs.uniform(0, 3)} for t in range(2000) for j in (1, 2, 3)])
+u = -0.03 * rows["price"] + 0.9 * rows["quality"] + rs.gumbel(size=len(rows))
+rows["chosen"] = (u == u.groupby(rows["task"]).transform("max")).astype(int)
+train_rows, test_rows = M.person_holdout(rows)            # 20% of persons held out
 m = M.MNL(["price", "quality"], scale={"price": 100}).fit(train_rows)
-m.accuracy(test_rows), M.null_scores(test_rows)
+m.coef_, m.se_, m.accuracy(test_rows), M.null_scores(test_rows)
+from simengine.methods.conjoint import wtp
+wtp(m, price="price")                                     # true 0.9 / 0.03 = 30 price units; delta-method CI
 from simengine.methods.conjoint_hb import HBMNL
 hb = HBMNL(["price", "quality"], scale={"price": 100}, draws=1000, burn=1000, seed=0).fit(train_rows)
-hb.log_likelihood(known_person_new_tasks), hb.log_likelihood(new_person_rows, new=True)
+hb.log_likelihood(test_rows, new=True)                    # new persons; known persons: hb.predict_person(rows)
 
 # --- next action: steps (ex, session, step, action, user, page) + candidates (ex, key, features...)
 te, s = M.Markov2Baseline().fit(tr_steps, tr_cands).score(te_steps, te_cands)
@@ -335,14 +344,58 @@ model is dataset-specific.
 
 Port of `deney/kod/eval/baseline_choice.py`. Generic attributes (optionally scaled), plus ASCs for every
 alternative except the base one, feed an availability-masked softmax per task fitted with L-BFGS-B from zeros.
-The port adds the analytic gradient; the optimum is the same. `evaluate_mnl` reproduces the source evaluation:
-20% of persons held out, argmax accuracy, mean log-likelihood per task, against the null (equal share) and an
-ASC-only model.
+The port adds the analytic gradient and Hessian; the optimum is the same. `evaluate_mnl` reproduces the source
+evaluation: 20% of persons held out, argmax accuracy, mean log-likelihood per task, against the null (equal share)
+and an ASC-only model. Each arm has the source keys `acc` / `ll_per_task` and the aliases `accuracy` /
+`log_likelihood` (`null_scores` too). Coefficients come back at full precision; the source rounded them to 3
+decimals, which moved WTP by about 8%.
+
+Long format, one row per (task, alternative): `task` (unique across persons), `alternative` (the ASC key),
+`chosen` (0/1), optional `available` (default 1) and `person`, plus numeric attribute columns; aliases
+gorev_id / alternatif_id / secildi / mevcut / birey_id. `fit` checks it:
+
+- exactly one chosen row among the available rows of a task; more than one raises (usually task ids reused
+  across persons), none drops that task with a warning. Model "none of these" as its own alternative row
+  (attributes 0, its own ASC), not as a task without a chosen row;
+- attribute columns listed in `attrs` but absent raise and name the missing ones;
+- no attribute columns at all (`attrs=None` looks for `Feat*` columns) raises instead of silently fitting
+  constants only; pass `asc_only=True` for that baseline.
+
+Fitted: `coef_` (part-worths per *scaled* unit, then `ASC_<alt>`), `se_` and `cov_` (inverse analytic Hessian),
+`attrs_`, `alts_`, `base_alt_`, `converged_` (L-BFGS-B success), `loglik_`, `n_tasks_`.
 
 Measured on the Sawtooth camera conjoint **[deney 1.5]**: for a new person, holdout accuracy is 0.210 with equal
 shares, **0.509 with MNL** and 0.519 with hierarchical Bayes. For the same person on a new task, MNL scores 0.482
 against **0.715** for HB. Person-level tastes matter there and MNL ignores them. LLM arms did not beat MNL or HB on
 these sets.
+
+### Pricing recipe: personas -> choice tasks -> MNL -> WTP -> elasticity
+
+`examples/conjoint_pricing.py` runs the whole chain offline in about 2 s (FakeLLM with a hand-written responder).
+
+1. **Personas.** A panel of persona texts. For a dry run, give each hidden part-worths so the true WTP is known.
+2. **Choice tasks.** 3-4 random profiles per task (price on a grid, the other attributes at their levels) plus a
+   "none" alternative; 8-12 tasks per persona. Ask each persona each task and keep one `chosen` row per task.
+   Every (persona, task) gets its own `task` id.
+3. **MNL.** `m = MNL(attrs, scale={"price": 100}).fit(rows)`. Scale price to about unit size for the optimiser;
+   `coef_` / `se_` are per scaled unit, everything below undoes the scale.
+4. **WTP.** `wtp(m, price="price")` returns `wtp = -beta_attr / beta_price` (price units per raw attribute unit)
+   with `se`, `lo`, `hi` from the delta method on `cov_`. `ci="bootstrap", cluster="person", B=200, seed=0`
+   refits on persons drawn with replacement (a person drawn twice gets fresh task ids) and returns percentile
+   bounds; prefer it when persons answer many tasks, since the Hessian treats tasks as independent.
+   `attrs=["ASC_2"]` gives the price premium of an alternative over the base one.
+5. **Shares and elasticity.** `market` is a DataFrame with one row per alternative (attribute columns, plus
+   `alternative` when the model has ASCs). `simulate_shares(m, market)` gives logit shares;
+   `elasticity(m, market, price="price", price_grid=[0.9, 1.1])` returns `share`, `own`
+   (beta_p * p * (1 - s)), `cross` (matrix d log s_i / d log p_j, off-diagonal -beta_p * p_j * s_j) and `arc`
+   (midpoint arc elasticity when one price alone is multiplied by each grid factor).
+
+Pooled MNL gives one taste for everybody. Under heterogeneous tastes the part-worths are attenuated a little and
+the shares carry the IIA pattern (equal cross elasticities in a column); use `conjoint_hb.HBMNL` when
+person-level tastes matter.
+
+`games.wtp` / `games.WTP_PARAMS` are a different thing: "who to punish" in the Ertan, Page & Putterman
+punishment game, not willingness to pay.
 
 ### Hierarchical Bayes and mixed logit (`conjoint_hb.py`) [prova-d8]
 
