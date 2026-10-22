@@ -6,6 +6,10 @@ Port of sahne/kod/sahne/kosucu/ab.py (single test, controls, confidence check), 
                   context="push notification on Friday 18:00", truth={"A": 0.012, "B": 0.019})
     res["tendency"], res["confidence"]["low"], ab_frame(res)
 
+    # several creatives against a control: lift with paired CIs, pairwise win matrix
+    res = ab_test(personas, {"control": "...", "C1": "...", "C2": "..."}, llm=llm, reference="control")
+    res["lift"]["C1"]["abs"], res["pairwise_win_prob"]["C1"]["control"], ab_lift_frame(res)
+
 Order effect: half of the personas see the variants forward, half reversed; `position_effect` is reported.
 The result is a panel *tendency*, not a predicted winner: on 300 real Upworthy A/B tests an 8-persona Haiku
 panel matched the real winner 0.522 [0.468; 0.575] of the time (chance 0.50); see docs/modules/sim.md.
@@ -13,6 +17,7 @@ panel matched the real winner 0.522 [0.468; 0.575] of the time (chance 0.50); se
 from __future__ import annotations
 
 import warnings as _warnings
+from collections.abc import Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -32,7 +37,19 @@ P_THRESHOLD = 0.05
 
 
 def _variants(variants):
-    v = list(variants or [])
+    """list of {"id", "text"} dicts / plain texts (ids A, B, ...), or a mapping {id: text} (or {id: {"text": ..}})."""
+    if variants is None:
+        v = []
+    elif isinstance(variants, pd.DataFrame):
+        v = variants.to_dict("records")
+    elif isinstance(variants, Mapping):
+        v = [{"id": k, **x} if isinstance(x, Mapping) else {"id": k, "text": "" if x is None else str(x)}
+             for k, x in variants.items()]
+    elif isinstance(variants, (str, bytes, set, frozenset)) or not isinstance(variants, Iterable):
+        raise TypeError(f"variants must be a list of dicts / texts or a mapping {{id: text}}, "
+                        f"not {type(variants).__name__}")
+    else:
+        v = list(variants)
     if len(v) < 2:
         raise ValueError("variants needs at least 2 entries")
     out, seen = [], set()
@@ -79,11 +96,16 @@ def _arm(llm, personas, variants, context, question, lang, batch, tag, usage) ->
     return out
 
 
+def _score_matrix(cv: dict, ids: list, pids: list) -> np.ndarray:
+    """personas x variants score matrix, NaN where a score is missing."""
+    return np.array([[cv[p]["score"].get(i) if cv[p]["score"].get(i) is not None else np.nan for i in ids]
+                     for p in pids], dtype=float).reshape(len(pids), len(ids))
+
+
 def _summary(cv: dict, variants, pids, B: int) -> dict:
     ids = [v["id"] for v in variants]
     pids = [p for p in pids if p in cv]
-    M = np.array([[cv[p]["score"].get(i) if cv[p]["score"].get(i) is not None else np.nan for i in ids]
-                  for p in pids], dtype=float).reshape(len(pids), len(ids))
+    M = _score_matrix(cv, ids, pids)
     choices = [cv[p]["choice"] for p in pids if cv[p].get("choice") in ids]
     share = bootstrap_distribution([np.eye(len(ids))[ids.index(s)] for s in choices], B=B)
     win = bootstrap_win(M, B=B) if len(pids) else []
@@ -98,11 +120,75 @@ def _summary(cv: dict, variants, pids, B: int) -> dict:
     r = {"variants": var, "n": len(pids), "ranking": ranking, "winner": ranking[0] if ranking else None}
     if share["n"]:
         r["choice_winner"] = ids[int(np.argmax(share["value"]))]
+    r["pairwise_win_prob"] = _pairwise_win(M, ids, B)
     if len(ranking) >= 2:
         a, b = ids.index(ranking[0]), ids.index(ranking[1])
         r["sign_test"] = {"a": ranking[0], "b": ranking[1],
                           **sign_test([x for x in (M[:, a] - M[:, b]) if not np.isnan(x)])}
     return r
+
+
+def _paired(M, j: int, k: int) -> tuple[np.ndarray, np.ndarray]:
+    """Scores of columns j and k on the personas that scored both."""
+    if not len(M):
+        return np.zeros(0), np.zeros(0)
+    m = ~np.isnan(M[:, j]) & ~np.isnan(M[:, k])
+    return M[m, j], M[m, k]
+
+
+def _boot_idx(n: int, B: int, seed: int = 0) -> np.ndarray:
+    return np.random.default_rng(seed).integers(0, n, size=(max(1, B), n))
+
+
+def _pairwise_win(M, ids, B: int) -> dict:
+    """{a: {b: P(mean score of a > mean score of b)}}: personas resampled (paired), ties split. Unlike `win_prob`
+    (P(a has the highest mean of all variants)) it is defined for every pair, e.g. a creative vs the control."""
+    out = {a: {} for a in ids}
+    for j, a in enumerate(ids):
+        for k in range(j + 1, len(ids)):
+            b = ids[k]
+            x, y = _paired(M, j, k)
+            if not len(x):
+                out[a][b] = out[b][a] = None
+                continue
+            d = (x - y)[_boot_idx(len(x), B)].mean(axis=1)
+            p = float(np.mean(d > 0) + 0.5 * np.mean(d == 0))
+            out[a][b], out[b][a] = p, 1 - p
+    return out
+
+
+def _lift(cv: dict, variants, pids, reference: str, B: int, alpha: float = 0.05) -> dict:
+    """Per non-reference variant: paired mean score difference vs `reference` (abs, 1-10 points) and relative to
+    the reference mean (rel), each with a paired per-persona percentile bootstrap CI; sign test p on the paired
+    differences; prob_better = bootstrap P(mean difference > 0), ties split."""
+    ids = [v["id"] for v in variants]
+    pids = [p for p in pids if p in cv]
+    M = _score_matrix(cv, ids, pids)
+    r = ids.index(reference)
+    q = (alpha / 2, 1 - alpha / 2)
+    out = {}
+    for j, i in enumerate(ids):
+        if i == reference:
+            continue
+        x, y = _paired(M, j, r)
+        n = len(x)
+        row = {"variant": i, "reference": reference, "n": n, "mean": None, "reference_mean": None,
+               "abs": None, "abs_ci": [None, None], "rel": None, "rel_ci": [None, None], "prob_better": None,
+               "p": None, "p_method": "sign_test", "sign_test": sign_test((x - y).tolist())}
+        row["p"] = row["sign_test"]["p"]
+        if n:
+            idx = _boot_idx(n, B)
+            bx, by = x[idx].mean(axis=1), y[idx].mean(axis=1)
+            d = bx - by
+            row.update(mean=float(x.mean()), reference_mean=float(y.mean()), abs=float(x.mean() - y.mean()),
+                       abs_ci=[float(np.quantile(d, q[0])), float(np.quantile(d, q[1]))],
+                       prob_better=float(np.mean(d > 0) + 0.5 * np.mean(d == 0)))
+            if y.mean() > 0 and np.all(by > 0):
+                rel = d / by
+                row.update(rel=float(x.mean() / y.mean() - 1),
+                           rel_ci=[float(np.quantile(rel, q[0])), float(np.quantile(rel, q[1]))])
+        out[i] = row
+    return out
 
 
 def _direction(summary: dict, truth, ids) -> dict | None:
@@ -131,7 +217,8 @@ def _direction(summary: dict, truth, ids) -> dict | None:
 
 def confidence_check(summaries: dict, ids: list[str] | None = None) -> dict:
     """How robust the panel tendency is (not a winner claim). Low when any of: top two preference shares within
-    ±10 points, sign test p > 0.05, or a control arm (no_persona / persona_swap) picks a different winner."""
+    ±10 points, sign test p > 0.05, the score winner differs from the forced-choice winner (`choice_disagrees`),
+    or a control arm (no_persona / persona_swap) picks a different winner."""
     g = summaries.get("persona") or {}
     reasons = []
     shares = sorted([v["share"] for v in (g.get("variants") or {}).values() if v.get("share") is not None],
@@ -144,6 +231,11 @@ def confidence_check(summaries: dict, ids: list[str] | None = None) -> dict:
     if st and st.get("p") is not None and st["p"] > P_THRESHOLD:
         reasons.append({"code": "sign_test_p", "p": st["p"], "en": f"sign test p = {st['p']:.2f} > {P_THRESHOLD}",
                         "tr": f"işaret testi p = {st['p']:.2f} > {P_THRESHOLD}"})
+    cw = g.get("choice_winner")
+    if g.get("winner") and cw and cw != g["winner"]:
+        reasons.append({"code": "choice_disagrees", "winner": g["winner"], "choice_winner": cw,
+                        "en": f"highest mean score is {g['winner']} but most personas chose {cw}",
+                        "tr": f"en yüksek ortalama puan {g['winner']}, ama personaların çoğu {cw} seçti"})
     for arm in ("no_persona", "persona_swap"):
         o = summaries.get(arm)
         if o and o.get("n") and o.get("winner") and g.get("winner") and o["winner"] != g["winner"]:
@@ -156,8 +248,20 @@ def confidence_check(summaries: dict, ids: list[str] | None = None) -> dict:
 
 def ab_test(personas, variants, *, llm, context: str = "", question: str | None = None, truth=None,
             test_id: str = "ab", lang: str | None = None, batch: int = 10, controls=None, B: int = 1000,
-            on_event=None) -> dict:
-    """PAARS A/B panel on one test. `truth`: {variant: CTR/conversion} or the winning id (optional)."""
+            on_event=None, reference: str | None = None) -> dict:
+    """PAARS A/B panel on one test. `truth`: {variant: CTR/conversion} or the winning id (optional).
+
+    variants: list of {"id", "text"} dicts or plain texts (ids A, B, ...), or a mapping {id: text}.
+    controls: persona-control arms (no_persona, persona_swap; default both), not a control creative; for a
+        control creative pass it as a variant and name it in `reference`.
+    reference: a variant id (e.g. "control"). The result then has `lift` {variant: {abs, abs_ci, rel, rel_ci,
+        prob_better, p, n, ...}} for every other variant vs the reference (paired per-persona bootstrap, sign
+        test p); `ab_lift_frame` turns it into a table. None (default) leaves the result as before.
+    Result keys: `tendency` = variant with the highest mean score; `winner` holds the same value (alias kept for
+    compatibility; prefer `tendency`, it is a panel tendency, not a predicted winner). `overall.choice_winner` is
+    the forced-choice winner. `win_prob` (per variant) = P(variant has the highest mean of all variants), so it is
+    near 0 for a weak control; `pairwise_win_prob` {a: {b: P(mean a > mean b)}} (personas resampled, paired) is
+    defined for every pair and is the one to use as a pairwise prior (e.g. EarlyTestBayes)."""
     em = Emitter(on_event, "ab")
     ps = as_personas(personas)
     vs = _variants(variants)
@@ -165,6 +269,8 @@ def ab_test(personas, variants, *, llm, context: str = "", question: str | None 
     question = question or DEFAULT_QUESTION.get(lang, DEFAULT_QUESTION["en"])
     seg = {p.pid: p.seg for p in ps}
     ids = [v["id"] for v in vs]
+    if reference is not None and str(reference) not in ids:
+        raise ValueError(f"reference {reference!r} is not a variant id ({ids})")
     usage = Usage()
 
     em.stage("persona", n=len(ps))
@@ -206,10 +312,12 @@ def ab_test(personas, variants, *, llm, context: str = "", question: str | None 
         "question": question, "n_personas": len(pids), "n_answered": len(main),
         "variants": [{"id": v["id"], "text": v["text"]} for v in vs],
         "overall": overall, "winner": overall["winner"], "segment_summary": seg_summary,
+        "pairwise_win_prob": overall["pairwise_win_prob"],
         "arms": {arm: {"winner": o["winner"], "n": o["n"],
                        "score": {i: o["variants"][i]["score"] for i in ids},
                        "share": {i: o["variants"][i]["share"] for i in ids},
-                       "win_prob": {i: o["variants"][i]["win_prob"] for i in ids}}
+                       "win_prob": {i: o["variants"][i]["win_prob"] for i in ids},
+                       "pairwise_win_prob": o["pairwise_win_prob"]}
                  for arm, o in summaries.items()},
         "position_effect": {"description": "score of the variant shown first minus shown last (first and last "
                                            "variant)", **bootstrap_ci(diff, B=B)},
@@ -219,6 +327,9 @@ def ab_test(personas, variants, *, llm, context: str = "", question: str | None 
         "controls": {"arms": ctrl, "plan": plan, "answers": {k: v for k, v in arms.items() if k != "persona"}},
         "segments": seg, "warnings": warnings, "usage": usage.as_dict(),
     }
+    if reference is not None:
+        out["reference"] = str(reference)
+        out["lift"] = _lift(main, vs, pids, str(reference), B)
     d = _direction(overall, truth, ids)
     if d:
         out["direction_correct"] = d["direction_correct"]
@@ -230,9 +341,13 @@ def ab_test(personas, variants, *, llm, context: str = "", question: str | None 
 
 
 def ab_frame(result: dict, truth=None) -> pd.DataFrame:
-    """EvalFrame, one row per variant (item = test). truth: {variant: CTR} or winning id (-> 1/0).
+    """EvalFrame, one row per variant (aggregated over personas). truth: {variant: CTR} or winning id (-> 1/0).
+    unit = "<test_id>|<variant>" ("ab|A" with the default test_id); item and group = test_id; segment = "all".
+    There is no persona column: per-persona answers are in result["answers"].
     Columns on a 0-1 scale: pred_score ((mean 1-10 score - 1) / 9), pred_share (preference share), pred_win
-    (bootstrap win probability), pred_<control arm> (control arm mean score, same scaling)."""
+    (bootstrap win probability). pred_no_persona / pred_persona_swap (same scaling) are persona-control arms,
+    not competing methods: leave them out of the method list (evaluate(..., methods=["score", ...])) or declare
+    them as baselines (evaluate(..., unlabeled_baselines=["no_persona", "persona_swap"]))."""
     def unit01(x):
         x = to_number(x)
         return np.nan if x is None else (x - 1) / 9
@@ -263,6 +378,22 @@ def ab_frame(result: dict, truth=None) -> pd.DataFrame:
         r.update({"segment": ALL, "item": test, "group": test})
         rows.append(r)
     return pd.DataFrame(rows)
+
+
+def ab_lift_frame(result: dict) -> pd.DataFrame:
+    """ab_test(..., reference=...) result -> one row per non-reference variant: variant, reference, n, mean,
+    reference_mean, abs, abs_low, abs_high, rel, rel_low, rel_high, prob_better, p. Empty without `lift`."""
+    cols = ["variant", "reference", "n", "mean", "reference_mean", "abs", "abs_low", "abs_high", "rel", "rel_low",
+            "rel_high", "prob_better", "p"]
+    rows = []
+    for v, x in (result.get("lift") or {}).items():
+        rows.append({"variant": v, "reference": x.get("reference"), "n": x.get("n"), "mean": x.get("mean"),
+                     "reference_mean": x.get("reference_mean"), "abs": x.get("abs"),
+                     "abs_low": (x.get("abs_ci") or [None, None])[0], "abs_high": (x.get("abs_ci") or [None, None])[1],
+                     "rel": x.get("rel"), "rel_low": (x.get("rel_ci") or [None, None])[0],
+                     "rel_high": (x.get("rel_ci") or [None, None])[1], "prob_better": x.get("prob_better"),
+                     "p": x.get("p")})
+    return pd.DataFrame(rows, columns=cols)
 
 
 def paars_decision(scores: dict, threshold: float = 0.65) -> dict:
@@ -374,4 +505,4 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
     return out
 
 
-__all__ = ["ab_test", "ab_frame", "ab_many", "confidence_check", "paars_decision", "DEFAULT_QUESTION"]
+__all__ = ["ab_test", "ab_frame", "ab_lift_frame", "ab_many", "confidence_check", "paars_decision", "DEFAULT_QUESTION"]
