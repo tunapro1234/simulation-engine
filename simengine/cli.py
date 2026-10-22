@@ -12,9 +12,13 @@
     simengine bench run gss opinionqa_groups:split=dev --data-root /path/to/catalogue
     simengine loop loop.json                                                   # research loop from a JSON config
     simengine demo --out runs/demo                                             # offline end-to-end, FakeLLM
+    simengine demo --lang en                                                   # English headline (dot decimals)
 
 Everything here is offline except `loop` with an LLM proposer ("claude-p" / "claude") and bench data you
 point it at. No command makes a network call by default.
+
+A missing file, an unknown task / column or a bad value ends with one line `simengine: error: <msg>` on stderr
+and exit code 2; set SIMENGINE_DEBUG=1 to get the traceback instead.
 """
 from __future__ import annotations
 
@@ -22,6 +26,8 @@ import argparse
 import importlib
 import importlib.util
 import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -58,6 +64,60 @@ def _write_outputs(report: dict, out: Path, *, dashboard_title: str | None = Non
     ev.card(report, paths["card_json"])
     ev.dashboard([report], paths["dashboard"], title=dashboard_title or report.get("baslik") or "Evidence")
     return {k: str(v) for k, v in paths.items()}
+
+
+def _pred_columns(df) -> list[str]:
+    """pred_* columns of a table, Turkish tahmin_* aliases shown under their English name."""
+    from .types import PRED_ALIASES, PRED_PREFIX
+    out = []
+    for c in df.columns:
+        if not isinstance(c, str):
+            continue
+        for p in (PRED_PREFIX, *PRED_ALIASES):
+            if c.startswith(p):
+                out.append(PRED_PREFIX + c[len(p):])
+                break
+    return out
+
+
+def _check_methods(df, named: Sequence[tuple[str, str | None]]) -> None:
+    """Every (flag, method) must have a pred_<method> column; else ValueError naming the available ones."""
+    from .types import PRED_ALIASES, PRED_PREFIX
+    avail = _pred_columns(df)
+    for flag, m in named:
+        if not m:
+            continue
+        for p in (PRED_PREFIX, *PRED_ALIASES):
+            if m.startswith(p):
+                m = m[len(p):]
+                break
+        if PRED_PREFIX + m not in avail:
+            raise ValueError(f"no column {PRED_PREFIX}{m}; available: {', '.join(avail) or 'none'} ({flag})")
+
+
+def _layout(s: str) -> str:
+    """Re-indent a stripped BenchTask.layout: entries flush left, continuation lines keep their offset."""
+    lines = (s or "").splitlines()
+    rest = [ln for ln in lines[1:] if ln.strip()]
+    if not rest:
+        return s
+    # the first line lost its class-body indent to .strip(); sibling '<root>/...' entries carry it
+    ind = min((len(ln) - len(ln.lstrip()) for ln in rest if ln.lstrip().startswith("<")), default=4)
+    return "\n".join(lines[:1] + [ln[min(ind, len(ln) - len(ln.lstrip())):] for ln in lines[1:]])
+
+
+_EN_COLUMNS = (("tahmin_", "pred_"), ("taban_rastgele", "baseline_random"), ("taban_marjinal", "baseline_marginal"),
+               ("taban_demografi", "baseline_demographic"), ("taban_", "baseline_"))
+
+
+def _headline(s: dict, lang: str) -> str:
+    """Printed headline: Turkish summary()['headline'], or for en headline_en with internal column names in English."""
+    if lang != "en":
+        return s.get("headline") or ""
+    line = s.get("headline_en") or ""
+    for tr, en in _EN_COLUMNS:
+        line = re.sub(r"\b" + tr, en, line)
+    return line
 
 
 def _parse_value(v: str) -> Any:
@@ -150,6 +210,8 @@ def cmd_evaluate(a) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     df = _read_table(a.table)
+    _check_methods(df, [("--ours", a.ours), ("--raw", a.raw)]
+                   + [("--methods", m) for m in _csv_list(a.methods) or []])
     mmr = a.multiplier_max_rows
     extra = {} if mmr is None else {"multiplier_max_rows": (mmr or None)}
     if a.noise_ceiling_repeats is not None:
@@ -182,7 +244,7 @@ def cmd_evaluate(a) -> int:
     out = Path(a.out or Path("runs") / (Path(a.table).with_suffix("").name + "-evidence"))
     paths = _write_outputs(report, out, lang=a.lang)
     s = ev.summary(report)
-    print(s.get("headline_en") if a.lang == "en" else s.get("headline", ""))
+    print(_headline(s, a.lang))
     print(f"badge: {s.get('badge')} (primary metric: {s.get('primary_metric')})")
     if s.get("badge") == "awaiting truth" and not a.prereg:
         print("note: awaiting truth and no --prereg: seal the predictions first (se.seal(...)) and pass the "
@@ -237,12 +299,14 @@ def cmd_bench(a) -> int:
                 d = t.describe()
                 acc = "\n".join(f"  {k}: {v}" for k, v in (d.get("accepted_options") or {}).items()) or "  (none)"
                 print(f"## {name} ({d['kind']})\nmetrics: {', '.join(d['metrics'])}\n"
-                      f"options (pass as {name}:key=value,...):\n{acc}\nlayout:\n{d['layout']}\n")
+                      f"options (pass as {name}:key=value,...):\n{acc}\nlayout:\n{_layout(d['layout'])}\n")
             else:
                 print(f"{name:20s} {t.kind:13s} metrics: {', '.join(m.name for m in t.metrics)}")
         return 0
     if a.bench_cmd == "describe":
-        print(json.dumps(bench.get(a.task).describe(), ensure_ascii=False, indent=1))
+        d = bench.get(a.task).describe()
+        d["layout"] = _layout(d.get("layout") or "")
+        print(json.dumps(d, ensure_ascii=False, indent=1))
         return 0
     tasks = [_task_spec(s) for s in (a.tasks or bench.list())]
     for t in tasks:                       # fail early and readably on an unknown task or option
@@ -300,11 +364,12 @@ def cmd_loop(a) -> int:
 
 
 def run_demo(out: str | Path = "runs/demo", *, n: int = 120, seed: int = 0, B: int = 300,
-             verbose: bool = True) -> dict:
+             verbose: bool = True, lang: str = "mixed") -> dict:
     """Offline end-to-end run: synthetic survey table -> personas -> simulated Likert survey (FakeLLM, with
     no-persona and persona-swap controls) -> EvalFrame with a label-free persistence baseline -> evidence
     report, Markdown card and HTML dashboard. FakeLLM answers are hashed noise: the card is expected to come out
-    inconclusive, which is the point of the demo (the ladder catches a method with no signal)."""
+    inconclusive, which is the point of the demo (the ladder catches a method with no signal).
+    lang="en": English card and headline (summary()['headline_en'], dot decimals); "mixed" keeps the Turkish one."""
     import numpy as np
     import pandas as pd
 
@@ -337,13 +402,13 @@ def run_demo(out: str | Path = "runs/demo", *, n: int = 120, seed: int = 0, B: i
     report = ev.evaluate(frame, title="simengine demo (FakeLLM, synthetic)", ours="score", task="continuous",
                          unlabeled_baselines=["persistence"], B=B, B_aggregate=min(B, 200), seed=seed,
                          dataset="synthetic", limits=["FakeLLM answers are hashed noise, not a measurement"])
-    paths = _write_outputs(report, Path(out), dashboard_title="simengine demo")
+    paths = _write_outputs(report, Path(out), dashboard_title="simengine demo", lang=lang)
     frame.to_csv(Path(out) / "frame.csv", index=False)
     paths["frame"] = str(Path(out) / "frame.csv")
     s = ev.summary(report)
     if verbose:
         print(f"personas: {len(panel)}  LLM calls: {len(llm.calls)}  rows: {len(frame)}")
-        print(s.get("headline", ""))
+        print(_headline(s, lang))
         print(f"badge: {s.get('badge')}")
         for k, v in paths.items():
             print(f"{k}: {v}")
@@ -351,21 +416,42 @@ def run_demo(out: str | Path = "runs/demo", *, n: int = 120, seed: int = 0, B: i
 
 
 def cmd_demo(a) -> int:
-    run_demo(a.out, n=a.n, seed=a.seed, B=a.B)
+    run_demo(a.out, n=a.n, seed=a.seed, B=a.B, lang=a.lang)
     return 0
 
 
 # ------------------------------------------------------------------ parser
 
+EPILOG = """\
+examples:
+  simengine bench list
+  simengine bench describe <task>
+  simengine bench run <task> --out x.csv
+  simengine evaluate frame.csv --ours x --lang en
+  simengine demo --lang en
+
+errors: a missing file, unknown task or column, or bad value prints one line `simengine: error: <msg>` and
+exits 2 (SIMENGINE_DEBUG=1 shows the traceback)."""
+
+LANG_HELP = ("mixed (default) = English card with the research Turkish labels and the Turkish headline "
+             "(comma decimals); en = English card and English headline (dot decimals)")
+
+
+def _primary_names() -> str:
+    from .evidence.api import METRIC_TO_INTERNAL
+    return ", ".join(sorted(k for k in METRIC_TO_INTERNAL if k != "bias"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     from . import __version__
-    p = argparse.ArgumentParser(prog="simengine", description="Population simulation + evidence pipeline.")
+    p = argparse.ArgumentParser(prog="simengine", description="Population simulation + evidence pipeline.",
+                                epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"simengine {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     e = sub.add_parser("evaluate", help="EvalFrame table (csv/tsv/parquet/jsonl) -> report.json, card.md, "
                                         "dashboard.html")
-    e.add_argument("table")
+    e.add_argument("table", help="EvalFrame file: truth + pred_<method> columns (csv, tsv, parquet, json, jsonl)")
     e.add_argument("--ours", help="our method (column pred_<ours>); name it before looking at results")
     e.add_argument("--raw", help="raw / unhybridised method, e.g. the plain LLM arm")
     e.add_argument("--task", choices=["binary", "multiclass", "distribution", "continuous", "ab", "forecast"],
@@ -373,9 +459,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "primary wmape, no persona/human-ceiling/worth-N-humans blocks")
     e.add_argument("--primary", help="primary metric, e.g. auc, accuracy, pearson, wasserstein, wmape (default per "
                    "task: binary accuracy, or macro_f1 when the majority class > 60%%; forecast wmape; see "
-                   "docs/modules/evidence.md). bias is reported but refused as primary (signed)")
-    e.add_argument("--title")
-    e.add_argument("--dataset")
+                   "docs/modules/evidence.md). bias is reported but refused as primary (signed). Accepted: "
+                   + _primary_names().replace("%", "%%"))
+    e.add_argument("--title", help="report title on the card and dashboard (default: the table file name)")
+    e.add_argument("--dataset", help="dataset name recorded in the report (free text)")
     e.add_argument("--methods", help="comma list of methods to include (default: every pred_* column)")
     e.add_argument("--unlabeled-baselines", help="comma list of label-free prediction columns (baseline rungs)")
     e.add_argument("--baselines-oof", dest="baselines_oof",
@@ -414,21 +501,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="blind twin of ours (no names/titles), e.g. ours_blind: paired ours − blind row")
     e.add_argument("--compare", action="append", metavar="A:B",
                    help="registered comparison, repeatable: A:B (paired A − B), A (A against 0), A:B:label")
-    e.add_argument("--B", type=int, default=1000)
-    e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200)
-    e.add_argument("--seed", type=int, default=0)
+    e.add_argument("--B", type=int, default=1000, help="bootstrap resamples for the metric CIs (default 1000)")
+    e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200,
+                   help="bootstrap resamples for the slower aggregate blocks, e.g. the multiplier (default 200)")
+    e.add_argument("--seed", type=int, default=0, help="random seed for bootstrap and subsampling (default 0)")
     e.add_argument("--no-multiplier", action="store_true", help="skip the PPI++ multiplier block (faster)")
     e.add_argument("--multiplier-max-rows", dest="multiplier_max_rows", type=int,
                    help="single-item frames above this many rows compute the multiplier on a fixed-seed subsample "
                         "(default 2000; 0 = whole table, slow)")
     e.add_argument("--out", help="output directory (default runs/<table>-evidence)")
     e.add_argument("--lang", choices=["mixed", "en"], default="mixed",
-                   help="card language: mixed (English + research Turkish labels) or en")
+                   help="card and printed headline language: " + LANG_HELP)
     e.set_defaults(func=cmd_evaluate)
 
     sl = sub.add_parser("seal", help="seal a prediction file before the truth is opened (hash chain)")
     sl.add_argument("predictions", help="prediction table (csv/tsv/parquet/jsonl)")
-    sl.add_argument("description")
+    sl.add_argument("description", help="what is sealed, in words (stored in the chain record), e.g. "
+                                        "'test predictions, hybrid v2'")
     sl.add_argument("--registry", default=".onkayit",
                     help="registry directory (default .onkayit; git-ignored, keep it out of the repo for licensed "
                          "data); pass the same directory to evaluate --prereg")
@@ -440,31 +529,39 @@ def build_parser() -> argparse.ArgumentParser:
     sl.set_defaults(func=cmd_seal)
 
     c = sub.add_parser("card", help="report.json -> Markdown card (or card dict for *.json), optional dashboard")
-    c.add_argument("report")
-    c.add_argument("-o", "--output")
+    c.add_argument("report", help="report.json written by evaluate (or se.evidence.save_json)")
+    c.add_argument("-o", "--output", help="write the card here: *.md = Markdown, *.json = card dict "
+                                          "(default: print Markdown to stdout)")
     c.add_argument("--dashboard", help="also write an HTML dashboard here")
-    c.add_argument("--lang", choices=["mixed", "en"], default="mixed")
+    c.add_argument("--lang", choices=["mixed", "en"], default="mixed", help="card language: " + LANG_HELP)
     c.set_defaults(func=cmd_card)
 
     b = sub.add_parser("bench", help="benchmark tasks with LLM-free baselines")
-    bs = b.add_subparsers(dest="bench_cmd", required=True)
-    bl = bs.add_parser("list")
-    bl.add_argument("-v", "--verbose", action="store_true", help="also print file layouts")
-    bd = bs.add_parser("describe")
-    bd.add_argument("task")
-    br = bs.add_parser("run")
+    bs = b.add_subparsers(dest="bench_cmd", required=True, metavar="{list,describe,run}")
+    bl = bs.add_parser("list", help="registered tasks with kind and metrics",
+                       description="List the registered benchmark tasks: name, kind and metrics (-v: options and "
+                                   "the expected data layout).")
+    bl.add_argument("-v", "--verbose", action="store_true", help="also print options and file layouts")
+    bd = bs.add_parser("describe", help="one task as JSON: layout, source, metrics, accepted options",
+                       description="Print one task's description as JSON: data layout under the catalogue root, "
+                                   "source, metrics and the options accepted as name:key=value.")
+    bd.add_argument("task", help="task name, see `simengine bench list`")
+    br = bs.add_parser("run", help="run tasks with their LLM-free baselines -> Markdown table (+ CSV)",
+                       description="Run benchmark tasks with their LLM-free baselines and print a Markdown table; "
+                                   "tasks whose data is missing are skipped and listed on stderr.")
     br.add_argument("tasks", nargs="*", help="task names, optionally name:key=val,key=val (default: all)")
     br.add_argument("--data-root", help="dataset catalogue root (else $SIMENGINE_DATA)")
-    br.add_argument("--B", type=int, default=1000)
-    br.add_argument("--seed", type=int, default=42)
-    br.add_argument("--primary-only", action="store_true")
+    br.add_argument("--B", type=int, default=1000, help="bootstrap resamples for the CIs (default 1000)")
+    br.add_argument("--seed", type=int, default=42, help="random seed (default 42)")
+    br.add_argument("--primary-only", action="store_true", help="score and print only each task's primary metric")
     br.add_argument("--out", help="write the long table as CSV")
     b.set_defaults(func=cmd_bench)
 
     lp = sub.add_parser("loop", help="run a research loop from a JSON config")
     lp.add_argument("config", help='{"runner": "mod:fn" | "file.py:fn", "space": {"params": {...}, "defaults": '
                                    '{...}}, "loop": {Loop kwargs}}')
-    lp.add_argument("--workdir")
+    lp.add_argument("--workdir", help="state directory (state.json, JOURNAL.md, results.tsv); an existing one "
+                                      "is resumed. Overrides loop.workdir in the config")
     lp.add_argument("--proposer", help="random | grid | greedy | halving | claude-p | claude")
     lp.add_argument("--max-turns", type=int)
     lp.add_argument("--no-finalize", action="store_true", help="do not run the test split")
@@ -472,17 +569,37 @@ def build_parser() -> argparse.ArgumentParser:
     lp.set_defaults(func=cmd_loop)
 
     d = sub.add_parser("demo", help="offline end-to-end demo on synthetic data (FakeLLM)")
-    d.add_argument("--out", default="runs/demo")
-    d.add_argument("--n", type=int, default=120)
-    d.add_argument("--seed", type=int, default=0)
-    d.add_argument("--B", type=int, default=300)
+    d.add_argument("--out", default="runs/demo", help="output directory (default runs/demo)")
+    d.add_argument("--n", type=int, default=120, help="synthetic respondents / personas (default 120)")
+    d.add_argument("--seed", type=int, default=0, help="random seed for the data and FakeLLM (default 0)")
+    d.add_argument("--B", type=int, default=300, help="FakeLLM samples per question and bootstrap resamples "
+                                                       "(default 300)")
+    d.add_argument("--lang", choices=["mixed", "en"], default="mixed", help="card and printed headline language: "
+                                                                            + LANG_HELP)
     d.set_defaults(func=cmd_demo)
     return p
 
 
+def _error_text(e: BaseException) -> str:
+    if isinstance(e, FileNotFoundError) and e.filename:
+        msg = f"no such file: {e.filename}"
+    elif isinstance(e, KeyError) and len(e.args) == 1 and isinstance(e.args[0], str):
+        k = e.args[0]
+        msg = k if " " in k else f"missing key {k!r}"
+    else:
+        msg = str(e) or type(e).__name__
+    return " ".join(msg.split())          # one line
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        if os.environ.get("SIMENGINE_DEBUG") == "1":
+            raise
+        print(f"simengine: error: {_error_text(e)}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover
