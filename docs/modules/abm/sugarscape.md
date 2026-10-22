@@ -76,7 +76,71 @@ run.calls, run.invalid, run.conflicts, run.stopped
 
 ## Measured numbers
 
-To be filled in from the run below.
+Command, run once on 22 Oct 2026 (offline, `nice -n 19`, 1,041 s wall on a shared machine):
+
+```bash
+PYTHONPATH=. python examples/sugarscape_measure.py <transcribed sugar-map grid>   # without the argument row A' is skipped
+```
+
+All runs below use 10 seeds unless noted. Each cell is mean (sd over seeds).
+
+**A. Wealth distribution, rules ({G1}, {M, R[60,100]}), 250 agents, Gini of sugar holdings by step**
+
+| map | t=0 | 10 | 25 | 50 | 100 | 150 | 200 | 300 | 400 | 500 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| parametric (default) | 0.236 (0.010) | 0.329 | 0.368 | 0.384 | 0.510 (0.013) | 0.452 | 0.478 | 0.462 | 0.478 | 0.483 (0.013) |
+| transcribed book map, read at runtime | 0.236 (0.010) | 0.332 | 0.372 | 0.390 | 0.513 (0.018) | 0.460 | 0.481 | 0.472 | 0.483 | 0.477 (0.021) |
+
+- Exact Gini of the U{5..25} endowment: 0.233.
+- Steps 200-500 (parametric map): mean Gini 0.475 (0.006). At t = 500: wealth skewness 1.29 (0.11), against 0.03 at
+  t = 0, and the top 10% hold 30.6% (1.0) of the sugar, against 16.5% at t = 0.
+- The spike at t ≈ 100 is the first cohort reaching max age (60-100). Those deaths swap rich old agents for
+  newborns holding 5-25 sugar. After that the Gini settles.
+- The parametric map and the transcribed map agree within about one seed sd at every step shown.
+
+**B. Carrying capacity, ({G1}, {M}), 400 agents, no ageing and no replacement.** The population falls from 400 to
+237.3 (9.1) at t = 100 and to 230.2 (7.0) at t = 500, where the Gini is 0.376 (0.024). Selection shifts the
+survivors: mean metabolism 2.47 → 1.79 and mean vision 3.51 → 3.87.
+
+**C. Spice, with and without trade (rule T)**
+
+| setting | no trade | trade |
+|---|---|---|
+| carrying capacity at t = 500 (400 agents, no ageing) | 132.1 (9.0) | 151.2 (6.4) |
+| Gini of sugar + spice at t = 500, same runs | 0.338 (0.022) | 0.377 (0.025) |
+| Gini of sugar + spice at t = 500, 250 agents, R[60,100] | 0.421 (0.014) | 0.449 (0.013) |
+| sd of log trade price at t = 10 / 100 / 500 | n/a | 0.588 / 0.158 / 0.064 |
+| geometric-mean price at t = 500 | n/a | 0.997 (0.032) |
+
+**D. LLMPolicy plumbing with FakeLLM** (250 agents, 300 steps, 5 seeds, 75,000 calls per run, 0 invalid replies).
+These are scripted responders, not an LLM. They test the plumbing and show which statistics can tell policies apart.
+
+| policy | Gini t=100 | Gini t=300 | starvation deaths | conflicts |
+|---|---|---|---|---|
+| rule M (no LLM) | 0.509 | 0.469 | 640.8 | n/a |
+| FakeLLM "greedy" (max sugar from the prompt list) | 0.503 (0.018) | 0.460 (0.009) | 609.2 (22.3) | 25,095 (33% of moves) |
+| FakeLLM "random site" (hash-chosen visible site) | 0.479 (0.009) | 0.459 (0.009) | 1,487.2 (31.9) | 3,400 |
+
+**Comparison with the literature**
+
+- Book, qualitative: the wealth distribution turns strongly right-skewed from a roughly symmetric start, and the
+  Gini rises and then fluctuates around a stable level. **Reproduced:** Gini 0.24 → about 0.47-0.48, skewness 0.03
+  → 1.3. The NetLogo model page makes the same point: most agents stay near the initial endowment and a minority
+  are rich.
+- Book Gini value: not checked. The book is not open access. From memory, the book's Gini series levels off near
+  0.5. Treat that as unverified.
+- Secondary replication: Foguelman, Henning, Uhrmacher & Castro, arXiv:2110.08170, §3.4, with their own grid and
+  parameters (metabolism 1-2, a different max age), report a Gini that "starts around 0.22 … until it reaches a
+  stable value of 0.42". Our start (0.236) matches theirs. Our plateau (0.47-0.48) is higher, which fits their remark
+  that the final value depends heavily on the grid and parameters.
+- Carrying capacity and trade: the book reports, from memory and unverified, that a carrying capacity emerges, that
+  selection lowers metabolism and raises vision, that trade raises carrying capacity, that prices converge with
+  falling dispersion, and that trade raises inequality. All five appear in B and C with the same sign. The book's
+  numbers were not compared.
+- What D shows: under random movement the Gini plateau is almost the same, 0.459 against 0.469. The plateau comes
+  mostly from heterogeneous metabolism, vision and age under replacement, not from greedy foraging. What separates
+  the policies is starvation: 2.3x more deaths under random movement. An LLM-policy study should report survival
+  and carrying capacity along with the Gini.
 
 ## Limitations
 
