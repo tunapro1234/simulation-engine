@@ -343,24 +343,35 @@ class ABStack:
 
 def ab_archive(df: pd.DataFrame, test: str, text_a: str, text_b: str | None = None, clicks_a: str = "clicks_a",
                n_a: str = "n_a", clicks_b: str | None = None, n_b: str | None = None, drop_ties: bool = True,
-               one_pair_per_test: bool = True, seed: int = 0) -> pd.DataFrame:
+               one_pair_per_test: bool = True, seed: int = 0, random_sides: bool = True,
+               drop_same_text: bool = True, significant_only: bool = False, alpha: float = 0.05) -> pd.DataFrame:
     """Past A/B archive -> the standard pair frame of :class:`LLMDirectAB`, :class:`ABStack` and
     ``bayes_prior.simulate_saving_calibrated``.
 
     Arguments name the columns of ``df``. Wide input (one row per pair): ``text_a``, ``clicks_a``, ``n_a`` and
-    ``text_b``, ``clicks_b``, ``n_b``. Long input (one row per variant, e.g. the raw Upworthy archive): leave
-    ``text_b`` / ``clicks_b`` / ``n_b`` as None; ``text_a`` / ``clicks_a`` / ``n_a`` then name the variant's text,
-    clicks and impressions, and every two variants of a test form a pair (A = earlier row).
-    Rows with missing text, missing counts or ``n <= 0`` are dropped; ``drop_ties`` drops exact CTR ties (else they
-    stay with ``tie`` True and y = 0); ``one_pair_per_test`` keeps one random pair per test (seeded, after the tie
-    drop, so a tied pair does not use up a test).
+    ``text_b``, ``clicks_b``, ``n_b``; the given sides are kept. Long input (one row per variant, e.g. the raw
+    Upworthy archive): leave ``text_b`` / ``clicks_b`` / ``n_b`` as None; ``text_a`` / ``clicks_a`` / ``n_a`` then
+    name the variant's text, clicks and impressions, and every two variants of a test form a pair. ``random_sides``
+    (long input only) puts each pair's variants on A/B by a seeded coin, so archive row order (control first,
+    sorted by date or by CTR) cannot leak into ``y`` or into the A position; chance is then 0.5, as in the measured
+    Upworthy sets (A/B direction random). With ``random_sides=False`` A is the earlier row.
+    Rows with missing text, missing counts or ``n <= 0`` are dropped; clicks < 0 or > n raise. ``drop_same_text``
+    drops pairs whose two texts are equal after stripping (Upworthy image-only tests: the label is noise for a
+    text method; the measured sets are headline-differing pairs). ``drop_ties`` drops exact CTR ties (else they stay
+    with ``tie`` True and y = 0). ``p_value`` = two-sided pooled two-proportion z-test, ``significant`` = 1 when
+    p < ``alpha`` (nominal: Upworthy A/A pairs hit p < .05 14.6% of the time, so the deney sets used FDR; apply BH
+    to ``p_value`` for that). ``significant_only`` keeps those pairs only. The measured numbers (0.817 etc.) are on
+    significant pairs; over all pairs content-based prediction reaches about 0.62. ``one_pair_per_test`` keeps one
+    random pair per test (seeded, after all the filters above, so a dropped pair does not use up a test).
 
     Returns columns ``group`` (test id), ``text_a``, ``text_b``, ``clicks_a``, ``n_a``, ``clicks_b``, ``n_b``,
-    ``ctr_a``, ``ctr_b``, ``y`` (1 = ctr_a > ctr_b, the same rule as ``simulate_saving_calibrated``), ``tie``:
+    ``ctr_a``, ``ctr_b``, ``tie``, ``y`` (1 = ctr_a > ctr_b, the same rule as ``simulate_saving_calibrated``),
+    ``p_value``, ``significant``:
 
         f = ab_archive(raw, test="test_id", text_a="headline", clicks_a="clicks", n_a="impressions")
         simulate_saving_calibrated(f.ctr_a, f.ctr_b, prior, f.clicks_a, f.clicks_b)
     """
+    from scipy.special import erfc
     df = pd.DataFrame(df)
     wide = [text_b, clicks_b, n_b]
     if any(c is None for c in wide) and not all(c is None for c in wide):
@@ -369,6 +380,7 @@ def ab_archive(df: pd.DataFrame, test: str, text_a: str, text_b: str | None = No
     miss = [c for c in need if c not in df.columns]
     if miss:
         raise KeyError(f"ab_archive: columns not found: {miss}; have {list(df.columns)}")
+    rng = np.random.default_rng(seed)
     if text_b is None:
         v = df[[test, text_a, clicks_a, n_a]].set_axis(["group", "text", "clicks", "n"], axis=1)
         v = v.dropna().loc[lambda d: d.n > 0]
@@ -379,14 +391,35 @@ def ab_archive(df: pd.DataFrame, test: str, text_a: str, text_b: str | None = No
         out = df[need].set_axis(["group", "text_a", "clicks_a", "n_a", "text_b", "clicks_b", "n_b"], axis=1)
         out = out.dropna().loc[lambda d: (d.n_a > 0) & (d.n_b > 0)]
     out = out[["group", "text_a", "text_b", "clicks_a", "n_a", "clicks_b", "n_b"]].reset_index(drop=True)
-    for c in ("text_a", "text_b"):
-        out[c] = out[c].astype(str)
+    for s in "ab":
+        c, n = out[f"clicks_{s}"].astype(float), out[f"n_{s}"].astype(float)
+        if ((c < 0) | (c > n)).any():
+            raise ValueError(f"ab_archive: clicks outside [0, n] in {int(((c < 0) | (c > n)).sum())} rows "
+                             "(clicks and impressions swapped?)")
+        out[f"text_{s}"] = out[f"text_{s}"].astype(str)
+    if drop_same_text:
+        out = out[out.text_a.str.strip() != out.text_b.str.strip()]
     out["ctr_a"] = out.clicks_a.astype(float) / out.n_a.astype(float)
     out["ctr_b"] = out.clicks_b.astype(float) / out.n_b.astype(float)
     out["tie"] = out.ctr_a == out.ctr_b
     out["y"] = (out.ctr_a > out.ctr_b).astype(int)
     if drop_ties:
         out = out[~out.tie]
+    na, nb = out.n_a.astype(float), out.n_b.astype(float)
+    pool = (out.clicks_a.astype(float) + out.clicks_b.astype(float)) / (na + nb)
+    se = np.sqrt(pool * (1 - pool) * (1 / na + 1 / nb))
+    z = np.where(se > 0, (out.ctr_a - out.ctr_b).abs() / np.where(se > 0, se, 1.0), 0.0)
+    out["p_value"] = np.where(se > 0, erfc(z / np.sqrt(2)), 1.0)
+    out["significant"] = (out.p_value < alpha).astype(int)
+    if significant_only:
+        out = out[out.significant == 1]
+    out = out.reset_index(drop=True)
+    if random_sides and text_b is None and len(out):
+        sw = rng.random(len(out)) < 0.5
+        for x in ("text", "clicks", "n", "ctr"):
+            a, b = out[f"{x}_a"].copy(), out[f"{x}_b"].copy()
+            out.loc[sw, f"{x}_a"], out.loc[sw, f"{x}_b"] = b[sw], a[sw]
+        out["y"] = (out.ctr_a > out.ctr_b).astype(int)
     if one_pair_per_test and len(out):
         out = out.groupby("group", sort=False).sample(1, random_state=seed)
     return out.reset_index(drop=True)

@@ -134,7 +134,7 @@ class TestArchive(unittest.TestCase):
         # test 2 is an exact tie, test 4 has n=0, test 5 has no text; test 1 keeps one of its two pairs
         self.assertEqual(sorted(f.group), [1, 3])
         self.assertEqual(list(f.columns), ["group", "text_a", "text_b", "clicks_a", "n_a", "clicks_b", "n_b",
-                                           "ctr_a", "ctr_b", "tie", "y"])
+                                           "ctr_a", "ctr_b", "tie", "y", "p_value", "significant"])
         r3 = f[f.group == 3].iloc[0]
         self.assertEqual((r3.ctr_a, r3.ctr_b, r3.y), (0.07, 0.03, 1))
         g = ab_archive(self.wide(), drop_ties=False, one_pair_per_test=False, **kw)
@@ -166,6 +166,54 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(len(p), len(f))
         res = simulate_saving_calibrated(f.ctr_a, f.ctr_b, p, f.clicks_a, f.clicks_b, reps=10, draws=1, n_boot=20)
         self.assertEqual(res["n_pairs"], len(f))
+
+    def ordered_long(self, n_tests=400, seed=0):
+        """Long archive listed best-first (row order tells the winner), with some image-only (same text) variants."""
+        rs = np.random.default_rng(seed)
+        rows = []
+        for t in range(n_tests):
+            ctr = np.sort(rs.uniform(0.01, 0.04, 3))[::-1]
+            for v in range(3):
+                rows.append({"tid": t, "h": f"head {t} {v if v < 2 else 0}", "c": int(rs.binomial(3000, ctr[v])),
+                             "n": 3000})
+        return pd.DataFrame(rows)
+
+    def test_random_sides_stop_row_order_leak(self):
+        raw = self.ordered_long()
+        kw = dict(test="tid", text_a="h", clicks_a="c", n_a="n")
+        first = ab_archive(raw, random_sides=False, **kw)
+        self.assertGreater(first.y.mean(), 0.8)                    # A = earlier row = usually the winner
+        f = ab_archive(raw, **kw)
+        self.assertLess(abs(f.y.mean() - 0.5), 0.1)
+        self.assertTrue(np.array_equal(f.y, (f.ctr_a > f.ctr_b).astype(int)))
+        self.assertTrue(np.allclose(f.ctr_a, f.clicks_a / f.n_a))
+        always_a = lambda s, u: json.dumps([{"i": i, "p_a": 0.6} for i in range(u.count('. A: "'))])  # noqa: E731
+        p = LLMDirectAB(FakeLLM(always_a), reverse=False).predict(f)
+        self.assertLess(abs(np.mean((p > 0.5) == (f.y == 1)) - 0.5), 0.1)
+        self.assertFalse((f.text_a.str.strip() == f.text_b.str.strip()).any())
+        same = ab_archive(raw, drop_same_text=False, one_pair_per_test=False, **kw)
+        self.assertTrue((same.text_a == same.text_b).any())
+
+    def test_significance(self):
+        rs = np.random.default_rng(3)
+        aa = pd.DataFrame([{"t": t, "h": f"x{t} {v}", "c": int(rs.binomial(2000, 0.03)), "n": 2000}
+                           for t in range(3000) for v in range(2)])
+        f = ab_archive(aa, test="t", text_a="h", clicks_a="c", n_a="n", drop_ties=False)
+        self.assertLess(abs(f.significant.mean() - 0.05), 0.015)   # A/A: nominal rate
+        self.assertTrue(((f.p_value >= 0) & (f.p_value <= 1)).all())
+        raw = self.ordered_long()
+        kw = dict(test="tid", text_a="h", clicks_a="c", n_a="n")
+        s = ab_archive(raw, significant_only=True, **kw)
+        self.assertTrue((s.significant == 1).all())
+        # filtered before the one-pair pick: no test with a significant pair is lost
+        allp = ab_archive(raw, one_pair_per_test=False, **kw)
+        self.assertEqual(set(s.group), set(allp.group[allp.significant == 1]))
+
+    def test_counts_checked(self):
+        w = self.wide()
+        w.loc[0, "ca"] = 500
+        with self.assertRaises(ValueError):
+            ab_archive(w, test="tid", text_a="ha", text_b="hb", clicks_a="ca", n_a="na", clicks_b="cb", n_b="nb")
 
     def test_bad_args(self):
         with self.assertRaises(ValueError):
