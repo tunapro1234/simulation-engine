@@ -67,6 +67,15 @@ class TestLandscape(unittest.TestCase):
             np.savetxt(p, np.arange(9).reshape(3, 3), fmt="%d")
             np.testing.assert_array_equal(S.load_capacity(p), np.arange(9).reshape(3, 3))
 
+    def test_non_square_capacity_refused(self):
+        with self.assertRaises(ValueError):
+            S.Sugarscape(S.SugarscapeConfig(n_agents=2, capacity=np.ones((4, 9))))   # 36 cells, not 6x6
+        with self.assertRaises(ValueError):
+            S.Sugarscape(S.SugarscapeConfig(n_agents=2, capacity=np.ones(36)))
+        with self.assertRaises(ValueError):
+            S.Sugarscape(S.SugarscapeConfig(n_agents=2, capacity=np.ones((6, 6)), spice=True,
+                                            spice_capacity=np.ones((4, 9))))
+
     def test_growback(self):
         m = tiny(np.full((5, 5), 3.0), metabolism=(0, 0))
         m.sugar[:] = 0
@@ -112,6 +121,15 @@ class TestMovement(unittest.TestCase):
         place(m2, 0, 0, 0, vision=2)
         self.assertEqual(len(m2.candidates(0)[0]), 9)
 
+    def test_small_torus_lists_each_site_once(self):
+        m = tiny(np.ones((5, 5)))
+        place(m, 0, 2, 2, vision=6)
+        sites, k = m.candidates(0)
+        self.assertEqual(len(sites), len(set(sites.tolist())))
+        self.assertEqual(len(sites), 9)                               # own row and column of a 5x5 torus
+        self.assertEqual(sites[0], m.pos[0])
+        np.testing.assert_array_equal(m.off_dist[k], np.sort(m.off_dist[k]))   # nearest offset kept
+
     def test_harvest_and_metabolism_conserve_sugar(self):
         cfg = S.SugarscapeConfig(n_agents=50, size=20, growback=0, metabolism=(0, 0), max_age=None)
         m = S.Sugarscape(cfg, seed=1)
@@ -134,7 +152,14 @@ class TestMovement(unittest.TestCase):
         place(m, 1, 3, 4, vision=1)
         ev = m.step(plan={0: 3 * 7 + 3, 1: 3 * 7 + 3})
         self.assertEqual(ev["conflicts"], 1)
-        self.assertEqual(m.occ[3 * 7 + 3] in (0, 1), True)
+        self.assertIn(m.occ[3 * 7 + 3], (0, 1))
+        self.assertEqual(int((m.occ >= 0).sum()), 2)
+
+    def test_plan_outside_vision_refused(self):
+        m = tiny(np.zeros((7, 7)))
+        place(m, 0, 3, 3, vision=1)
+        with self.assertRaises(ValueError):
+            m.step(plan={0: 0})                                       # (0, 0) is not visible from (3, 3)
 
 
 class TestDynamics(unittest.TestCase):
@@ -223,10 +248,21 @@ class TestLLMPolicy(unittest.TestCase):
         self.assertEqual(run.invalid, run.calls)
         self.assertTrue((run.stats.population == 30).all())
 
+    def test_llm_plan_is_applied(self):
+        stay = FakeLLM(lambda s, u: '{"site": 0}')                   # site 0 is always the agent's own site
+        m = S.Sugarscape(self.cfg(), seed=0, policy=S.LLMPolicy(stay))
+        pos0, uid0 = m.pos.copy(), m.uid.copy()
+        run = m.run(3)
+        same = m.uid == uid0                                          # slots not refilled by a newborn
+        np.testing.assert_array_equal(m.pos[same], pos0[same])
+        self.assertEqual((run.invalid, run.conflicts), (0, 0))
+
     def test_parse(self):
         self.assertEqual(S.LLMPolicy.parse('```json\n{"site": 2}\n```', 3), 2)
         self.assertEqual(S.LLMPolicy.parse("1", 3), 1)
-        for bad in ('{"site": 7}', '{"site": true}', "north"):
+        self.assertEqual(S.LLMPolicy.parse('{"site": 2.0}', 3), 2)
+        for bad in ('{"site": 7}', '{"site": true}', "north", '{"site": 1.5}', '{"site": Infinity}',
+                    '{"site": NaN}', '{"site": [1]}', '{"site": "x"}'):
             with self.assertRaises((ValueError, TypeError)):
                 S.LLMPolicy.parse(bad, 3)
 
