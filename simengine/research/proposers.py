@@ -191,10 +191,13 @@ class GreedyCoordinateProposer:
 
 
 def successive_halving(evaluate: Callable[[list, float], list], candidates: list, *, higher_is_better: bool,
-                       fidelities=(1 / 9, 1 / 3, 1.0), eta: int = 3) -> dict:
+                       fidelities=(1 / 9, 1 / 3, 1.0), eta: int = 3, rounding: str = "ceil") -> dict:
     """Successive halving over `candidates` (configs). `evaluate(configs, fidelity)` returns one primary-metric mean
     per config at that fidelity (e.g. fraction of units or of iterations). After each rung keep the best
-    ceil(n/eta). Returns {"winner", "rungs": [[(index, score), ...], ...], "evaluations"}."""
+    ceil(n/eta), or floor(n/eta) with rounding="floor" (Hyperband's top_k(T, L, floor(n_i/eta)), Li et al. 2018
+    JMLR Alg. 1; at least one is kept). Returns {"winner", "rungs": [[(index, score), ...], ...], "evaluations"}."""
+    if rounding not in ("ceil", "floor"):
+        raise ValueError(f"rounding must be 'ceil' or 'floor', got {rounding!r}")
     alive = list(range(len(candidates)))
     rungs, n_eval = [], 0
     for r, f in enumerate(fidelities):
@@ -209,7 +212,8 @@ def successive_halving(evaluate: Callable[[list, float], list], candidates: list
         if r == len(fidelities) - 1 or len(pairs) == 1:
             alive = [pairs[0][0]]
             break
-        alive = [p[0] for p in pairs[:max(1, math.ceil(len(pairs) / eta))]]
+        keep = math.ceil(len(pairs) / eta) if rounding == "ceil" else len(pairs) // eta
+        alive = [p[0] for p in pairs[:max(1, keep)]]
     return {"winner": candidates[alive[0]], "winner_index": alive[0], "rungs": rungs, "evaluations": n_eval}
 
 
