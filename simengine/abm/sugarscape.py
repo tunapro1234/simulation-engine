@@ -142,20 +142,19 @@ class Sugarscape:
         if cfg.trade and not cfg.spice:
             raise ValueError("trade=True needs spice=True")
         self.rng = np.random.default_rng(seed)
-        self.cap = (sugar_capacity(cfg.size) if cfg.capacity is None else np.asarray(cfg.capacity, float)).ravel()
-        n_side = int(round(np.sqrt(self.cap.size)))
-        if n_side * n_side != self.cap.size:
-            raise ValueError("capacity must be a square grid")
+        cap = sugar_capacity(cfg.size) if cfg.capacity is None else np.asarray(cfg.capacity, float)
+        if cap.ndim != 2 or cap.shape[0] != cap.shape[1]:
+            raise ValueError(f"capacity must be a square 2-D grid, got shape {cap.shape}")
+        self.cap, n_side = cap.ravel(), cap.shape[0]
         self.side = n_side
         if cfg.n_agents > self.cap.size:
             raise ValueError("more agents than sites")
         self.sugar = self.cap.copy()
         if cfg.spice:
-            sp = spice_capacity(n_side, self.cap.reshape(n_side, n_side)) if cfg.spice_capacity is None else \
-                cfg.spice_capacity
-            self.pcap = np.asarray(sp, float).ravel()
-            if self.pcap.size != self.cap.size:
-                raise ValueError("spice_capacity must match the sugar grid")
+            sp = spice_capacity(n_side, cap) if cfg.spice_capacity is None else np.asarray(cfg.spice_capacity, float)
+            if sp.shape != cap.shape:
+                raise ValueError(f"spice_capacity shape {sp.shape} must match the sugar grid {cap.shape}")
+            self.pcap = sp.ravel()
             self.spice = self.pcap.copy()
         self.policy = policy
         n = cfg.n_agents
@@ -196,7 +195,8 @@ class Sugarscape:
         self._next_uid += 1
 
     def candidates(self, i) -> tuple[np.ndarray, np.ndarray]:
-        """(flat site ids, offset index) of the sites agent i can see, own site first; off-grid sites dropped."""
+        """(flat site ids, offset index) of the sites agent i can see, own site first; off-grid sites dropped, and
+        on a torus narrower than 2 x vision a site reached twice is kept once (nearest offset)."""
         k = np.flatnonzero(self.off_dist <= self.vision[i])
         r, c = divmod(int(self.pos[i]), self.side)
         rr, cc = r + self.off[k, 0], c + self.off[k, 1]
@@ -205,7 +205,11 @@ class Sugarscape:
         else:
             ok = (rr >= 0) & (rr < self.side) & (cc >= 0) & (cc < self.side)
             rr, cc, k = rr[ok], cc[ok], k[ok]
-        return rr * self.side + cc, k
+        sites = rr * self.side + cc
+        if self.cfg.torus and 2 * self.vision[i] >= self.side:      # wrap-around revisits sites
+            first = np.sort(np.unique(sites, return_index=True)[1])
+            sites, k = sites[first], k[first]
+        return sites, k
 
     def _value(self, i, sites):
         if not self.cfg.spice:
@@ -287,7 +291,9 @@ class Sugarscape:
         return w + self.wp[self.alive] if self.cfg.spice else w.copy()
 
     def step(self, plan: dict | None = None) -> dict:
-        """One step: growback, movement (rule M or the policy plan), death/replacement, optional trade."""
+        """One step: growback, movement (rule M or the policy plan), death/replacement, optional trade.
+        plan: {slot: flat site id}; a site outside the agent's vision raises ValueError, a site taken by an earlier
+        mover falls back to rule M and counts as a conflict."""
         cfg = self.cfg
         self.sugar = np.minimum(self.cap, self.sugar + cfg.growback)
         if cfg.spice:
@@ -297,6 +303,8 @@ class Sugarscape:
         plan = plan or {}
         for i in self.rng.permutation(np.flatnonzero(self.alive)):
             site = plan.get(int(i))
+            if site is not None and not np.isin(site, self.candidates(i)[0]):
+                raise ValueError(f"plan sends agent {int(i)} to site {site}, outside its vision")
             if site is not None and self.occ[site] >= 0 and site != self.pos[i]:
                 ev["conflicts"] += 1
                 site = None
@@ -418,9 +426,12 @@ class LLMPolicy:
             j = obj["site"] if isinstance(obj, dict) else obj
         except (ValueError, KeyError, TypeError, json.JSONDecodeError):
             j = text.strip()
-        if isinstance(j, bool):
+        if isinstance(j, bool) or isinstance(j, (dict, list)):
             raise ValueError("bad site")
-        j = int(j)
+        f = float(j)                                   # "2", 2, 2.0 ok; 2.5, inf, nan rejected
+        if not np.isfinite(f) or f != int(f):
+            raise ValueError("site is not an integer")
+        j = int(f)
         if not 0 <= j < n_sites:
             raise ValueError("site out of range")
         return j
@@ -438,7 +449,7 @@ class LLMPolicy:
         for i, (_, sites), r in zip(ids, built, res):
             try:
                 out[i] = sites[self.parse(r.text, len(sites))]
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):   # AttributeError: reply text None
                 self.invalid += 1
         return out
 
