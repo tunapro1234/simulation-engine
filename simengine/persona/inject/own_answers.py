@@ -90,6 +90,17 @@ def tokens(text: str) -> list[str]:
             for t in _TOKEN.findall(_fold(text)) if t not in _STOP]
 
 
+def _missing(v: Any) -> bool:
+    """None, NaN (float / numpy) or pandas NA: an unanswered item, not an answer."""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return True
+    return type(v).__name__ in ("NAType", "NaTType")
+
+
+def _json_default(o: Any) -> Any:
+    return o.item() if hasattr(o, "item") else str(o)       # numpy scalars from pandas rows
+
+
 # ---------------------------------------------------------------- embedding-free scorers
 def score_tfidf(query: str, docs: Sequence[str]) -> list[float]:
     """Cosine of l2-normalised TF-IDF vectors; idf = ln((1+n)/(1+df)) + 1 over docs (sklearn's smooth idf). As with
@@ -160,8 +171,9 @@ class _OwnAnswers(Injector):
         return f"{self.name}({','.join(f'{k}={v}' for k, v in sorted(shown.items()))})"
 
     def known(self, person: dict, question: dict) -> list[tuple[str, Any]]:
-        """Known answers (leakage rule applied) in bank order; ids missing from the bank follow, sorted."""
-        ka = {str(k): v for k, v in self.known_answers(person, question).items()}
+        """Known answers (leakage rule applied, None/NaN skipped) in bank order; ids missing from the bank follow,
+        sorted."""
+        ka = {str(k): v for k, v in self.known_answers(person, question).items() if not _missing(v)}
         rank = {qid: i for i, qid in enumerate(self.bank)}
         return sorted(ka.items(), key=lambda kv: (rank.get(kv[0], len(rank)), kv[0]))
 
@@ -250,7 +262,8 @@ class OwnAnswersFewshot(_OwnAnswers):
         for qid, a in picked:
             q = self.qdict(qid)
             q_shown = q if self.include_options else {k: v for k, v in q.items() if k != "options"}
-            history += [("user", self.question_block(q_shown)), ("assistant", json.dumps({"answer": a}))]
+            reply = json.dumps({"answer": a}, ensure_ascii=False, default=_json_default)
+            history += [("user", self.question_block(q_shown)), ("assistant", reply)]
         system = SYSTEM_FEWSHOT if picked else SYSTEM_FEWSHOT + "\n" + NONE_KNOWN
         return Prompt(system=system, user=self.question_block(question), history=history,
                       meta={"shown": [q for q, _ in picked], "n_shown": len(picked)})
