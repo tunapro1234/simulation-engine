@@ -80,8 +80,9 @@ def _qa_text(q: dict, answer: Any, include_options: bool) -> str:
 
 
 def _fold(text: Any) -> str:
-    """Lowercase, accents folded (NFKD minus combining marks), so "Araç"/"arac" and "İstanbul"/"istanbul" match."""
-    t = unicodedata.normalize("NFKD", str(text).lower())
+    """Lowercase, accents folded (NFKD minus combining marks, dotless ı -> i), so "Araç"/"arac", "İstanbul"/"istanbul"
+    and "IŞIK"/"ışık" match."""
+    t = unicodedata.normalize("NFKD", str(text).lower().replace("ı", "i"))
     return "".join(c for c in t if not unicodedata.combining(c))
 
 
