@@ -637,10 +637,12 @@ def select_and_test(ev: PromptEvaluator, history: Sequence[Candidate], *, method
         if o is None or (c.full_train, c.fitness) > (o.full_train, o.fitness):
             best_by_text[c.text] = c
     ranked = sorted(best_by_text.values(), key=lambda c: (c.full_train, c.fitness), reverse=True)[:top_k]
+    rescored = []
     for i, c in enumerate(ranked):                   # subset-only scores (APE stages, PB batches): rescore full train
         if not c.full_train:
             ranked[i] = best_by_text[c.text] = ev.candidate(c.text, c.method, c.origin, step=c.step, parent=c.parent,
                                                             rescored=True)
+            rescored.append(ranked[i])
     rows = []
     for c in ranked:
         v = ev.scores(c.text, "val")
@@ -661,7 +663,7 @@ def select_and_test(ev: PromptEvaluator, history: Sequence[Candidate], *, method
         chk = verify_prereg(prereg)
         if not chk["ok"]:
             raise ValueError(f"prereg check failed before the test split: {chk['reason']}")
-    out = PromptEvolutionResult(method, win, history_frame(history), val, {}, {}, rec, dict(search or {}), {})
+    out = PromptEvolutionResult(method, win, history_frame([*history, *rescored]), val, {}, {}, rec, dict(search or {}), {})
     if ev.n("test") == 0:
         return out
     ev.test_done = True
