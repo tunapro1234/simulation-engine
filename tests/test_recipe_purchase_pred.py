@@ -1,7 +1,7 @@
 """examples/recipes/purchase_pred.py end to end in a subprocess: offline run (FakeLLM + synthetic shoppers) finishes
-with rc=0 and writes the card with the ladder, controls and gap closed; a --data CSV with --persons runs; missing
-columns exit; --live refuses to start without a budget and stops at --max-usd before any network call, never
-printing the key."""
+with rc=0 and writes the card with the ladder, controls, sealed comparisons and gap closed; a --data CSV with
+--persons runs; missing columns or an incomplete person x category grid exit; --live refuses to start without a
+budget and stops at --max-usd before any network call, never printing the key."""
 import os
 import subprocess
 import sys
@@ -24,11 +24,14 @@ class TestPurchasePredRecipe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = run("--out", d, "--B", "100")
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-            for s in ("LLM calls: 481 (1 no-persona + 240 L1 + 240 L2)", "unparsed category answers: 0",
-                      "always-no", "llm_l0", "llm_l2_cal", "history", "stack", "oracle", "gap closed:", "badge:"):
+            for s in ("LLM calls: 481 (1 no-persona + 240 L1 + 240 L2)", "failed calls: 0",
+                      "unparsed category answers: 0", "always-no", "within-person top-half accuracy", "llm_l0",
+                      "llm_l2_cal", "history", "stack", "oracle", "llm_l1 - llm_l0:", "llm_l2 - llm_l1:",
+                      "gap closed:", "badge:"):
                 self.assertIn(s, p.stdout)
             card = (Path(d) / "card.md").read_text()
             self.assertIn("Sealed predictions", card)
+            self.assertIn("| llm_l2 − llm_l1 | registered |", card)            # the comparisons are in the seal
             self.assertTrue((Path(d) / "dashboard.html").exists())
 
     def test_user_csv_with_persons_cap(self):
@@ -53,6 +56,15 @@ class TestPurchasePredRecipe(unittest.TestCase):
             p = run("--data", str(csv), "--out", d)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("missing columns", p.stderr)
+
+    def test_incomplete_person_category_grid_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            csv = Path(d) / "gap.csv"                             # u2 has no 'toys' row
+            csv.write_text("person_id,category,demo_age,n_before,n_recent,bought\nu1,food,young,1,0,1\n"
+                           "u1,toys,young,0,0,0\nu2,food,old,2,1,1\n")
+            p = run("--data", str(csv), "--out", d)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("one row per (person, category)", p.stderr)
 
     def test_live_needs_budget(self):
         with tempfile.TemporaryDirectory() as d:
