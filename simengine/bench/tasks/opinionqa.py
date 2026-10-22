@@ -7,6 +7,18 @@ only questions of other waves (`OpinionQAGroups.history(data, wave)` returns exa
 
 Setting A (default): only other-wave questions are known. Setting B: the target question's Overall (population)
 distribution is also known (`data.test['overall']`), enabling the `overall` / `sibling` baselines.
+
+LLM arm: each (attribute, group) pair has a natural-language description for the prompt, and `predict_with(data,
+"llm", ...)` asks `sim.segment_distribution` and maps its vectors back to the bench rows (row order, option order and
+so option positions unchanged; the model sees no train rows, so the wave-out rule holds trivially):
+
+    task = bench.get("opinionqa_groups")
+    data = task.load()
+    task.describe_group("RACE", "Hispanic")          # 'Hispanic adults in the US'
+    task.segments(data)                              # {"RACE:Hispanic": "Hispanic adults in the US", ...}
+    preds = task.predict_with(data, "llm", llm=llm, framings=None, samples=1)   # one vector per test row
+    task.last_llm["invalid"], task.last_llm["filled_share"]
+    frame = task.frame(data, {"llm": preds, **task.baselines(data)})
 """
 from __future__ import annotations
 
@@ -80,6 +92,56 @@ def load_questions(root: str):
         test[q] = dict(wave=wave.get(q, str(q).rsplit("_", 1)[-1]), text=x0.question, options=opts, pos=_scale(ordn),
                        dist=dist, overall=ov)
     return pool, test, groups
+
+
+# (attribute, group) -> description in the measured framing slot "consider respondents who are {group}" style.
+GROUP_DESCRIPTIONS: dict[tuple[str, str], str] = {
+    ("CREGION", "Northeast"): "adults living in the Northeast of the US",
+    ("CREGION", "South"): "adults living in the South of the US",
+    ("EDUCATION", "College graduate/some postgrad"): "US adults who are college graduates or have some postgraduate "
+                                                     "education",
+    ("EDUCATION", "Less than high school"): "US adults who did not finish high school",
+    ("SEX", "Male"): "men in the US",
+    ("SEX", "Female"): "women in the US",
+    ("POLIDEOLOGY", "Liberal"): "US adults who describe their political views as liberal",
+    ("POLIDEOLOGY", "Conservative"): "US adults who describe their political views as conservative",
+    ("POLIDEOLOGY", "Moderate"): "US adults who describe their political views as moderate",
+    ("INCOME", "$100,000 or more"): "US adults with a family income of $100,000 or more a year",
+    ("INCOME", "Less than $30,000"): "US adults with a family income of less than $30,000 a year",
+    ("POLPARTY", "Democrat"): "US adults who identify as Democrats",
+    ("POLPARTY", "Republican"): "US adults who identify as Republicans",
+    ("RACE", "Black"): "Black adults in the US",
+    ("RACE", "White"): "White adults in the US",
+    ("RACE", "Asian"): "Asian adults in the US",
+    ("RACE", "Hispanic"): "Hispanic adults in the US",
+    ("RELIG", "Protestant"): "Protestant adults in the US",
+    ("RELIG", "Jewish"): "Jewish adults in the US",
+    ("RELIG", "Hindu"): "Hindu adults in the US",
+    ("RELIG", "Atheist"): "US adults who are atheists",
+    ("RELIG", "Muslim"): "Muslim adults in the US",
+}
+# fallback for groups outside the 22 (other OpinionQA attributes), by attribute
+_ATTR_TEMPLATES = {"AGE": "US adults aged {v}", "CREGION": "adults living in the {v} of the US",
+                   "SEX": "US adults who are {v}", "RACE": "{v} adults in the US", "RELIG": "{v} adults in the US",
+                   "POLPARTY": "US adults who identify as {v}", "POLIDEOLOGY": "US adults who describe their "
+                   "political views as {v}", "INCOME": "US adults with a family income of {v} a year",
+                   "EDUCATION": "US adults whose education is: {v}",
+                   "CITIZEN": "US adults whose citizenship status is: {v}",
+                   "MARITAL": "US adults who are {v}", "RELIGATTEND": "US adults who attend religious services {v}"}
+
+
+def describe_group(attribute: str, value: str) -> str:
+    """Natural-language description of one group, e.g. ('RACE', 'Hispanic') -> 'Hispanic adults in the US'."""
+    d = GROUP_DESCRIPTIONS.get((attribute, value))
+    if d is not None:
+        return d
+    t = _ATTR_TEMPLATES.get(attribute)
+    return t.format(v=value) if t else f"US adults whose {attribute.lower()} is {value}"
+
+
+def segment_key(attribute: str, value: str) -> str:
+    """Segment key used by `segments()` and the LLM arm: 'ATTRIBUTE:group' (the frame's unit suffix)."""
+    return f"{attribute}:{value}"
 
 
 def _long(qs: dict) -> pd.DataFrame:
@@ -260,7 +322,71 @@ class OpinionQAGroups(BenchTask):
         """Train rows allowed for a target of `wave` (wave-out rule)."""
         return data.train[data.train["wave"] != wave]
 
+    describe_group = staticmethod(describe_group)
+    segment_key = staticmethod(segment_key)
+
+    def segments(self, data: TaskData | None = None, descriptions: dict | None = None) -> dict[str, str]:
+        """{'ATTRIBUTE:group': description} for data.meta['groups'] (default: the 22 SubPOP groups), ready for
+        `sim.segment_distribution(segments=...)`. descriptions: {(attribute, group): text} overrides."""
+        groups = [tuple(g) for g in data.meta["groups"]] if data is not None else list(GROUP_DESCRIPTIONS)
+        over = descriptions or {}
+        return {segment_key(a, g): over.get((a, g)) or describe_group(a, g) for a, g in groups}
+
+    def predict_llm(self, data: TaskData, llm, *, framings: dict | None = None, samples: int = 1,
+                    descriptions: dict | None = None, population: str = "US adults", source: str | None = None,
+                    when: str | None = None, max_tokens: int = 300, fallback: str = "uniform",
+                    ask_kw: dict | None = None) -> list:
+        """One vector per data.test row from `sim.segment_distribution` (framings averaged, samples = repeats).
+        Only the (question, group) cells present in the test rows are asked. A cell without a vector (all
+        answers invalid with fallback='skip') gets a uniform vector. Run accounting in `self.last_llm`: calls,
+        invalid, filled {(qkey, attribute, group): share}, filled_share, framings, usage, results (raw)."""
+        if llm is None:
+            raise TypeError("predict_with(data, 'llm') needs llm=")
+        from ...sim.distribution import segment_distribution
+        tq = _qdict(data.test)
+        segs = self.segments(data, descriptions)
+        for a, g in {(r.attribute, r.group) for r in data.test.itertuples()}:
+            segs.setdefault(segment_key(a, g), (descriptions or {}).get((a, g)) or describe_group(a, g))
+        batches: dict = {}
+        for q in sorted(tq):
+            v = tq[q]
+            if len(v["options"]) != len(v["pos"]):
+                raise ValueError(f"{q}: {len(v['options'])} options but {len(v['pos'])} positions")
+            need_s = tuple(sorted(segment_key(a, g) for a, g in v["dist"]))
+            batches.setdefault(need_s, []).append({"id": str(q), "text": v["text"],
+                                                   "options": [str(o) for o in v["options"]]})
+        dist, filled, results = {}, {}, []
+        for need_s, qs in batches.items():
+            r = segment_distribution(llm=llm, segments={s: segs[s] for s in need_s}, questions=qs,
+                                     population=population, source=source, when=when, framings=framings,
+                                     max_tokens=max_tokens, fallback=fallback, ask_kw=ask_kw, repeats=samples)
+            results.append(r)
+            for s, d in r["dist"].items():
+                for qid, p in d.items():
+                    dist[(qid, s)] = np.asarray(p, float)
+            for s, d in r["filled"].items():
+                for qid, f in d.items():
+                    filled[(qid, s)] = f
+        out = []
+        for row in data.test.itertuples():
+            k = segment_key(row.attribute, row.group)
+            p = dist.get((str(row.qkey), k))
+            m = len(row.pos)
+            out.append(p if p is not None and len(p) == m else np.ones(m) / m)
+        n_cells = sum(len(r["cells"]) for r in results)
+        self.last_llm = {"calls": sum(r["calls"] for r in results), "invalid": sum(r["invalid"] for r in results),
+                         "filled": {(q, *s.split(":", 1)): f for (q, s), f in filled.items()},
+                         "filled_share": (sum(r["filled_share"] * len(r["cells"]) for r in results) / n_cells
+                                          if n_cells else 0.0),
+                         "framings": results[0]["framings"] if results else [], "samples": samples,
+                         "usage": [r["usage"] for r in results], "results": results}
+        return out
+
     def predict_with(self, data: TaskData, method: str, **kw) -> list:
+        """Baselines by name (uniform | position | knn | overall | sibling) or method='llm' (`predict_llm`; llm=,
+        framings=, samples=, descriptions=, population=, source=, when=)."""
+        if method == "llm":
+            return self.predict_llm(data, kw.pop("llm", None), **kw)
         pool = _qdict(data.train)
         tq = _qdict(data.test)
         groups = [tuple(g) for g in data.meta["groups"]]

@@ -91,6 +91,23 @@ source.
   bootstrap (lower is better). Also reported: `tvd1` (1 − TVD) and `rank_rho`.
 - **Baselines:** `uniform`, `position` (mean distribution of same-option-count questions from other waves),
   `knn` (TF-IDF over question and options, k = 20). Setting B adds `overall` and `sibling`.
+- **LLM arm:** `task.describe_group("RACE", "Hispanic")` gives the prompt description of a group
+  ('Hispanic adults in the US'; all 22 groups are written out in `GROUP_DESCRIPTIONS`, other attributes fall back
+  to a per-attribute template). `task.segments(data)` returns `{"RACE:Hispanic": description, ...}`, ready for
+  `sim.segment_distribution`. `task.predict_with(data, "llm", llm=llm, framings=None, samples=1)` asks
+  `segment_distribution` only for the (question, group) cells in the test rows, with `samples` passed as `repeats`
+  and `descriptions={(attr, group): text}` overriding the defaults. It returns one vector per test row in the bench
+  row order, with the bench's option order, so the `pos` positions still apply. `task.last_llm` keeps the run
+  accounting: `calls`, `invalid`, `filled` per (qkey, attribute, group), `filled_share`, `usage` and the raw
+  results. The model sees no train rows, so the wave-out rule holds. This is not a baseline: `baselines()` makes no
+  LLM call.
+
+  ```python
+  preds = task.predict_with(data, "llm", llm=llm, framings={"h1": "In a large national survey of {population}, "
+                                                                  "consider respondents who are {group}."})
+  frame = task.frame(data, {"llm": preds, **task.baselines(data)})
+  task.score(frame, "llm")
+  ```
 
 **Measured numbers:**
 
