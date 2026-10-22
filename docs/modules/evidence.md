@@ -433,7 +433,8 @@ audit["n_failed"], audit["n_unparsed_named"]
 ```
 
 **One-call recall probe (`ezber.recall_probe`).** `recall_probe(llm, source, groups, measures, truth=None,
-best_estimate_retry=True, max_tokens=2048, tag=None, scale=None)` makes one persona-free call: "recall the published
+best_estimate_retry=True, max_tokens=2048, tag=None, scale=None, warn_spearman=0.7, warn_p=0.05, reference=None)`
+makes one persona-free call: "recall the published
 results of `<source>` for these groups and measures" as JSON (`{"remember": ..., "results": {group: {measure: n}}}`).
 `recall_refusal` classifies the reply, including refusals inside JSON (`"remember": false`, empty tables, all
 nulls), which `looks_like_refusal` never flags because it skips JSON replies. Kinds: `error`, `empty_reply`,
@@ -441,16 +442,29 @@ nulls), which `looks_like_refusal` never flags because it skips JSON replies. Ki
 "best estimate" (tag `<tag>:retry`). Those numbers are estimates, not recall. The result has `raw` / `raw_retry`,
 `recalls` (only when the first reply gives numbers without `"remember": false`), `refusal`, `used` (`first` /
 `retry` / None), `values` and `calls`. With `truth` (`{group: {measure: v}}`, `{group: v}` or a DataFrame indexed
-by group) it also has `per_group` MAE, `mae`, `pearson`, `spearman`, `spearman_by_measure` and `audit`, which is the
-dict `evaluate(memorization=...)` reads. `audit` is `"uyari"` when Spearman with the truth is at least
-`warn_spearman` (0.7), whichever reply the numbers came from. A single probe has no blind control, so for a
-controlled test use `correlation_audit`. In D6, Haiku first returned `remember: false` with empty tables, then gave
-numbers when asked for a best estimate.
+by group) it also has `per_group` MAE, `mae`, `pearson` and `spearman` (pooled over all cells), `spearman_within`
+/ `p_within` (groups ranked inside each measure, pooled, with a permutation p), `spearman_by_measure`,
+`scale_warning` (0-1 against 0-100) and `audit`, which is the dict `evaluate(memorization=...)` reads. The audit
+uses the within-measure Spearman, not the pooled one. Pooling mostly ranks measure levels ("support" above
+"oppose"), which takes no group knowledge: in a 12 groups x 3 measures simulation, a probe that knew only the
+measure means had pooled Spearman >= 0.7 in 88 % of runs and within-measure 0 % (61 x 7: 86 % and 0 %). `audit` is
+`"uyari"` when the within-measure Spearman is at least `warn_spearman` (0.7) and `p_within < warn_p` (0.05),
+whichever reply the numbers came from; at most 5 % false warnings by construction (simulated 0-4.5 % for 4 to 61
+groups), and a probe that knows the group pattern warns in 96-100 % of runs from 6 groups or 4 groups x 2 measures
+up. A high match with too few groups to tell from chance (one measure with 4 groups needs a perfect match) is
+`"atlandi"`, as is a table where no measure has 3 comparable groups. A single probe has no blind control, and
+general knowledge ("young voters lean left") also ranks groups, so for a controlled test use `correlation_audit`.
+While the truth is sealed, pass `reference=` (your own forecast, same shapes) to get `vs_reference`: the same
+comparison against your forecast, without an audit. In D6, Haiku first returned `remember: false` with empty
+tables, then gave numbers when asked for a best estimate; the team compared them with its forecast by hand.
 ```python
 probe = ev.ezber.recall_probe(llm, "the <survey> <year> wave", groups, ["support", "oppose"],
                               truth=truth, scale="percent, 0-100", tag="probe")
-probe["refusal"], probe["used"], probe["per_group"], probe["spearman"]
+probe["refusal"], probe["used"], probe["per_group"], probe["spearman_within"], probe["p_within"]
 ev.evaluate(df, ours="llm", memorization=probe["audit"])
+# truth sealed: how far is our forecast from what the model says unprompted?
+probe = ev.ezber.recall_probe(llm, "the <survey> <year> wave", groups, measures, reference=our_forecast)
+probe["vs_reference"]["per_group"], probe["vs_reference"]["spearman_within"]
 ```
 
 **Speed on large frames.**
