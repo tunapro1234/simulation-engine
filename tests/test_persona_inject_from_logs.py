@@ -1,6 +1,9 @@
 import json
 import unittest
 
+import numpy as np
+import pandas as pd
+
 import simengine.persona.inject as pi
 from simengine.llm.fake import FakeLLM
 from simengine.persona.inject import from_logs as fl
@@ -73,6 +76,13 @@ class TestRegistry(unittest.TestCase):
             fl.summarize_logs(FakeLLM(), [shopper()], style="haiku")
         with self.assertRaises(ValueError):
             fl.summarize_logs(FakeLLM(), [shopper()], style="task")          # task= is required
+        for name, kw in (("log_paars", {"n_raw": 0}), ("log_stats", {"top_k": 0}),
+                         ("log_task_summary", {"k": -1}), ("log_agent4rec", {"n_items": 0})):
+            with self.assertRaises(ValueError, msg=(name, kw)):
+                pi.get_injector(name, **kw)
+        for kw in ({"n": 0}, {"n_items": 0}):                            # [-0:] would be the whole log
+            with self.assertRaises(ValueError, msg=kw):
+                fl.summarize_logs(FakeLLM(), [shopper()], style="paars", **kw)
 
 
 class TestMissingAndBadInput(unittest.TestCase):
@@ -102,6 +112,24 @@ class TestMissingAndBadInput(unittest.TestCase):
         p = {"id": "u1", "history": [{"t": 3, "item": "a"}, {"t": "2024-01-01", "item": "b"}]}
         with self.assertRaises(ValueError):
             pi.get_injector("log_raw")(p, {"id": "q", "text": "?", "options": ["a", "b"]})
+
+    def test_dataframe_records(self):
+        """Rows from DataFrame.to_dict('records'): NaT / NaN mean absent, numpy scalars work."""
+        df = pd.DataFrame([
+            {"t": "2024-01-10", "item": "a", "title": "Apple", "price": 1.0, "rating": np.nan, "discount": np.nan},
+            {"t": None, "item": "b", "title": "NaT secret", "price": 2.0, "rating": np.nan, "discount": True}])
+        df["t"] = pd.to_datetime(df["t"])
+        p = {"id": "u1", "history": df.to_dict("records")}
+        self.assertEqual([e["title"] for e in fl.visible_events(p, Q)], ["Apple"])   # NaT is undated: hidden
+        s = fl.log_stats(fl.visible_events(p, Q))
+        self.assertEqual((s["n_purchases"], s.get("n_ratings")), (1, None))        # NaN rating is no rating
+        self.assertNotIn("discount_share", s)
+        text = pi.get_injector("log_raw")(p, Q).system
+        self.assertNotIn("NaT secret", text)
+        self.assertNotIn("nan", text.lower())
+        n = {"id": "u2", "history": [{"t": np.int64(2), "item": "x"}, {"t": np.int64(7), "item": "late"}]}
+        q = {"id": "q", "text": "?", "options": ["a", "b"], "cutoff": np.int64(5)}
+        self.assertEqual([e["item"] for e in fl.visible_events(n, q)], ["x"])
 
     def test_no_visible_events_still_renders(self):
         p = {"id": "u1", "history": [{"t": "2025-01-01", "item": "a", "price": 1}]}
@@ -181,6 +209,25 @@ class TestLeakage(unittest.TestCase):
             self.assertNotIn("dairy-1", clean[fl.SUMMARY_FIELD][style]["items"])
             pi.get_injector(name)(clean, q)
 
+    def test_summary_built_from_target_qid_is_refused(self):
+        person = shopper()
+        person["history"] = person["history"] + [
+            {"t": "2024-03-20", "action": "answer", "qid": "q1", "text": "TARGET-ANSWER"}]
+        echo = FakeLLM(lambda s, u: u)                       # the summary repeats its input
+        for style, name in (("paars", "log_paars"), ("task", "log_task_summary")):
+            kw = {"task": "predict purchases"} if style == "task" else {}
+            leaky = fl.summarize_logs(echo, [person], style=style, cutoff=CUT, **kw)[0]
+            self.assertIn("TARGET-ANSWER", leaky[fl.SUMMARY_FIELD][style]["text"])
+            self.assertEqual(leaky[fl.SUMMARY_FIELD][style]["qids"], ["q1"])
+            with self.assertRaises(ValueError, msg=name) as cm:
+                pi.get_injector(name)(leaky, Q)
+            self.assertIn("leakage", str(cm.exception))
+            with self.assertRaises(ValueError, msg=name):                  # an exclude qid counts too
+                pi.get_injector(name)(leaky, {**Q, "id": "other", "exclude": ["q1"]})
+            clean = fl.summarize_logs(echo, [person], style=style, cutoff=CUT, hide_qids=["q1"], **kw)[0]
+            p = pi.get_injector(name)(clean, Q)
+            self.assertNotIn("TARGET-ANSWER", p.system + p.user, msg=name)
+
     def test_summary_calls_see_only_the_window(self):
         llm = FakeLLM(lambda s, u: "ok")
         fl.summarize_logs(llm, [shopper()], style="paars", cutoff=CUT, hide_items=["x1"])
@@ -230,6 +277,30 @@ class TestRendering(unittest.TestCase):
         self.assertIn('most recent event is: rate "Heat (1995)"', r)
         self.assertIn("Would you buy oat milk", p.user)
         self.assertIn('"answer"', p.user)
+
+    def test_discount_rendering(self):
+        for d, want in ((True, "on discount"), (np.bool_(True), "on discount"), (1, "on discount"),
+                        (0.25, "25% off"), ("yes", "on discount")):
+            self.assertIn(want, fl.event_line({"item": "x", "discount": d}), msg=d)
+        for d in (False, 0, np.bool_(False)):
+            self.assertNotIn("discount", fl.event_line({"item": "x", "discount": d}), msg=d)
+
+    def test_recent_retrieval_and_task_summary_events(self):
+        p = pi.get_injector("log_retrieved", k=2, method="recent")(shopper(), Q).system
+        self.assertLess(p.index("Heat (1995)"), p.index("Mixed box"))
+        self.assertNotIn("Premium tea", p)
+        q = {"id": "q", "text": "Do you like premium tea?", "options": ["yes", "no"], "cutoff": CUT}
+        person = summarised([shopper()], "task")[0]
+        self.assertNotIn("Related past events", pi.get_injector("log_task_summary")(person, q).system)
+        with_k = pi.get_injector("log_task_summary", k=1)(person, q)
+        self.assertIn("Related past events:\n- 2024-02-03 view \"Premium tea\"", with_k.system)
+        self.assertEqual(with_k.meta["n_events"], 1)
+
+    def test_agent4rec_prompt_uses_like_at(self):
+        llm = FakeLLM(lambda s, u: "ok")
+        fl.summarize_logs(llm, [shopper()], style="agent4rec", cutoff=CUT, like_at=4)
+        self.assertIn("liked = rating 4 or above", llm.calls[0][1])
+        self.assertIn("Liked: Heat (1995)", llm.calls[0][1])
 
     def test_bm25_puts_relevant_first(self):
         q = {"id": "q", "text": "Do you like premium tea?", "options": ["yes", "no"], "cutoff": CUT}
