@@ -244,6 +244,14 @@ class Instacart(BenchTask):
     metrics = (Metric("f1", True, _f1, "mean per-user F1 of {p >= threshold} vs reordered set (empty = 'None')"),
                Metric("auc", True, _auc, "ROC AUC pooled over (user, product) candidate rows"))
 
+    def __init__(self, **options):
+        super().__init__(**options)
+        n, th = options.get("n_users"), options.get("threshold", THRESHOLD)
+        if n is not None and int(n) < 1:
+            raise ValueError(f"instacart: n_users must be >= 1 or None, got {n}")
+        if not np.isfinite(float(th)):  # NaN would silently predict nothing for every user
+            raise ValueError(f"instacart: threshold must be a finite number, got {th}")
+
     def _load(self, root: str) -> TaskData:
         s = int(self.options.get("seed", 0))
         orders = read_table(root, "orders")
