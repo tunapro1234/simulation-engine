@@ -241,6 +241,12 @@ adversarial check found that this biases *against* the hybrid **[deney 2.1]**.
   and `multiplier_lower_bound = max(ns) / n0` (16x with the defaults). Bootstrap replicates above the curve rank
   above every finite one, and a CI endpoint in that tail is None (`ci_censored`). Earlier versions dropped those
   replicates, which made the CI too low. `multiplier_at_floor` marks a value clamped at the bottom of the curve.
+- CI and calibration noise. By default (`boot_calibration=True`) every bootstrap replicate re-draws the
+  calibration sets from its resampled pairs, so the CI carries the noise of calibrating on 20 tests. The research
+  script held the calibration fixed (`boot_calibration=False`; the 2.27x (1.67-3.11) above is that CI). In a
+  simulation (300 synthetic pairs, n_calib=20, 300 samples per setting) the fixed CI under-covered: nominal 95%
+  gave 0.82-0.94 for the multiplier and 0.83-0.93 for the accuracy difference between two priors. Recalibrated, it
+  gave 0.93-0.96 and 0.96-0.98. Point values are the same either way; only the CI is wider.
 - `saving_section(result)` turns either result into an evidence-card section that
   `simengine.evidence.section_markdown` renders. It shows accuracy at n0, the multiplier with its CI and
   censoring, n_calib and the calibration slope, so the traffic multiplier can sit next to the card.
