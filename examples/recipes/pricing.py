@@ -40,7 +40,7 @@ SEGMENTS = {  # segment -> (persona text fed to the LLM, synthetic true tastes i
     "young_pro": ("works full time in the city, no time to cook, often eats out", (-0.9, .25, .7, .5, -2.0)),
     "family": ("parent of two, plans meals for the family, watches the grocery bill", (-1.3, .45, .6, .4, -2.5)),
     "retiree": ("retired, cooks at home every day, wary of new subscriptions", (-1.6, .10, .5, .8, -2.5))}
-MARKET = pd.DataFrame({"alternative": ["A", "B", "none"], "price": [299, 279, 0], "meals": [5, 3, 0],
+MARKET = pd.DataFrame({"alternative": ["A", "B", "none"], "price": [299, 349, 0], "meals": [5, 3, 0],
                        "organic": [1, 0, 0], "free_cancel": [1, 1, 0]})  # A = ours (price swept), B = competitor
 SYSTEM = ("You simulate one consumer in a choice survey. Give the probability that this consumer picks each option. "
           "JSON only, one key per option: {\"A\": p, ..., \"none\": p}")
@@ -164,18 +164,18 @@ for k in ATTRS:
 share = lambda c, mk: float(np.exp(v := sum(c[k] * mk[k] for k in ATTRS) + c["price"] / 100 * mk.price
                                    + mk.alternative.map(lambda j: c.get(f"ASC_{j}", 0.0))).iloc[0] / np.exp(v).sum())
 curve = []
-for f in np.round(np.arange(0.6, 1.65, 0.1), 2):                     # 60 % .. 160 % of A's reference price
+for f in np.round(np.arange(0.8, 1.27, 0.05), 2):        # 80-125 % of A's price: stay inside the tested prices
     mk = MARKET.assign(price=MARKET.price.where(MARKET.alternative != "A", MARKET.price.iloc[0] * f))
     draws = [share(c, mk) for _, c in arms["human"][1].iterrows()]
     curve.append({"price": mk.price.iloc[0], "human": share(arms["human"][0].coef_, mk),
                   "lo": np.quantile(draws, .025), "hi": np.quantile(draws, .975),
                   "llm": share(arms["llm"][0].coef_, mk)})
-mid = lambda x: x.diff() / x.rolling(2).mean()                      # arc (midpoint) change
-curve = pd.DataFrame(curve).assign(revenue=lambda c: c.price * c.human)
-curve["elasticity"] = mid(curve.human) / mid(curve.price)
+curve = pd.DataFrame(curve).assign(revenue=lambda c: c.price * c.human)        # elasticity: arc (midpoint) formula
+curve["elasticity"] = (d := curve.diff() / curve.rolling(2).mean()).human / d.price
 curve.to_csv(out / "price_curve.csv", index=False)
 print("\nprice curve for A (human share, 95% CI, llm share):", curve.round(3).to_string(index=False), sep="\n")
-print(f"revenue-max price (human): {curve.price[curve.revenue.idxmax()]:.0f} {CUR}")
+print(f"revenue-max price (human): {curve.price[(i := curve.revenue.idxmax())]:.0f} {CUR}"
+      + (" - at the edge of the sweep: test wider prices before quoting it" if i in (0, len(curve) - 1) else ""))
 
 # 7. Seal the test predictions BEFORE the truth is joined (one row per task: {alternative: probability}).
 tasks = df[df.chosen == 1].set_index("task")
