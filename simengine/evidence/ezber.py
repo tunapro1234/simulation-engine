@@ -9,9 +9,14 @@ Port note (simengine): the original called `claude -p` through subprocess. Here 
 `simengine.types.LLM` (simengine.llm.Claude / ClaudeCode / FakeLLM) wrapped by `llm_caller`, or any
 str -> str callable. Caching, language settings and budget belong to the LLM backend. At most 500 calls per run.
 The result dict is what `denetim.ezber` (and `evaluate(..., memorization_json=...)`) reads.
+
+`recall_probe(llm, source, groups, measures, truth=...)`: one persona-free "recall <source> results" call as JSON,
+in-JSON refusal detection ({"remember": false}, empty tables, all nulls) and one "best estimate" retry; with truth,
+per-group MAE / Spearman and an `audit` dict for `evaluate(memorization=...)`.
 """
 from __future__ import annotations
 
+import json
 import re
 
 import numpy as np
@@ -259,3 +264,239 @@ def correlation_audit(truth, named, blind, *, llm=None, system: str = BEST_GUESS
             "spearman_named": _f(rn), "spearman_named_ci": ga(bn), "spearman_blind": _f(rb), "spearman_blind_ci": ga(bb),
             "mae_named": float(np.mean(np.abs(n_ - y))), "mae_blind": float(np.mean(np.abs(b_ - y))),
             "answers_named": {str(k): a_n[k] for k in ok}, "answers_blind": {str(k): a_b[k] for k in ok}}
+
+
+# ------------------------------------------------------------------ tek çağrılık hatırlama sondası
+RECALL_SYSTEM = "You are checking what you remember about published research results. Reply with JSON only."
+RECALL_TEMPLATE = (
+    "Recall the published results of {source} for these groups and measures.\n"
+    "Groups: {groups}\nMeasures: {measures}\n{scale}"
+    'Reply with JSON only, in this shape: {{"remember": true or false, "results": {{"<group>": {{"<measure>": '
+    '<number or null>}}}}}}. Use the group and measure names exactly as given. Set "remember" to false and use null '
+    "for values you do not remember.")
+RECALL_RETRY_TEMPLATE = (
+    "Give your best estimate of the results of {source} for these groups and measures.\n"
+    "Groups: {groups}\nMeasures: {measures}\n{scale}"
+    "You may not remember the exact figures; that is fine. Put a number in every cell (no nulls) and set "
+    '"remember" to false if these are estimates rather than recalled values. Reply with JSON only, in this shape: '
+    '{{"remember": true or false, "results": {{"<group>": {{"<measure>": <number>}}}}}}. Use the group and measure '
+    "names exactly as given.")
+REFUSAL_KINDS = ("error", "empty_reply", "text", "unparsed", "remember_false", "empty", "all_null")
+_META = {"remember", "remembers", "recall", "recalls", "recalled", "known", "knows", "note", "notes", "source",
+         "confidence", "comment", "caveat"}
+_BODY = ("results", "values", "data", "table", "tables", "estimates", "recalled_values")
+_FLAG = ("remember", "remembers", "recall", "recalls", "recalled", "known", "knows")
+# "I can't recall those figures": a recall-specific decline that the generic refusal detector leaves alone
+_NO_RECALL = re.compile(r"\b(?:can ?not|can't|cannot|unable to|not able to|do not|don't|doesn't)\s+(?:\w+\s+){0,2}?"
+                        r"(?:recall|remember|know|have (?:access|reliable|specific|exact))|"
+                        r"hatırla(?:mıyorum|yamıyorum|yamam)|bilmiyorum|erişimim yok", re.I)
+
+
+def _esle(ad, adlar: list[str]):
+    n = _norm(ad)
+    return next((a for a in adlar if _norm(a) == n), None)
+
+
+def _hucreler(p, groups: list[str], measures: list[str]) -> tuple[dict, int]:
+    """Parsed JSON -> ({(group, measure): float or nan}, number of matched cells, null ones included).
+    Shapes: {"results": {group: {measure: v}}}, measure-major {measure: {group: v}}, {group: v} (one measure),
+    rows [{"group": g, "measure": m, "value": v}] or [{"group": g, <measure>: v, ...}]."""
+    out: dict = {}
+    if isinstance(p, dict):
+        low = {str(k).strip().lower(): k for k in p}
+        govde = next((p[low[k]] for k in _BODY if k in low), None)
+        if govde is None:
+            govde = {k: v for k, v in p.items() if str(k).strip().lower() not in _META}
+        p = govde
+
+    def koy(g, m, v):
+        if g is not None and m is not None and not isinstance(v, (dict, list)):
+            out[(g, m)] = _sayi_cek(v) if not isinstance(v, bool) else np.nan
+
+    if isinstance(p, list):
+        for r in p:
+            if not isinstance(r, dict):
+                continue
+            rl = {str(k).strip().lower(): v for k, v in r.items()}
+            g = _esle(rl.get("group", rl.get("name", "")), groups)
+            if g is None:
+                continue
+            if "measure" in rl:
+                koy(g, _esle(rl["measure"], measures), rl.get("value"))
+            else:
+                for k, v in r.items():
+                    koy(g, _esle(k, measures), v)
+    elif isinstance(p, dict):
+        for k, v in p.items():
+            g, m = _esle(k, groups), _esle(k, measures)
+            if g is not None and isinstance(v, dict):
+                for mk, mv in v.items():
+                    koy(g, _esle(mk, measures), mv)
+            elif m is not None and isinstance(v, dict):
+                for gk, gv in v.items():
+                    koy(_esle(gk, groups), m, gv)
+            elif g is not None and len(measures) == 1:
+                koy(g, measures[0], v)
+    return out, len(out)
+
+
+def recall_refusal(text: str | None, groups, measures) -> tuple[str | None, dict]:
+    """Classify one recall-probe reply: (refusal kind or None, {(group, measure): value}).
+
+    Kinds (`REFUSAL_KINDS`): "empty_reply", "text" (prose decline: `llm.looks_like_refusal` or "I can't recall / don't remember"), "unparsed" (no JSON),
+    "remember_false" (the JSON says it does not remember: "remember"/"recall"/"known": false), "empty" (no table
+    or empty tables), "all_null" (cells present, none numeric). `looks_like_refusal` returns False for every JSON
+    reply, so the last four are only caught here. "remember_false" may still carry numbers (then they are labelled
+    estimates, not recall)."""
+    from ..llm.refusal import looks_like_refusal
+    from ..sim.parse import parse_json
+    groups, measures = [str(g) for g in groups], [str(m) for m in measures]
+    if not text or not str(text).strip():
+        return "empty_reply", {}
+    p = parse_json(text)
+    if p is None:
+        return ("text" if looks_like_refusal(text) or _NO_RECALL.search(str(text)[:400]) else "unparsed"), {}
+    cells, n = _hucreler(p, groups, measures)
+    n_num = sum(np.isfinite(v) for v in cells.values())
+    flag = None
+    if isinstance(p, dict):
+        low = {str(k).strip().lower(): v for k, v in p.items()}
+        flag = next((low[k] for k in _FLAG if k in low), None)
+        if isinstance(flag, str):
+            flag = {"true": True, "yes": True, "false": False, "no": False}.get(flag.strip().lower(), flag)
+    if flag is False:
+        return "remember_false", cells
+    if n == 0:
+        return "empty", cells
+    if n_num == 0:
+        return "all_null", cells
+    return None, cells
+
+
+def _nested(cells: dict, groups, measures) -> dict:
+    return {g: {m: (float(cells[(g, m)]) if (g, m) in cells and np.isfinite(cells[(g, m)]) else None)
+                for m in measures} for g in groups}
+
+
+def _truth_cells(truth, groups, measures) -> dict:
+    if hasattr(truth, "columns") and hasattr(truth, "iterrows"):   # DataFrame: index = group, columns = measure
+        truth = {g: r.to_dict() for g, r in truth.iterrows()}
+    t = _sozluk(truth)
+    out = {}
+    for gk, gv in t.items():
+        g = _esle(gk, groups)
+        if g is None:
+            continue
+        if isinstance(gv, dict) or hasattr(gv, "to_dict"):
+            for mk, mv in _sozluk(gv).items():
+                m = _esle(mk, measures)
+                if m is not None:
+                    out[(g, m)] = _sayi_cek(mv)
+        elif len(measures) == 1:
+            out[(g, measures[0])] = _sayi_cek(gv)
+    return out
+
+
+def recall_probe(llm, source: str, groups, measures, truth=None, best_estimate_retry: bool = True, *,
+                 max_tokens: int = 2048, tag: str | None = None, scale: str | None = None,
+                 system: str = RECALL_SYSTEM, thinking: str | dict | None = "auto",
+                 warn_spearman: float = 0.7) -> dict:
+    """One persona-free call: "recall <source> results for these groups / measures" as JSON. Does the model
+    say it remembers the published table, and how close are its numbers?
+
+        probe = ev.ezber.recall_probe(llm, "the <survey> <year> wave", ["18-29", "30-44", "45+"],
+                                      ["support", "oppose"], truth=truth, scale="percent, 0-100", tag="probe")
+        probe["recalls"], probe["refusal"], probe["used"], probe["mae"], probe["spearman"]
+        ev.evaluate(df, ours="llm", memorization=probe["audit"])
+
+    llm: a simengine LLM (.complete(system, user)) or a str -> str callable (gets the user prompt only).
+    Refusals inside JSON ({"remember": false} with empty tables or all nulls; `looks_like_refusal` misses every
+    JSON reply) are detected by `recall_refusal`. With best_estimate_retry=True and no numbers in the first reply,
+    one more call asks for a "best estimate" (`RECALL_RETRY_TEMPLATE`, tag "<tag>:retry"); its numbers are
+    estimates, never recall. An LLMError (empty reply and the like) counts as refusal kind "error".
+
+    Returns: raw / raw_retry (reply texts), recalls (True only when the FIRST reply gives numbers and does not
+    say "remember": false), refusal (first reply's kind or None), retry_refusal, used ("first" / "retry" / None),
+    values ({group: {measure: number or None}} from the used reply), n_values, calls. With truth ({group:
+    {measure: v}}, {group: v} for one measure, or a DataFrame indexed by group): per_group ({group: {"mae", "n"}}),
+    mae, pearson and spearman over all cells, spearman_by_measure (across groups, >= 3), n_compared, and audit:
+    the dict `evaluate(memorization=...)` reads. audit durum is "uyari" when the used numbers reach
+    Spearman >= warn_spearman with the truth (recalled or "best estimate": either way the model knows the table
+    better than it says), "tamam" below, "atlandi" with < 3 comparable cells. One probe has no blind control:
+    general knowledge can also rank groups well, so for a controlled test use `correlation_audit` (named vs blind)."""
+    groups = [str(g) for g in groups]
+    measures = [measures] if isinstance(measures, str) else [str(m) for m in measures]
+    fill = {"source": source, "groups": json.dumps(groups, ensure_ascii=False),
+            "measures": json.dumps(measures, ensure_ascii=False), "scale": f"Values: {scale}.\n" if scale else ""}
+    complete = hasattr(llm, "complete")
+    tkw = _thinking_kw(llm, thinking, system, max_tokens) if complete else {}
+    hata: list = []
+
+    def sor(user: str, t: str | None) -> str | None:
+        if not complete:
+            return llm(user)
+        kw = dict(tkw)
+        if t:
+            kw["tag"] = t
+        try:
+            return llm.complete(system, user, max_tokens=max_tokens, **kw).text
+        except Exception as e:  # noqa: BLE001 - only LLMError is absorbed
+            if not _llm_hata(e):
+                raise
+            hata.append(f"{type(e).__name__}: {str(e)[:120]}")
+            return None
+
+    raw = sor(RECALL_TEMPLATE.format(**fill), tag)
+    calls = 1
+    kind, cells = ("error", {}) if raw is None and hata else recall_refusal(raw, groups, measures)
+    n_num = sum(np.isfinite(v) for v in cells.values())
+    recalls = kind is None and n_num > 0
+    used = "first" if n_num else None
+    raw2, kind2 = None, None
+    if not n_num and best_estimate_retry:
+        n_err = len(hata)
+        raw2 = sor(RECALL_RETRY_TEMPLATE.format(**fill), f"{tag}:retry" if tag else None)
+        calls += 1
+        kind2, cells2 = ("error", {}) if raw2 is None and len(hata) > n_err else recall_refusal(raw2, groups, measures)
+        if sum(np.isfinite(v) for v in cells2.values()):
+            cells, used = cells2, "retry"
+    values = _nested(cells, groups, measures)
+    out = {"source": source, "raw": raw, "raw_retry": raw2, "recalls": bool(recalls), "refusal": kind,
+           "retry_refusal": kind2, "used": used, "values": values,
+           "n_values": int(sum(v is not None for r in values.values() for v in r.values())),
+           "n_cells": len(groups) * len(measures), "calls": calls, "errors": hata[:5]}
+    if truth is None:
+        return out
+    t = _truth_cells(truth, groups, measures)
+    ok = [c for c in t if np.isfinite(t[c]) and c in cells and np.isfinite(cells[c])]
+    _f = lambda x: float(x) if x is not None and np.isfinite(x) else None
+    per_group = {}
+    for g in groups:
+        d = [abs(cells[c] - t[c]) for c in ok if c[0] == g]
+        per_group[g] = {"mae": float(np.mean(d)) if d else None, "n": len(d)}
+    y = np.array([t[c] for c in ok])
+    x = np.array([cells[c] for c in ok])
+    pear = float(np.corrcoef(x, y)[0, 1]) if len(ok) >= 3 and np.std(x) > 0 and np.std(y) > 0 else np.nan
+    rho = _spearman(y, x) if len(ok) >= 3 else np.nan
+    by_m = {}
+    for m in measures:
+        cm = [c for c in ok if c[1] == m]
+        by_m[m] = _f(_spearman(np.array([t[c] for c in cm]), np.array([cells[c] for c in cm]))) if len(cm) >= 3 else None
+    mae = float(np.mean(np.abs(x - y))) if len(ok) else None
+    kol = {"first": "ilk cevap (hatırlıyor)" if recalls else "ilk cevap (hatırlamıyor dedi, sayı verdi)",
+           "retry": f"ilk cevap ret ({kind}), 'best estimate' tekrarı", None: "sayı yok"}[used]
+    fmt = lambda v: "—" if v is None or not np.isfinite(v) else f"{v:+.3f}"
+    if len(ok) < 3:
+        durum, ayrinti = "atlandi", (f"hatırlama sondası: yalnız {len(ok)} hücrede gerçek ve cevap birlikte var "
+                                     f"(en az 3 gerekli); {kol}")
+    else:
+        durum = "uyari" if np.isfinite(rho) and rho >= warn_spearman else "tamam"
+        ayrinti = (f"hatırlama sondası ({len(ok)} hücre, {kol}): Spearman {fmt(rho)}, MAE {mae:.3f}; eşik "
+                   f"{warn_spearman:.2f}" + (" · ezber şüphesi" if durum == "uyari" else " · ezber işareti yok")
+                   + " (tek sonda, adsız kontrol yok)")
+    audit = {"yontem": "tek çağrılık hatırlama sondası", "durum": durum, "ayrinti": ayrinti, "deger": _f(rho),
+             "alt": None, "ust": None, "n": len(ok), "recalls": bool(recalls), "refusal": kind, "used": used,
+             "mae": mae, "esik": warn_spearman}
+    out.update({"per_group": per_group, "mae": mae, "pearson": _f(pear), "spearman": _f(rho),
+                "spearman_by_measure": by_m, "n_compared": len(ok), "audit": audit})
+    return out
