@@ -68,6 +68,7 @@ class TestExposures(unittest.TestCase):
         self.assertEqual(pl.exposures(self.t, self.g, days=[1], users=users).M.sum(), 1)
         with self.assertRaises(ValueError):
             pl.exposures(self.t, self.g, unit="week")
+        self.assertEqual(pl.exposures(self.t, self.g, users=np.array([], np.int64)).M.shape, (0, 2))
 
     def test_reach_frequency(self):
         ex = pl.exposures(self.t, self.g, users=np.array([0, 1, 2]))
@@ -128,11 +129,40 @@ class TestGreedy(unittest.TestCase):
         p = pl.greedy_placement(M, 4, candidates=[1, 3, 5, 7, 9])
         self.assertTrue(set(p.cells) <= {1, 3, 5, 7, 9})
 
+    def test_lazy_equals_plain_on_rounding_boundary(self):
+        # a gain whose 9th-decimal rounding differs between Python round() and np.round: re-evaluated lazily, it
+        # must still tie with (and lose to the lower index against) the plain greedy's key
+        a = 9.2301163515
+        w = np.array([a, float(np.round(a, 9)), 100.0])
+        M = sparse.csc_matrix(np.eye(3))
+        self.assertEqual(pl.greedy_placement(M, 2, weights=w).cells,
+                         pl.greedy_placement(M, 2, weights=w, lazy=False).cells)
+
+    def test_duplicates_and_stored_zeros(self):
+        # column 0 stores user 0 three times (true reach 1), column 1 reaches users 1 and 2
+        M = sparse.csc_matrix((np.ones(5), np.array([0, 0, 0, 1, 2]), np.array([0, 3, 5])), shape=(3, 2))
+        for lazy in (True, False):
+            p = pl.greedy_placement(M, 1, lazy=lazy)
+            self.assertEqual((p.cells, p.value), ([1], 2.0))
+        self.assertEqual(M.nnz, 5)                                               # caller's matrix untouched
+        Z = sparse.csc_matrix((np.array([0., 0., 0., 1.]), np.array([0, 1, 2, 3]), np.array([0, 3, 4])), shape=(4, 2))
+        self.assertEqual(pl.top_visited(Z, 1, by="visitors"), [1])
+        self.assertEqual(pl.random_cells(Z, 2), [1])
+
+    def test_bound_over_candidates(self):
+        M = random_instance(seed=4, n_cells=12, n_users=50, density=0.2)
+        cand = [0, 2, 4, 6, 8]
+        p = pl.greedy_placement(M, 2, candidates=cand)
+        opt = brute_force(M[:, cand], k=2)
+        self.assertLessEqual(opt, p.bound + 1e-9)
+        self.assertLessEqual(p.bound, pl.online_bound(M, p.cells, k=2) + 1e-9)
+
     def test_budget_celf(self):
-        # paper's counterexample: benefit/cost greedy alone picks the cheap cell and cannot afford the big one
+        # the paper's counterexample (Sec. 3.1, eps = 1, B = 10): ratios 2 and 1; benefit/cost greedy alone picks the
+        # cheap cell and cannot afford the big one
         B = 10.0
         M = sparse.csc_matrix(np.r_[np.c_[np.ones(2), np.zeros(2)], np.c_[np.zeros(10), np.ones(10)]])
-        costs = np.array([0.1, B])
+        costs = np.array([1.0, B])
         p = pl.greedy_placement(M, costs=costs, budget=B)
         self.assertEqual(p.cells, [1])
         self.assertEqual(p.extra["rule"], "unit_cost")
