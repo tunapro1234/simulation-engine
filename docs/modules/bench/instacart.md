@@ -112,6 +112,31 @@ for th in (0.1, 0.15, 0.2, 0.25, 0.3):                        # threshold sweep,
     print(th, {m: Instacart(threshold=th).score(frame, m, B=10)["value"] for m in ("user_product_rate", "lgbm")})
 ```
 
+Run on the local copy, 22 Oct 2026: 131,209 users, 8,474,661 test candidate rows (base rate 0.0978), 7,912,788
+train rows (base rate 0.1007). Load 48 s, baselines (mostly LightGBM) 104 s, scoring with B = 1000 533 s (the pooled
+AUC bootstrap dominates); 11.5 min wall in total, 6.3 GB peak RSS. Every value is `value [95% CI]`, n = 131,209 users,
+threshold 0.2.
+
+| baseline | F1 (mean per user) | AUC (pooled) |
+|---|---|---|
+| user_reorder_rate | 0.2216 [0.2206, 0.2228] | 0.5293 [0.5279, 0.5309] |
+| product_reorder_rate | 0.2197 [0.2188, 0.2207] | 0.6663 [0.6655, 0.6671] |
+| user_product_rate | 0.3133 [0.3122, 0.3145] | 0.7730 [0.7722, 0.7739] |
+| lgbm | **0.3811** [0.3797, 0.3825] | **0.8362** [0.8355, 0.8369] |
+
+Threshold sweep on the same test frame (point values; diagnostic only, the default 0.2 was fixed before this run and
+was not chosen from it):
+
+| threshold | 0.10 | 0.15 | 0.20 | 0.25 | 0.30 |
+|---|---|---|---|---|---|
+| user_product_rate | 0.2712 | 0.3012 | 0.3133 | 0.3208 | 0.3237 |
+| lgbm | 0.3468 | 0.3740 | **0.3811** | 0.3748 | 0.3594 |
+
+`user_reorder_rate` is one value per user, so within a user it predicts all or none of the candidates; its AUC near
+0.5 reflects that. The raw `user_product_rate` is not a calibrated probability, so its best F1 sits at a higher
+threshold than LightGBM's. A new method should be reported at the default threshold and, if it outputs scores rather
+than probabilities, also with its threshold picked on the train cut, not on the test frame.
+
 ## Limitations
 
 - **Fixed threshold, no F1 optimisation.** Strong competition solutions choose each user's set (and whether to add
