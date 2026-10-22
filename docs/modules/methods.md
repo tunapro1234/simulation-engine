@@ -180,11 +180,18 @@ p_stack = stack.predict(test, p_llm=p_direct, valid=direct.valid_)
 ```
 
 `ab_archive` turns a past A/B archive into this standard frame (`group`, `text_a`, `text_b`, `clicks_a`, `n_a`,
-`clicks_b`, `n_b`, `ctr_a`, `ctr_b`, `y`, `tie`), the frame `LLMDirectAB`, `ABStack` and
+`clicks_b`, `n_b`, `ctr_a`, `ctr_b`, `tie`, `y`, `p_value`, `significant`), the frame `LLMDirectAB`, `ABStack` and
 `simulate_saving_calibrated(f.ctr_a, f.ctr_b, prior, f.clicks_a, f.clicks_b)` take. Input can be wide (one row per
-pair: pass the `_b` columns too) or long (one row per variant, as in the raw Upworthy archive: leave the `_b`
-columns out, and every two variants of a test form a pair). By default it drops exact CTR ties and keeps one
-seeded random pair per test. For a dry run with no API, `FakeLLM(ab_responder(score_fn, noise, seed))` answers
+pair: pass the `_b` columns too; your A/B sides are kept) or long (one row per variant, as in the raw Upworthy
+archive: leave the `_b` columns out, and every two variants of a test form a pair). In long input a seeded coin puts
+each pair's variants on A or B (`random_sides=True`), so archive row order cannot leak into `y`: on an archive
+listed best-first (simulated), "A = earlier row" gives y = 1 for 88% of pairs and an LLM that always says A scores 0.88; with
+random sides both are 0.51. By default it also drops pairs with the same text on both sides (image-only tests)
+and exact CTR ties, and keeps one seeded random pair per test, picked after the filters. `p_value` is a pooled
+two-proportion z-test and `significant` is p < 0.05 (nominal; 5.0% of simulated A/A pairs). The measured numbers
+above are on significant pairs, so compare against them with `significant_only=True` (applied before the
+one-pair pick); the deney sets used FDR, because Upworthy A/A pairs hit nominal p < .05 14.6% of the time. Clicks
+outside [0, n] raise. For a dry run with no API, `FakeLLM(ab_responder(score_fn, noise, seed))` answers
 the `LLMDirectAB` prompt with p_a = sigmoid(score(a) - score(b) + noise). With `score_fn=len` the longer text
 wins; the default is a hashed score that carries no signal.
 
