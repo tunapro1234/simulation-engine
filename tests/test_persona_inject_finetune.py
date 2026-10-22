@@ -205,13 +205,13 @@ class TestDatasetBuilders(unittest.TestCase):
         self.assertEqual(len(pairs), 4)
         for p in pairs:
             self.assertIn("Choices:\n(A) ", p["prompt"])
-            self.assertEqual({p["positive"], p["negative"]}, {"(A)", "(B)"})
-            pos_text = p["prompt"].split(p["positive"] + " ")[1].split("\n")[0]
+            self.assertEqual({p["positive"], p["negative"]}, {"(A", "(B"})   # stops at the letter (read position)
+            pos_text = p["prompt"].split(p["positive"] + ") ")[1].split("\n")[0]
             self.assertEqual(pos_text, {"q0": "yes", "q1": "no", "q3": "c"}[p["question"]])
         self.assertEqual(pairs, ft.caa_pairs(qs, {"q0": "yes", "q1": "no", "q3": "c"}, seed=0))
         many = ft.caa_pairs([{"id": f"x{i}", "text": "t", "options": OPTS} for i in range(40)],
                             {f"x{i}": "yes" for i in range(40)}, seed=1)
-        self.assertEqual({p["positive"] for p in many}, {"(A)", "(B)"})      # trait letter is balanced
+        self.assertEqual({p["positive"] for p in many}, {"(A", "(B"})        # trait letter is balanced
         with self.assertRaises(ValueError):
             ft.caa_pairs(QUESTIONS, {"q0": "perhaps"})
 
@@ -248,6 +248,10 @@ class TestDatasetBuilders(unittest.TestCase):
                          (32, ["q_proj", "v_proj"], "forward_kl", 256))
         with self.assertRaises(ValueError):
             ft.recipe("nope")
+        self.assertEqual([ft.recipe(k)["optimizer"] for k in ("centaur", "subpop", "soft_prompt")],
+                         ["adamw_8bit", "adamw", "adafactor"])                 # each paper's optimizer
+        with self.assertRaises(ValueError):
+            ft.train_colab_t4("missing.jsonl", "out", ft.recipe("centaur", optimizer="sgd"))
         with self.assertRaises(ValueError):        # micro batching is not implemented: refused before any import
             ft.train_colab_t4("missing.jsonl", "out", ft.recipe("centaur", micro_batch=4))
 

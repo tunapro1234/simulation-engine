@@ -117,8 +117,9 @@ class _Finetune(Injector):
 class SubpopLoRA(_Finetune):
     """SubPOP (Suh et al. 2025): LoRA-tune a base LM so its next-token distribution over option letters matches a
     subpopulation's answer distribution (forward KL). The persona is a steering text from OpinionQA's three
-    formats: qa (attribute Q/A lines), bio (first person), portray (\"Answer ... as if ...\"). Not measured in
-    simengine."""
+    formats: qa (attribute Q/A lines), bio (first person), portray (\"Answer ... as if ...\"). portray follows the
+    paper's example wording; qa and bio are generic templates over field names, not OpinionQA's per-attribute
+    questions and sentences. Not measured in simengine."""
     name = "subpop_lora"
     paper = "Suh et al. 2025, SubPOP, arXiv:2502.16761"
     needs = ("fields",)
@@ -383,10 +384,11 @@ def distribution_rows(groups: Sequence[dict], questions: Sequence[dict], dist: M
 
 def caa_pairs(questions: Sequence[dict], behavior: Mapping[str, Any], *, seed: int = 0) -> list[dict]:
     """CAA contrastive pairs: {"prompt", "positive", "negative", "question"} where the prompt lists lettered
-    choices and positive/negative are the answer letters "(A)" / "(B)" appended after it (activations are read
-    at that letter). behavior[qid] = the option showing the trait; with more than two options, one pair per
-    other option. Option order is shuffled per pair with `seed` so the trait is not always (A).
-    Not measured in simengine."""
+    choices and positive/negative are the completions "(A" / "(B" appended after it. They stop at the letter, so
+    steering_vector(mode="last") reads the activation at the answer letter as in the paper (a closing ")" would
+    move the read position). behavior[qid] = the option showing the trait; with more than two options, one pair
+    per other option. Option order is shuffled per pair with `seed` so the trait is not always (A). For a chat
+    model, wrap the prompt in its chat template before steering_vector. Not measured in simengine."""
     out = []
     for q in questions:
         qid = str(q.get("id"))
@@ -401,7 +403,7 @@ def caa_pairs(questions: Sequence[dict], behavior: Mapping[str, Any], *, seed: i
             random.Random(zlib.crc32(f"{seed}|{qid}|{neg}".encode())).shuffle(pair)
             let = dict(zip(pair, "AB"))
             prompt = f"{q['text']}\n\nChoices:\n(A) {pair[0]}\n(B) {pair[1]}"
-            out.append({"prompt": prompt, "positive": f"({let[pos]})", "negative": f"({let[neg]})",
+            out.append({"prompt": prompt, "positive": f"({let[pos]}", "negative": f"({let[neg]}",
                         "question": qid})
     return out
 
@@ -469,18 +471,26 @@ def read_jsonl(path: str) -> list[dict]:
 
 _RECIPES = {
     # Binz et al. 2025: 4-bit base, LoRA r=8 on all non-embedding linear layers, 1 epoch, lr 5e-5, wd 0.01,
-    # effective batch 32, 8-bit AdamW, 100 warmup steps, loss on response tokens only. alpha not reported.
+    # effective batch 32, 8-bit AdamW, 100 warmup steps, loss on response tokens only. alpha and dropout are not
+    # reported (16 and 0 are ours).
     "centaur": {"method": "qlora", "quant": "4bit", "r": 8, "alpha": 16, "dropout": 0.0, "target": "all-linear",
                 "lr": 5e-5, "weight_decay": 0.01, "epochs": 1, "warmup_steps": 100, "batch": 32,
-                "loss": "assistant_tokens"},
-    # Suh et al. 2025: LoRA r=8, alpha 32, dropout 0.05 on q,v; AdamW wd 0; lr 2e-4 (7B), batch 256; forward KL.
+                "optimizer": "adamw_8bit", "loss": "assistant_tokens"},
+    # Suh et al. 2025: LoRA r=8, alpha 32, dropout 0.05 on q,v (paper inits LoRA from N(0, 0.02); peft's default
+    # init is used here); AdamW wd 0; lr 2e-4 at batch 256 for the 7B models (1e-4 for 13B, 2e-5 for 70B);
+    # epochs not reported; forward KL.
     "subpop": {"method": "lora", "quant": None, "r": 8, "alpha": 32, "dropout": 0.05,
                "target": ["q_proj", "v_proj"], "lr": 2e-4, "weight_decay": 0.0, "epochs": 1, "warmup_steps": 0,
-               "batch": 256, "loss": "forward_kl"},
-    # Lester et al. 2021: frozen LM, trainable prompt embeddings; lr 0.3 (with Adafactor in the paper).
+               "batch": 256, "optimizer": "adamw", "loss": "forward_kl"},
+    # Lester et al. 2021 (T5): frozen LM, trainable prompt embeddings; Adafactor, constant lr 0.3, wd 1e-5,
+    # beta2 decay 0.8, no parameter scaling, batch 32, 30,000 steps, default prompt length 100 (20+ tokens were
+    # close to it at XL/XXL). 20 tokens and 1 epoch are ours. lr 0.3 was set for T5's embedding scale; a decoder
+    # LM's embeddings are far smaller, so it likely needs lowering (untested).
     "soft_prompt": {"method": "prompt_tuning", "quant": None, "n_virtual_tokens": 20, "lr": 0.3,
-                    "weight_decay": 1e-5, "epochs": 1, "warmup_steps": 0, "batch": 32, "loss": "assistant_tokens"},
+                    "weight_decay": 1e-5, "epochs": 1, "warmup_steps": 0, "batch": 32, "optimizer": "adafactor",
+                    "loss": "assistant_tokens"},
 }
+OPTIMIZERS = ("adamw", "adamw_8bit", "adafactor")
 
 
 def recipe(paper: str = "centaur", base_model: str = DEFAULT_BASE, **overrides: Any) -> dict:
@@ -529,6 +539,17 @@ def _tokenize_chat(tok, messages: list[dict], max_len: int) -> tuple[list[int], 
     return ids[-max_len:], labels[-max_len:]
 
 
+def _optimizer(torch, transformers, params: list, cfg: dict):
+    """The paper's optimizer: AdamW, 8-bit AdamW (Centaur; bitsandbytes) or Adafactor (Lester et al.)."""
+    name, lr, wd = cfg.get("optimizer", "adamw"), cfg["lr"], cfg["weight_decay"]
+    if name == "adamw_8bit":
+        return _require("bitsandbytes").optim.AdamW8bit(params, lr=lr, weight_decay=wd)
+    if name == "adafactor":     # T5 settings: absolute lr, no parameter scaling, beta2 decay 0.8
+        return transformers.optimization.Adafactor(params, lr=lr, weight_decay=wd, scale_parameter=False,
+                                                   relative_step=False, warmup_init=False, decay_rate=-0.8)
+    return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
+
+
 def train_colab_t4(jsonl_path: str, out_dir: str, cfg: dict | None = None) -> dict:
     """Fine-tune `cfg["base_model"]` on chat_rows / distribution_rows JSONL and save the adapter to `out_dir`.
     LoRA / QLoRA (peft) or prompt tuning; fp16 autocast for a T4. Rows with "target_dist" use forward KL over
@@ -538,6 +559,8 @@ def train_colab_t4(jsonl_path: str, out_dir: str, cfg: dict | None = None) -> di
     cfg = cfg or recipe()
     if int(cfg.get("micro_batch", 1)) != 1:
         raise ValueError("train_colab_t4 runs one row per forward pass; use micro_batch=1 (grad_accum = batch)")
+    if cfg.get("optimizer", "adamw") not in OPTIMIZERS:
+        raise ValueError(f"optimizer must be one of {OPTIMIZERS}")
     torch, transformers, peft = _require("torch", "transformers", "peft")
     rows = read_jsonl(jsonl_path)
     torch.manual_seed(cfg["seed"])
@@ -557,7 +580,7 @@ def train_colab_t4(jsonl_path: str, out_dir: str, cfg: dict | None = None) -> di
                              lora_dropout=cfg["dropout"], target_modules=cfg["target"])
     model = peft.get_peft_model(model, pc)
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    opt = _optimizer(torch, transformers, params, cfg)
     scaler = torch.cuda.amp.GradScaler(enabled=cfg["fp16"] and torch.cuda.is_available())
     dev = next(model.parameters()).device
     letter_ids = {l: tok.encode(l, add_special_tokens=False)[0] for l in LETTERS}
@@ -611,8 +634,11 @@ def _layers(model):
 def steering_vector(model, tok, pos: Sequence[tuple[str, str]], neg: Sequence[tuple[str, str]],
                     layers: Sequence[int] | None = None, mode: str = "last") -> dict:
     """{layer: vector} = mean activation over `pos` minus over `neg`, each item (prompt, completion), read at the
-    output of decoder layer l. mode "last": the last completion token (CAA: the answer letter); "mean": averaged
-    over completion tokens (persona vectors: response tokens). Lazy torch import. Not measured in simengine."""
+    output of decoder layer l. mode "last": the last completion token (CAA: the answer letter, see caa_pairs);
+    "mean": averaged over completion tokens (persona vectors: response tokens). Text is tokenized as given, so
+    apply the chat template first for a chat model. In most HF decoders the last layer's hidden state is taken
+    after the final norm, so that layer's vector is on a different scale. Lazy torch import. Not measured in
+    simengine."""
     torch = _require("torch")
     if mode not in ("last", "mean"):
         raise ValueError("mode must be 'last' or 'mean'")
