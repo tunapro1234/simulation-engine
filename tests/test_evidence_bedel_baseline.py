@@ -91,6 +91,14 @@ class TestWorthVsBaseline(unittest.TestCase):
         r = bedel.worth_vs_baseline([(y, ours, base)], B=20, seed=3)
         self.assertAlmostEqual(r["multiplier_ours"], bedel.olc([(y, ours)], B=20, tohum=3)["carpan"], places=12)
 
+    def test_single_triple_and_too_few_rows(self):
+        _, y, base, ours = _veri(N=400)
+        a = bedel.worth_vs_baseline((y, ours, base), B=20, seed=1)
+        b = bedel.worth_vs_baseline([(y, ours, base)], B=20, seed=1)
+        self.assertEqual(a, b)
+        with self.assertRaisesRegex(ValueError, "2n = 200"):
+            bedel.worth_vs_baseline((y[:150], ours[:150], base[:150]), B=20)
+
     def test_olc_unchanged(self):
         _, y, base, _ = _veri(N=400)
         a = bedel.olc([(y, base)], B=20)

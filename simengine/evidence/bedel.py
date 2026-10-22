@@ -184,10 +184,10 @@ def worth_vs_baseline(data, ours: str | None = None, baseline: str | None = None
                       B: int = 200, seed: int = 0, hizli: bool | None = None) -> dict:
     """PPI++ multiplier of ours and of the strongest baseline on the same resamples, with the paired difference.
 
-    data: a DataFrame (truth + pred_<ours> + pred_<baseline>, optional item: one target per item) or a list of
-    (y, f_ours, f_baseline) triples. Rows where any of the three is missing are dropped, so both arms use the same
-    units. Point: each column draws one (R, n) labelled index set shared by both priors (closed-form classical MSE, as
-    in olc). CI: column bootstrap with >= SUTUN_BOOT_ESIK columns, otherwise unit bootstrap; each resample is shared
+    data: a DataFrame (truth + pred_<ours> + pred_<baseline>, optional item: one target per item), a list of
+    (y, f_ours, f_baseline) triples or a single triple. Rows where any of the three is missing are dropped, so both
+    arms use the same units; items with fewer than 2n complete rows are skipped (as in olc). Point: each column
+    draws one (R, n) labelled index set shared by both priors (closed-form classical MSE, as in olc). CI: column bootstrap with >= SUTUN_BOOT_ESIK columns, otherwise unit bootstrap; each resample is shared
     by both priors, so the difference CI is paired. same_as_baseline is True when the difference CI includes 0: the
     "worth N humans" figure is then not evidence for what ours adds. olc itself is unchanged.
     baseline: an LLM-free prior that never saw the target labels (e.g. stated intent). An OOF model fitted on the
@@ -195,17 +195,22 @@ def worth_vs_baseline(data, ours: str | None = None, baseline: str | None = None
     Same seed and rows as the card (single item, the rows evaluate scored, e.g. split="test") reproduce the card's
     bedel row for ours; multi-item cards use orneklem's pooled-λ estimator and can differ.
     hizli: as in olc (shared labelled draws across the unit bootstrap; default on from HIZLI_ESIK units).
-    Coverage (simulation, 200 populations each, N = 300-1000, n = 100, incl. skewed y; 25-item column bootstrap):
-    difference CI 0.95-0.98, slightly conservative.
+    Coverage of the difference CI (simulation, 300 populations each, N = 400-600, n = 100): unit bootstrap
+    (1-3 items, incl. skewed and 0/1 truth, weak priors) 0.95-0.98; item bootstrap at 25 heterogeneous items
+    0.92-0.93 (percentile bootstrap over few items runs narrow; olc's own item-bootstrap CI does the same), so
+    there a CI edge just past 0 is weak evidence either way.
     """
     if hasattr(data, "columns"):
         if ours is None or baseline is None:
             raise ValueError("worth_vs_baseline(frame, ours, baseline): name both prediction columns")
         data = _cerceve_ucluler(data, ours, baseline)
+    elif isinstance(data, tuple) and len(data) == 3 and np.ndim(data[0]) == 1:
+        data = [data]                     # one (y, f_ours, f_baseline) triple, as worth_humans takes one pair
     rng = np.random.default_rng(seed)
     S = _hazir_cift(list(data), n)
     if not S:
-        raise ValueError(f"n={n} için yeterli satırı olan sütun yok")
+        raise ValueError(f"worth_vs_baseline: no item has >= 2n = {2 * n} rows with truth, ours and baseline all "
+                         f"present (and truth not constant); pass a smaller n")
     if len(S) < SUTUN_BOOT_ESIK:
         R = max(R, 4000)
     mk, ma, mb = np.array([_iki_mse(y, a, b, n, R, rng) for y, a, b in S]).T
