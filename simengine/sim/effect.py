@@ -27,6 +27,7 @@ JSON is re-asked once with "Return only valid JSON". What still fails is counted
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -170,7 +171,9 @@ def effect_forecast(llm, conditions: Mapping[str, str], outcome: str, *, control
     samples: independent draws per framing, passed as `sample=k` (k >= 1) to backends that key their cache on it;
         with sample_kw=None the prompt carries "(Forecast k of n.)" instead.
     named: study / dataset name. Given -> a second, named arm with the same framings and samples; `probe` then
-        holds named - hidden per condition. The hidden arm is always run and is the forecast to use.
+        holds named - hidden per condition. The hidden arm is always run and is the forecast to use. ValueError
+        when a hidden prompt already contains the exact name (e.g. in `context`) or a custom framing lacks
+        {study}; partial names / authors in the stimulus texts are not detected, keep them out yourself.
     scale: None, (lo, hi), (lo, hi, lo_label, hi_label) or a free-text description; with numbers, an effect whose
         size exceeds hi - lo counts as invalid.
     Calls: arms x framings x samples (+ one re-ask per refused or unparsable reply)."""
@@ -180,9 +183,13 @@ def effect_forecast(llm, conditions: Mapping[str, str], outcome: str, *, control
     treat = [c for c in conditions if c != control]
     if not treat:
         raise ValueError("conditions has no treatment besides the control")
+    if isinstance(framings, str):
+        framings = [framings]
     tpls = list(FRAMINGS[:int(framings)]) if isinstance(framings, int) else [str(f) for f in framings]
     if not tpls or (isinstance(framings, int) and not 1 <= framings <= len(FRAMINGS)):
         raise ValueError(f"framings must be 1..{len(FRAMINGS)} or a non-empty list of templates")
+    if named and any("{study}" not in t for t in tpls):    # else the named arm repeats the hidden prompt (and cache)
+        raise ValueError("with named=, every framing template needs a {study} slot")
     samples = int(samples)
     if samples < 1:
         raise ValueError("samples must be >= 1")
@@ -193,6 +200,10 @@ def effect_forecast(llm, conditions: Mapping[str, str], outcome: str, *, control
     for arm, name in arms:
         prompts[arm] = [effect_prompt(conditions, outcome, control=control, framing=t, named=name, scale=scale,
                                       context=context) for t in tpls]
+    if named and any(re.search(rf"(?<!\w){re.escape(named.strip())}(?!\w)", p, re.I) for p in prompts["hidden"]):
+        raise ValueError(f"the hidden arm prompt already names {named!r} (context, outcome, conditions or "
+                         "framing): it would not be hidden and named - hidden would read as no memorisation")
+    for arm, _ in arms:
         for fi, user in enumerate(prompts[arm]):
             for k in range(samples):
                 if sample_kw is None and samples > 1:

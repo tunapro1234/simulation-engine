@@ -126,6 +126,11 @@ class TestEffectForecast(unittest.TestCase):
         self.assertEqual([re.search(r"\(Forecast (\d) of 2\.\)", u).group(1) for _, u in llm.calls], ["1", "2"])
         self.assertTrue(llm.calls[0][1].startswith("Experiment."))
         self.assertEqual(res.planned, 2)
+        one = effect_forecast(FakeLLM(responder(TRUTH)), CONDS, "y", framings="Experiment{study}.{context}",
+                              samples=1, named="ESS")       # a bare string is one template; "ESS" != "access"
+        self.assertEqual(one.planned, 2)
+        self.assertTrue(one.prompts["named"][0].startswith("Experiment (ESS)."))
+        effect_forecast(FakeLLM(responder(TRUTH)), CONDS, "access to services", framings=1, samples=1, named="ESS")
 
     def test_list_reply_and_validation(self):
         rows = [{"condition": c, "effect": v} for c, v in TRUTH.items()]
@@ -133,7 +138,9 @@ class TestEffectForecast(unittest.TestCase):
         self.assertEqual(res.table.hidden.tolist(), list(TRUTH.values()))
         llm = FakeLLM(responder(TRUTH))
         for bad in ({"conditions": {}}, {"conditions": {"Control": "x"}}, {"framings": 0}, {"framings": 4},
-                    {"samples": 0}, {"scale": (5, 1)}):
+                    {"samples": 0}, {"scale": (5, 1)},
+                    {"named": "Study X", "context": "Replicates study x online."},          # hidden arm leaks
+                    {"named": "Study X", "framings": ["Experiment.{context}"]}):              # no {study} slot
             kw = {"conditions": CONDS, **bad}
             with self.assertRaises(ValueError, msg=str(bad)):
                 effect_forecast(llm, kw.pop("conditions"), "y", **kw)
