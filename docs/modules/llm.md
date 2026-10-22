@@ -7,7 +7,7 @@ The module has three backends that implement the `simengine.types.LLM` protocol
 |---|---|---|
 | `Claude` | `claude.py` | Claude API through the official `anthropic` SDK, imported lazily (`pip install simengine[llm]`). |
 | `ClaudeCode` | `claude_code.py` | `claude -p` subprocess. Runs on the subscription with no API bill. Meant for long-lived or low-volume agents. |
-| `FakeLLM` | `fake.py` | Deterministic and offline, for tests and dry runs. Unchanged. |
+| `FakeLLM` | `fake.py` | Deterministic and offline, for tests and dry runs. Same `stats` / `spent_usd` readers as the real backends (cost 0). |
 | `DiskCache`, `cache_key` | `cache.py` | One JSON file per sha256(model + system + user + params). Writes are atomic, so threads and processes can share one cache. |
 | `CostLedger` | `ledger.py` | JSONL ledger with one line per real call, written under flock. `total()` reads incrementally. Optional shared TSV spend log (`tsv_path=`, `agent=`; `TSV_COLUMNS`). |
 | `looks_like_refusal` | `refusal.py` | Conservative regex detector for soft refusals in plain text (English and Turkish). |
@@ -90,6 +90,7 @@ the cache are still served; a new call raises `AuthError`.
   backend instance's real calls in this process. Cache hits cost 0, and so do `ClaudeCode` subscription calls,
   whose price is in `list_price_usd`. The whole ledger (other backends and processes on the same file, the number
   the budget guard reads) is `stats["ledger_total_usd"]` or `llm.ledger.total()`. G6 (#4) looked for `spent_usd` first.
+  `FakeLLM` has the same `stats` keys and `spent_usd` (all costs 0), so a script that prints them runs dry too.
 - **Budget guard.** Before every real call (retries included), `BudgetExceeded` is raised if `ledger.total() >= budget_usd`.
   The total covers the whole ledger file, so every process that writes to the same ledger shares one budget, as the
   research code's ledger did. The guard checks spend that has already happened. One call in flight can still push

@@ -8,7 +8,7 @@ import os
 import unittest
 from unittest import mock
 
-from simengine.llm import AGENT_ENV, SPEND_LOG_ENV, TAG_PREFIX_ENV, ClaudeCode, CostLedger
+from simengine.llm import AGENT_ENV, SPEND_LOG_ENV, TAG_PREFIX_ENV, ClaudeCode, CostLedger, FakeLLM
 from tests.test_llm import FakeClient, FakeRun, envelope, ok_message, tmpdir
 from tests.test_llm_tags import make
 
@@ -119,6 +119,13 @@ class TestStatsAndSpent(unittest.TestCase):
         self.assertEqual(c.stats()["cache_hits"], 1)
         self.assertAlmostEqual(c.spent_usd, c.ledger.rows()[0]["cost_usd"])
         self.assertEqual(len(c.ledger.rows()), 1)
+
+    def test_fake_llm_has_the_same_readers(self):
+        fake, real = FakeLLM(), make(FakeClient())
+        fake.complete("s", "u")
+        self.assertEqual(set(fake.stats), set(real.stats))     # a script printing stats also runs dry
+        self.assertEqual(fake.stats()["calls"], 1)
+        self.assertEqual(fake.spent_usd, 0.0)
 
 
 if __name__ == "__main__":
