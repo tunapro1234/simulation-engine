@@ -370,7 +370,7 @@ TIERS = ("low", "medium", "high")
 
 
 def agent4rec_traits(evs: Sequence[dict]) -> dict:
-    """Agent4Rec social traits (Zhang et al. 2023, sec. 3.1): activity = number of rated/interacted items,
+    """Agent4Rec social traits (Zhang et al. 2024, sec. 2.1.1): activity = number of rated/interacted items,
     conformity = mean (r_ui - R_i)^2 over events carrying `item_mean` (None when none do; larger = less
     conforming), diversity = number of distinct categories (genres)."""
     rated = [e for e in evs if e.get("rating") is not None] or list(evs)
@@ -407,7 +407,7 @@ def trait_cuts(people: Iterable[dict], question: dict | None = None) -> dict[str
 def add_item_means(people: Sequence[dict], question: dict | None = None) -> list[dict]:
     """Copies of `people` whose rating events carry `item_mean` (R_i, the mean rating of that item over the
     visible events of all people), needed for Agent4Rec conformity. Pass the question (cutoff/item) so R_i is
-    built from the same visible window."""
+    built from the same visible window: without it R_i also averages ratings given after the cutoff."""
     acc: dict[str, list[float]] = {}
     for p in people:
         for e in visible_events(p, question or {}):
