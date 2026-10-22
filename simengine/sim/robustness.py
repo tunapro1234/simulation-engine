@@ -25,7 +25,9 @@ bootstrap clusters for the 95% CIs.
 
 signal: "population" (default) asks the population description once as its own segment under the base framing;
 "mean" uses the mean of the segments' base vectors (no extra calls: the simulator's own between-group spread);
-a mapping {"population": {qid: vec}, "segments": {seg: {qid: vec}}} uses real data (the rehearsal's anchor).
+a mapping {"segments": {seg: {qid: vec}}, "population": {qid: vec}} uses real data (the rehearsal's anchor;
+"segments" is required, "population" defaults to the mean of the given groups as in the rehearsal's round 3).
+"population" and "mean" are the simulator's own scale; the card note says which one was used.
 Calls: (1 + retests + extra framings + order) x segments x questions, plus questions for signal="population".
 """
 from __future__ import annotations
@@ -40,6 +42,8 @@ from .distribution import FRAMINGS_HIDDEN, FRAMINGS_NAMED, _questions, _segments
 
 AXES = ("retest", "framing", "order")
 THRESHOLD = 0.5        # G7: above half the group signal, single-prompt subgroup comparisons are not trusted
+_SIG_TR = {"given": "gerçek veri", "given-mean": "gerçek veri, grup ortalamasına karşı",
+           "population": "simülatör, nüfus istemi", "mean": "simülatör, grup ortalamasına karşı"}
 
 
 def tvd(p: Any, q: Any) -> float:
@@ -150,9 +154,18 @@ def robustness(llm, segments, questions, *, axes: Sequence[str] = AXES,
 
     # signal: W1(group, population) per segment x question
     if isinstance(signal, Mapping):
+        # real group vectors are required: W1(simulated group, real population) would count the simulator's own
+        # error as group signal and flatter the ratio
+        if not signal.get("segments"):
+            raise ValueError("a given signal needs real 'segments' vectors {seg: {qid: vec}} "
+                             "('population' optional: the mean of the given groups when absent)")
+        gsrc = {str(s): {str(k): v for k, v in d.items()} for s, d in signal["segments"].items()}
         pop = {str(k): v for k, v in (signal.get("population") or {}).items()}
-        gsrc = signal.get("segments") or base
         sig_by = "given"
+        if not pop:
+            pop = {q["id"]: np.mean([gsrc[s][q["id"]] for s in segs if q["id"] in gsrc.get(s, {})], axis=0).tolist()
+                   for q in qs if any(q["id"] in gsrc.get(s, {}) for s in segs)}
+            sig_by = "given-mean"
     elif signal == "population":
         runs["population"] = run({"population": population}, qs, base_name, sample0)
         pop = runs["population"]["dist"].get("population", {})
@@ -162,7 +175,7 @@ def robustness(llm, segments, questions, *, axes: Sequence[str] = AXES,
                for q in qs if any(q["id"] in base.get(s, {}) for s in segs)}
         gsrc, sig_by = base, "mean"
     else:
-        raise ValueError("signal must be 'population', 'mean' or a mapping with 'population' (and 'segments')")
+        raise ValueError("signal must be 'population', 'mean' or a mapping with 'segments' (and 'population')")
     sig_cells = []
     for s in segs:
         for q in qs:
@@ -217,6 +230,9 @@ def robustness(llm, segments, questions, *, axes: Sequence[str] = AXES,
                    "and report the average's own retest spread")
     else:
         verdict = f"every condition stays at or under {threshold} x the group signal (worst {worst['condition']} {ratio:.2f})"
+    if worst and worst["ratio_lo"] is not None and worst["ratio_lo"] <= threshold <= worst["ratio_hi"]:
+        verdict += f" (borderline: the 95% CI [{worst['ratio_lo']:.2f}, {worst['ratio_hi']:.2f}] contains {threshold})"
+    n_inv = sum(r["invalid"] for r in runs.values())
     metric = "TVD" if nominal else "W1"
     parts = [f"{r['condition']} {r['ratio']:.2f}" for r in rated]
     o = next((r for r in summary if r.get("shift") is not None), None)
@@ -226,7 +242,9 @@ def robustness(llm, segments, questions, *, axes: Sequence[str] = AXES,
     card = satir("robustness", f"Sağlamlık: koşul oynaması / grup sinyali (en kötü: {worst['condition']})"
                  if worst else "Sağlamlık: koşul oynaması / grup sinyali", ratio,
                  worst["ratio_lo"] if worst else None, worst["ratio_hi"] if worst else None, birim="x sinyal",
-                 not_=(f"{metric} oranları: " + ", ".join(parts) + f"; sinyal {metric} {sig['w1']:.3f} ({sig_by})"
+                 not_=(f"{metric} oranları: " + ", ".join(parts) + f"; sinyal {metric} {sig['w1']:.3f} ({_SIG_TR[sig_by]})"
+                       + (f"; geçersiz cevap {n_inv} ({'tekdüze dolduruldu' if fallback == 'uniform' else 'atlandı'})"
+                          if n_inv else "")
                        + (f"; {threshold} üstü: tek istemle alt grup karşılaştırması güvenilmez"
                           if ratio is not None and ratio > threshold else "")) if rated else "ölçülmedi",
                  kaynak="sim.robustness")

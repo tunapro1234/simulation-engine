@@ -93,6 +93,8 @@ class TestRobustness(unittest.TestCase):
         self.assertEqual(card["tur"], "robustness")
         self.assertAlmostEqual(card["deger"], rb["ratio"], places=3)
         self.assertIn("sıra kayması", card["not"])
+        self.assertIn("simülatör, nüfus istemi", card["not"])
+        self.assertNotIn("geçersiz", card["not"])
 
     def test_retest_uses_new_sample(self):
         llm = SimFake()
@@ -110,12 +112,21 @@ class TestRobustness(unittest.TestCase):
     def test_framing_axis_and_given_signal(self):
         fr = {"h1": FRAMINGS_HIDDEN["h1"], "h2": FRAMINGS_HIDDEN["h2"]}
         pop = {"q1": [0.25] * 4, "q2": [0.25] * 4}
-        rb = robustness(SimFake(), SEGS, QS, axes=("framing",), framings=fr, signal={"population": pop}, n_boot=0)
+        real = {s: {q["id"]: [0.1, 0.2, 0.3, 0.4][::1 if s == "A" else -1] for q in QS} for s in SEGS}
+        rb = robustness(SimFake(), SEGS, QS, axes=("framing",), framings=fr, n_boot=0,
+                        signal={"population": pop, "segments": real})
         self.assertEqual(rb["conditions"][0]["condition"], "framing:h2")
         self.assertAlmostEqual(rb["conditions"][0]["w1"], 0.0, places=6)  # the fake ignores wording
         self.assertEqual(rb["signal"]["by"], "given")
-        want = np.mean([w1_ordinal(truth_vec(g, qi), pop[q["id"]]) for qi, q in enumerate(QS) for g in SEGS.values()])
+        self.assertIn("gerçek veri", rb["card"]["not"])
+        want = np.mean([w1_ordinal(real[s][q["id"]], pop[q["id"]]) for q in QS for s in SEGS])
         self.assertAlmostEqual(rb["signal"]["w1"], want, places=5)
+        # no real population row: the mean of the real groups (here uniform), not a simulated vector
+        rm = robustness(SimFake(), SEGS, QS, axes=("framing",), framings=fr, n_boot=0, signal={"segments": real})
+        self.assertEqual(rm["signal"]["by"], "given-mean")
+        self.assertAlmostEqual(rm["signal"]["w1"], want, places=5)
+        with self.assertRaises(ValueError):        # real population against simulated groups is not a signal
+            robustness(SimFake(), SEGS, QS, axes=("framing",), framings=fr, signal={"population": pop})
         with self.assertRaises(ValueError):
             robustness(SimFake(), SEGS, QS, axes=("framing",), framings={"h1": FRAMINGS_HIDDEN["h1"]})
         with self.assertRaises(ValueError):
@@ -134,6 +145,17 @@ class TestRobustness(unittest.TestCase):
         self.assertEqual(rn["metric"], "TVD")
         self.assertNotIn("shift", rn["conditions"][0])
         self.assertGreater(rn["conditions"][0]["w1"], 0)
+
+    def test_invalid_answers_named_on_card(self):
+        class Junk(SimFake):           # no usable answer when the options are reversed
+            def _answer(self, user, sample):
+                return "no idea" if "1. Strongly disagree" in user else super()._answer(user, sample)
+        rb = robustness(Junk(), SEGS, QS, axes=("order",), n_boot=0)
+        self.assertEqual(rb["invalid"]["order"], len(SEGS) * len(QS))
+        self.assertIn(f"geçersiz cevap {len(SEGS) * len(QS)} (tekdüze dolduruldu)", rb["card"]["not"])
+        rs = robustness(Junk(), SEGS, QS, axes=("order",), fallback="skip", n_boot=0)
+        self.assertEqual(rs["conditions"][0]["n_cells"], 0)    # skipped cells are not compared
+        self.assertIsNone(rs["ratio"])
 
     def test_helpers(self):
         self.assertAlmostEqual(tvd([1, 0], [0, 1]), 1.0)
