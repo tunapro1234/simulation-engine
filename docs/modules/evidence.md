@@ -441,7 +441,13 @@ estimate) and every other one. When the runner-up is not separated (its CI inclu
 "strongest baseline uncertain: B3, B2, B1 within CI". It lists the tied set (`esitler`), ours − baseline in the worst
 case over that set (`en_kotu`: per replicate, ours against the best tied baseline, with a paired CI, plus the tied
 baseline with the lowest single lower bound), and a selection-noise note with the number of baselines. A separated
-runner-up gives an `ok` row. The badge and headline do not change: read them against every tied baseline. In the D5
+runner-up gives an `ok` row. With the warning, the badge is graded against the worst tied baseline (`en_kotu`;
+the badge reason says so), the strongest-baseline row notes the tied set and the card
+gets the flag "en güçlü taban belirsiz". `fark` and the headline stay ours − the single strongest baseline. The
+point gap is the same (the point-best baseline is the closest one); the worst case widens the CI, since each
+replicate takes its own best tied baseline. It is conservative: in simulation (4 tied baselines, 300 rows) the lower
+bound held in 100% of runs, the two-sided percentile CI covered the true worst-case gap in about 81% (`ci="basic"`
+about 93%). It cannot see a baseline that is not on the card. In the D5
 rehearsal, four baselines were tied on dev, the card picked one, and a hidden learned baseline won on test.
 
 **Model/oracle ceiling.** `ceiling_col="pred_oracle"` (or any column name) gives a model ceiling in place of the
