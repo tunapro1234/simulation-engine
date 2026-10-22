@@ -20,6 +20,7 @@ Guide, pitfalls and the literature behind each step: docs/recipes/purchase_pred.
 """
 import argparse
 import json
+import re
 import sys
 import zlib
 from pathlib import Path
@@ -27,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GroupKFold, cross_val_predict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # run from a checkout without pip install
 import simengine as se                                              # noqa: E402
@@ -92,6 +94,9 @@ demo = [c for c in df.columns if c.startswith("demo_")]
 need = {"person_id", "category", "n_before", "n_recent", "bought"}
 if need - set(df.columns) or not demo:
     sys.exit(f"--data is missing columns: {sorted(need - set(df.columns)) or ['demo_<name>']}")
+if df.duplicated(["person_id", "category"]).any() or df.groupby("person_id").size().nunique() > 1 \
+        or not df.bought.isin([0, 1]).all():
+    sys.exit("--data needs exactly one row per (person, category), every category for every person, bought 0/1")
 if a.persons:
     df = df[df.person_id.isin(df.person_id.drop_duplicates()[:a.persons])]
 df = df.reset_index(drop=True)
@@ -127,20 +132,21 @@ ask = lambda who, past="": (SYSTEM, f"Shopper: {who}\n" + (f"Purchases in the 12
                                                          if past else "") + "Categories: " + " | ".join(cats))
 jobs = [ask("a typical online shopper")] + [ask(persona(p)) for p in people.index]
 jobs += [ask(persona(p), history(p)) for p in people.index]
-try:
-    replies = llm.map(jobs, max_tokens=400)
-except se.llm.BudgetExceeded as e:
-    sys.exit(f"stopped by the budget: {e}")
-P = []
-for r in replies:                                                    # unparsed reply / category -> NaN, then 0.5
-    j = se.sim.parse_json(r.text)
+try:                                                                 # ~12 output tokens per category in the JSON
+    replies = llm.map(jobs, max_tokens=max(400, 60 + 15 * len(cats)), return_exceptions=True)
+except se.llm.StopError as e:                                        # budget / 401 / spend cap; done replies are cached
+    sys.exit(f"stopped by the {'budget' if isinstance(e, se.llm.BudgetExceeded) else 'API'}: {e}")
+P, failed = [], sum(isinstance(r, Exception) for r in replies)       # a refusal / empty reply costs a call, not the run
+for r in replies:                                                    # failed / unparsed reply or category -> 0.5
+    j = None if isinstance(r, Exception) else se.sim.parse_json(r.text)
     P.append({c: pd.to_numeric((j if isinstance(j, dict) else {}).get(c), errors="coerce") for c in cats})
 P = (pd.DataFrame(P) / 100).clip(0.01, 0.99)
 bad, n, A = int(P.isna().sum().sum()), len(people), P.fillna(0.5).to_numpy()
 row = df.person_id.map({p: i for i, p in enumerate(people.index)}).to_numpy()
 col = [cats.index(c) for c in df.category]
 df["llm_l0"], df["llm_l1"], df["llm_l2"] = A[0, col], A[1 + row, col], A[1 + n + row, col]
-print(f"LLM calls: {len(jobs)} (1 no-persona + {n} L1 + {n} L2) | unparsed category answers: {bad}")
+print(f"LLM calls: {len(jobs)} (1 no-persona + {n} L1 + {n} L2) | failed calls: {failed} | "
+      f"unparsed category answers: {bad}")
 
 # 5. LLM-free baselines, fit on train persons' masked cells only: popularity, survey model, history model.
 X_demo = pd.get_dummies(df[demo + ["category"]].astype(str)).astype(float)
@@ -153,47 +159,64 @@ df["popularity"] = df.category.map(df[fit].groupby("category").bought.mean()).fi
 df["survey"], df["history"] = lr(X_demo), lr(X_hist)
 df["hist_survey"] = lr(X_both)
 
-# 6. Calibration (Platt on train) fixes the LLM's yes-bias; ours = stack of history model + L2 (hybrid).
+# 6. Calibration (Platt on train) fixes the LLM's yes-bias; ours = stack of history+survey model + L2 (hybrid). The
+#    stack learns from out-of-fold hist_survey on train (5 person folds): in-sample predictions would overweight it.
 L = lambda p: np.log(np.clip(p, 1e-3, 1 - 1e-3) / (1 - np.clip(p, 1e-3, 1 - 1e-3)))
 df["llm_l2_cal"] = se.methods.hybrid.BinaryCalibrator("platt").fit(df.llm_l2[fit], df.bought[fit]).predict(df.llm_l2)
-df["stack"] = lr(pd.DataFrame({"hs": L(df.hist_survey), "l2": L(df.llm_l2)}))
-te = df[(df.split == "test") & df["mask"]].copy()
-# ceiling: history+survey (+ p_true when known) fit on the TEST cells' own labels: in-sample oracle, an upper bound
-X_orc = X_both.assign(p_true=L(df.p_true)) if "p_true" in df else X_both
-te["oracle"] = lr(X_orc, te.index)[te.index]
+hs = df.hist_survey.copy()
+hs[fit] = cross_val_predict(LogisticRegression(max_iter=500), X_both[fit], df.bought[fit], groups=df.person_id[fit],
+                            cv=GroupKFold(5), method="predict_proba")[:, 1]
+df["stack"] = lr(pd.DataFrame({"hs": L(hs), "l2": L(df.llm_l2)}))
 
-# 7. The imbalanced-accuracy trap, in one line: plain accuracy on ALL test cells.
+# 7. Seal the test predictions BEFORE any test outcome is looked at (pre-registration; the card shows the seal).
+te = df[(df.split == "test") & df["mask"]].copy()
+arms = ["popularity", "survey", "history", "hist_survey", "llm_l0", "llm_l1", "llm_l2", "llm_l2_cal", "stack"]
+frame = pd.DataFrame({"group": te.person_id, "segment": te.category, "split": te.split,
+                      **{f"pred_{c}": te[c] for c in arms}})
+registry, COMPARE = out / ".onkayit", [("llm_l1", "llm_l0"), ("llm_l2", "llm_l1")]   # what demographics / history add
+se.seal(frame, "purchase_pred test predictions (ours = stack); compare: "
+        + ", ".join(f"{x} vs {y}" for x, y in COMPARE), registry=registry)
+
+# 8. Truth opens. Ceiling: history+survey (+ p_true when known) refit on the TEST cells' own labels (in-sample oracle).
+X_orc = X_both.assign(p_true=L(df.p_true)) if "p_true" in df else X_both
+frame["truth"], frame["pred_oracle"] = te.bought, lr(X_orc, te.index)[te.index]
+#    The imbalanced-accuracy trap in one line (plain accuracy on ALL test cells), then talp73's threshold-free 1b(c):
+#    per person, the top half of the masked cells by p are "yes".
 allt = df[df.split == "test"]
 acc = lambda p: float(((allt[p] > 0.5) == allt.bought).mean())
 print(f"accuracy on all test cells (base rate {allt.bought.mean():.2f}): always-no {1 - allt.bought.mean():.3f}, "
       f"raw L2 {acc('llm_l2'):.3f}, history {acc('history'):.3f}  <- why we score the balanced mask")
-
-# 8. Seal the test predictions BEFORE the truth is joined (pre-registration; the card shows the seal).
-arms = ["popularity", "survey", "history", "hist_survey", "llm_l0", "llm_l1", "llm_l2", "llm_l2_cal", "stack"]
-frame = pd.DataFrame({"truth": te.bought, "group": te.person_id, "segment": te.category, "split": te.split,
-                      **{f"pred_{c}": te[c] for c in arms}, "pred_oracle": te.oracle})
-registry = out / ".onkayit"
-se.seal(frame.drop(columns="truth"), "purchase_pred test predictions (ours = stack)", registry=registry)
+k = te.groupby("person_id").bought.transform("size") / 2
+top = lambda p: te.groupby("person_id")[p].rank(method="first", ascending=False) <= k
+print("within-person top-half accuracy, 1b(c):", ", ".join(f"{p} {(top(p) == te.bought.eq(1)).mean():.3f}"
+                                                            for p in arms))
 
 # 9. Evidence card: baseline ladder, controls (L0 no-persona arm + automatic persona shuffle), person-bootstrap CIs,
-#    gap closed = (ours - best baseline) / (oracle - best baseline).
+#    the sealed paired comparisons, gap closed = (ours - best baseline) / (oracle - best baseline).
 kw = dict(title="purchase_pred (person x category, balanced mask)", ours="stack", raw="llm_l2", task="binary",
-          primary="balanced_accuracy", B=a.B, prereg=registry, baselines_oof=arms[:4])
+          primary="balanced_accuracy", B=a.B, prereg=registry, baselines_oof=arms[:4],
+          compare=COMPARE)
 try:
     report = se.evidence.evaluate(frame, **kw, ceiling_col="pred_oracle", ceiling_label="in-sample oracle")
 except ZeroDivisionError:                                             # oracle ties the best baseline: no gap to close
     print("oracle ties the best baseline exactly: gap closed undefined, card without a ceiling")
     report = se.evidence.evaluate(frame.drop(columns="pred_oracle"), **kw)
 s = se.evidence.summary(report)
-print(f"\n{s['headline']}\nbalanced accuracy, test persons' masked cells ({len(te)} cells, {te.person_id.nunique()} "
-      "persons), 95% person-bootstrap CI:")
+EN = {"tahmin_": "", "pred_": "", "taban_": "baseline ", "kontrol_karistir_": "shuffled ", "rastgele": "random",
+      "marjinal": "overall rate", "demografi": "demographic mean", "tavan": "ceiling (in-sample oracle)"}
+name = lambda c: re.sub("|".join(EN), lambda m: EN[m.group()], str(c))       # internal ladder names -> English
+print(f"\n{s.get('headline_en') or s['headline']}\nbalanced accuracy, test persons' masked cells ({len(te)} cells, "
+      f"{te.person_id.nunique()} persons), 95% person-bootstrap CI:")
 for r in s["ladder"]:
-    print(f"  {str(r['label'] or r['column']):40} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
+    print(f"  {name(r['column']):34} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
+for c in s.get("comparisons") or []:
+    print(f"  {name(c['a'])} - {name(c['b'])}: {c['diff']:+.3f} [{c['lo']:+.3f}, {c['hi']:+.3f}] {c['verdict']}")
 g, pct = s["gap_closed"] or {}, lambda v: "?" if v is None else f"{100 * v:.0f}"
-print("gap closed:", "n/a" if g.get("deger") is None else f"{pct(g['deger'])} % [{pct(g.get('alt'))}, "
-      f"{pct(g.get('ust'))}]", "| badge:", s["badge"], "| audits with warnings:",
-      [d["check"] for d in s["audits"] if d["status"] == "warning"])
+v = g.get("value", g.get("deger"))                                    # value is None when ceiling ≈ baseline
+print("gap closed:", g.get("note") or "n/a, no ceiling" if v is None else
+      f"{pct(v)} % [{pct(g.get('lo', g.get('alt')))}, {pct(g.get('hi', g.get('ust')))}]", "| badge:", s["badge"],
+      "| audits with warnings:", [d.get("name") or d["check"] for d in s["audits"] if d["status"] == "warning"])
 se.evidence.card(report, out / "card.md", lang="en")
 se.evidence.dashboard([report], out / "dashboard.html")
-cost = f" | spend ${llm.ledger.total():.4f} of ${a.max_usd}" if a.live else ""
+cost = f" | spend ${llm.ledger.total():.4f} of ${a.max_usd} (ledger in {out / '.cache'})" if a.live else ""
 print(f"written: {out / 'card.md'}, {out / 'dashboard.html'}{cost}")
