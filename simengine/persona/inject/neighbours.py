@@ -170,7 +170,9 @@ class _Neighbours(Injector):
 @register
 class SimilarRespondents(_Neighbours):
     """k retrieved respondents (profile + their answer to this question) as in-context examples, then the
-    target's profile. Holtdirk et al. 2026's ICL imputation; embedding retrieval replaced by Gower similarity."""
+    target's profile. Holtdirk et al. 2026's ICL imputation (their best spec: single-turn, most similar, no
+    stratification); EmbeddingGemma cosine retrieval replaced by Gower similarity, the 'diverse' (k-medoids)
+    strategy and the verbalized-distribution output are not implemented."""
     name = "similar_respondents"
     paper = "Holtdirk, Ahnert, Sakshaug & Haensch 2026, ICL for imputing public opinion data (arXiv:2606.09351)"
     needs = ("fields",)
@@ -212,8 +214,8 @@ class SimilarRespondents(_Neighbours):
         chosen = self.select(person, question)
         how = {"most_similar": "to be most similar to", "least_similar": "to be least similar to",
                "random": "at random, not by similarity to"}[self.strategy]
-        system = "You predict how a survey participant answers, from their attributes."
-        target = f"Participant to be classified: {self._profile(person) or '(no attributes)'}"
+        system = "Please perform a classification task: predict how a survey participant answers."   # paper wording
+        target = f"Here is the participant to be classified: {self._profile(person) or '(no attributes)'}"
         meta = {"neighbours": [str(o["id"]) for _, o in chosen], "similarity": [round(s, 4) for s, _ in chosen]}
         if self.format == "multi":
             hist: list[tuple[str, str]] = []
