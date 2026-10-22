@@ -424,6 +424,27 @@ audit = ev.correlation_audit(truth_by_country, named, blind, llm=llm, samples=3)
 audit["n_failed"], audit["n_unparsed_named"]
 ```
 
+**One-call recall probe (`ezber.recall_probe`).** `recall_probe(llm, source, groups, measures, truth=None,
+best_estimate_retry=True, max_tokens=2048, tag=None, scale=None)` makes one persona-free call: "recall the published
+results of `<source>` for these groups and measures" as JSON (`{"remember": ..., "results": {group: {measure: n}}}`).
+`recall_refusal` classifies the reply, including refusals inside JSON (`"remember": false`, empty tables, all
+nulls), which `looks_like_refusal` never flags because it skips JSON replies. Kinds: `error`, `empty_reply`,
+`text`, `unparsed`, `remember_false`, `empty`, `all_null`. When the first reply has no numbers, one retry asks for a
+"best estimate" (tag `<tag>:retry`). Those numbers are estimates, not recall. The result has `raw` / `raw_retry`,
+`recalls` (only when the first reply gives numbers without `"remember": false`), `refusal`, `used` (`first` /
+`retry` / None), `values` and `calls`. With `truth` (`{group: {measure: v}}`, `{group: v}` or a DataFrame indexed
+by group) it also has `per_group` MAE, `mae`, `pearson`, `spearman`, `spearman_by_measure` and `audit`, which is the
+dict `evaluate(memorization=...)` reads. `audit` is `"uyari"` when Spearman with the truth is at least
+`warn_spearman` (0.7), whichever reply the numbers came from. A single probe has no blind control, so for a
+controlled test use `correlation_audit`. In D6, Haiku first returned `remember: false` with empty tables, then gave
+numbers when asked for a best estimate.
+```python
+probe = ev.ezber.recall_probe(llm, "the <survey> <year> wave", groups, ["support", "oppose"],
+                              truth=truth, scale="percent, 0-100", tag="probe")
+probe["refusal"], probe["used"], probe["per_group"], probe["spearman"]
+ev.evaluate(df, ours="llm", memorization=probe["audit"])
+```
+
 **Speed on large frames.**
 - *Multiplier subsample.* For single-item frames above `multiplier_max_rows=2000` rows, the PPI++ multiplier runs
   on a fixed-seed subsample of that many rows. The report records this in `orneklem["alt_orneklem"]`, the card
