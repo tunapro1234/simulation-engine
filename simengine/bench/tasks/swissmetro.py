@@ -14,7 +14,7 @@ Mar 1998) each answered nine stated choice situations: train, Swissmetro (a plan
 car, described by door-to-door time, cost, headway and seat layout. One unit is one answered situation; `truth` is
 the chosen alternative coded 0 = train, 1 = Swissmetro, 2 = car (the dataset's CHOICE - 1). A prediction is one
 probability vector over (train, sm, car) per test row (array (n, 3)); the metrics zero unavailable alternatives,
-renormalise and clip at 1e-6.
+renormalise and clip the chosen alternative's probability at 1e-6 for the log-likelihood.
 
 sample='biogeme' (default) applies the Biogeme example filter: commuter or business trips (PURPOSE 1 or 3) with a
 known choice, 6,768 choices of 752 respondents. sample='all' keeps every known choice (10,719 of 1,191).
@@ -434,8 +434,7 @@ def llm_method(llm: Any, *, system: str = SYSTEM, smooth: float = 0.05, max_toke
 # ---------------------------------------------------------------------- metrics
 def _probs(frame: pd.DataFrame, col: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     av = availability(frame)
-    p = mask_probs(np.vstack(frame[col].to_numpy()), av)
-    return np.clip(p, EPS, 1.0), frame["truth"].to_numpy(int), av
+    return mask_probs(np.vstack(frame[col].to_numpy()), av), frame["truth"].to_numpy(int), av
 
 
 def _metric(which: str):
@@ -443,8 +442,9 @@ def _metric(which: str):
         p, y, av = _probs(frame, col)
         n = len(y)
         rows = np.arange(n)
+        lpy = np.log(np.clip(p[rows, y], EPS, 1.0))
         if which == "loglik":
-            v = np.log(p[rows, y])
+            v = lpy
             f = lambda i: v[i].mean()
         elif which == "accuracy":
             top = np.where(av, p, -1.0)
@@ -452,7 +452,7 @@ def _metric(which: str):
             v = best[rows, y] / best.sum(1)
             f = lambda i: v[i].mean()
         elif which == "rho2":
-            ll, l0 = np.log(p[rows, y]), -np.log(av.sum(1))
+            ll, l0 = lpy, -np.log(av.sum(1))
             f = lambda i: 1 - ll[i].sum() / l0[i].sum()
         else:
             Y = np.eye(len(ALTS))[y]
