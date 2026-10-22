@@ -107,6 +107,39 @@ class RecallProbeTest(unittest.TestCase):
         self.assertEqual(r["used"], "first")
         self.assertAlmostEqual(r["mae"], 1.0)
 
+    def test_measure_levels_alone_do_not_warn(self):
+        # probe knows only that "support" sits above "oppose"; its group order is unrelated to the truth's.
+        # Pooled Spearman 0.76 (above the 0.7 threshold), within-measure 0: no memorization warning
+        truth = {g: {"support": 60 + x, "oppose": 30 - x} for g, x in zip(GROUPS, [3, 1, -1, -3])}
+        probe = {g: {"support": 60 + x, "oppose": 30 - x} for g, x in zip(GROUPS, [-1, 3, -3, 1])}
+        r = ezber.recall_probe(_llm(json.dumps({"results": probe})), "Survey X", GROUPS, MEASURES, truth=truth)
+        self.assertGreater(r["spearman"], 0.7)
+        self.assertAlmostEqual(r["spearman_within"], 0.0)
+        self.assertEqual(r["n_within"], 8)
+        self.assertEqual(r["audit"]["durum"], "tamam")
+        self.assertAlmostEqual(r["audit"]["deger"], 0.0)
+
+    def test_too_few_groups_to_tell(self):
+        # one measure, 3 groups: a perfect match has permutation p 1/6, so it cannot be told from chance
+        g3 = GROUPS[:3]
+        truth = {g: TRUTH[g]["support"] for g in g3}
+        r = ezber.recall_probe(lambda u: json.dumps(truth), "Survey X", g3, "support", truth=truth)
+        self.assertAlmostEqual(r["spearman_within"], 1.0)
+        self.assertGreater(r["p_within"], 0.05)
+        self.assertEqual(r["audit"]["durum"], "atlandi")
+
+    def test_reference_and_scale_warning(self):
+        # truth sealed: compare the probe with our own forecast (0-1 shares while the probe answers in percent)
+        ours = {g: {m: v / 100 for m, v in r.items()} for g, r in TRUTH.items()}
+        r = ezber.recall_probe(_llm(json.dumps({"results": _table()})), "Survey X", GROUPS, MEASURES, reference=ours)
+        self.assertNotIn("audit", r)
+        v = r["vs_reference"]
+        self.assertAlmostEqual(v["spearman_within"], 1.0)
+        self.assertEqual(v["n_compared"], 8)
+        self.assertIn("scale mismatch", v["scale_warning"])
+        r = ezber.recall_probe(_llm(json.dumps({"results": _table()})), "Survey X", GROUPS, MEASURES, truth=TRUTH)
+        self.assertIsNone(r["scale_warning"])
+
     def test_no_truth(self):
         r = ezber.recall_probe(_llm("Sorry, I cannot recall that.", "not json either"), "Survey X", GROUPS, MEASURES)
         self.assertEqual(r["refusal"], "text")

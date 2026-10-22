@@ -397,16 +397,76 @@ def _truth_cells(truth, groups, measures) -> dict:
     return out
 
 
+def _within_spearman(ref: dict, cells: dict, measures, n_perm: int = 2000, seed: int = 0) -> tuple:
+    """Spearman of within-measure ranks (each measure's groups ranked on their own, centred, pooled) and its
+    one-sided permutation p (probe values shuffled across groups inside each measure). Spearman pooled over all
+    cells mostly ranks measure LEVELS ("support" above "oppose"), which needs no group knowledge: in a 12 x 3
+    simulation a probe that knew only the measure means reached pooled 0.79. Measures with < 3 cells or a
+    constant side are left out. Returns (rho, p, n cells used)."""
+    xs, ys = [], []
+    for m in measures:
+        cm = [c for c in ref if c[1] == m and c in cells]
+        if len(cm) < 3:
+            continue
+        y, x = np.array([ref[c] for c in cm]), np.array([cells[c] for c in cm])
+        if np.std(y) == 0 or np.std(x) == 0:
+            continue
+        ry, rx = _rank(y), _rank(x)
+        ys.append(ry - ry.mean())
+        xs.append(rx - rx.mean())
+    if not xs:
+        return np.nan, np.nan, 0
+    Y = np.concatenate(ys)
+
+    def r(parca):
+        X = np.concatenate(parca)
+        return float(X @ Y / np.sqrt((X @ X) * (Y @ Y)))
+
+    obs = r(xs)
+    rng = np.random.default_rng(seed)
+    k = sum(r([rng.permutation(x) for x in xs]) >= obs - 1e-12 for _ in range(n_perm))
+    return obs, (1 + k) / (1 + n_perm), int(sum(len(x) for x in xs))
+
+
+def _compare(ref: dict, cells: dict, groups, measures) -> dict:
+    """Probe cells vs a reference table ({(group, measure): v}): per-group MAE, pooled Pearson / Spearman,
+    within-measure Spearman (+ permutation p), per-measure Spearman, and a 0-1 vs 0-100 scale note."""
+    ok = [c for c in ref if np.isfinite(ref[c]) and c in cells and np.isfinite(cells[c])]
+    _f = lambda x: float(x) if x is not None and np.isfinite(x) else None
+    per_group = {}
+    for g in groups:
+        d = [abs(cells[c] - ref[c]) for c in ok if c[0] == g]
+        per_group[g] = {"mae": float(np.mean(d)) if d else None, "n": len(d)}
+    y = np.array([ref[c] for c in ok])
+    x = np.array([cells[c] for c in ok])
+    pear = float(np.corrcoef(x, y)[0, 1]) if len(ok) >= 3 and np.std(x) > 0 and np.std(y) > 0 else np.nan
+    rho = _spearman(y, x) if len(ok) >= 3 else np.nan
+    by_m = {}
+    for m in measures:
+        cm = [c for c in ok if c[1] == m]
+        by_m[m] = _f(_spearman(np.array([ref[c] for c in cm]), np.array([cells[c] for c in cm]))) if len(cm) >= 3 else None
+    rw, pw, nw = _within_spearman({c: ref[c] for c in ok}, cells, measures)
+    olcek = None
+    if len(ok):
+        my, mx = float(np.max(np.abs(y))), float(np.max(np.abs(x)))
+        if (my <= 1 < mx / 1.5) or (mx <= 1 < my / 1.5):
+            olcek = (f"scale mismatch: reference max {my:g}, probe max {mx:g} (0-1 vs 0-100?); MAE is not comparable, "
+                     "pass scale= or rescale one side")
+    return {"per_group": per_group, "mae": float(np.mean(np.abs(x - y))) if len(ok) else None, "pearson": _f(pear),
+            "spearman": _f(rho), "spearman_within": _f(rw), "p_within": _f(pw), "n_within": nw,
+            "spearman_by_measure": by_m, "n_compared": len(ok), "scale_warning": olcek}
+
+
 def recall_probe(llm, source: str, groups, measures, truth=None, best_estimate_retry: bool = True, *,
                  max_tokens: int = 2048, tag: str | None = None, scale: str | None = None,
                  system: str = RECALL_SYSTEM, thinking: str | dict | None = "auto",
-                 warn_spearman: float = 0.7) -> dict:
+                 warn_spearman: float = 0.7, warn_p: float = 0.05, reference=None) -> dict:
     """One persona-free call: "recall <source> results for these groups / measures" as JSON. Does the model
     say it remembers the published table, and how close are its numbers?
 
         probe = ev.ezber.recall_probe(llm, "the <survey> <year> wave", ["18-29", "30-44", "45+"],
                                       ["support", "oppose"], truth=truth, scale="percent, 0-100", tag="probe")
-        probe["recalls"], probe["refusal"], probe["used"], probe["mae"], probe["spearman"]
+        probe["recalls"], probe["refusal"], probe["used"], probe["mae"], probe["spearman_within"]
         ev.evaluate(df, ours="llm", memorization=probe["audit"])
 
     llm: a simengine LLM (.complete(system, user)) or a str -> str callable (gets the user prompt only).
@@ -419,11 +479,20 @@ def recall_probe(llm, source: str, groups, measures, truth=None, best_estimate_r
     say "remember": false), refusal (first reply's kind or None), retry_refusal, used ("first" / "retry" / None),
     values ({group: {measure: number or None}} from the used reply), n_values, calls. With truth ({group:
     {measure: v}}, {group: v} for one measure, or a DataFrame indexed by group): per_group ({group: {"mae", "n"}}),
-    mae, pearson and spearman over all cells, spearman_by_measure (across groups, >= 3), n_compared, and audit:
-    the dict `evaluate(memorization=...)` reads. audit durum is "uyari" when the used numbers reach
-    Spearman >= warn_spearman with the truth (recalled or "best estimate": either way the model knows the table
-    better than it says), "tamam" below, "atlandi" with < 3 comparable cells. One probe has no blind control:
-    general knowledge can also rank groups well, so for a controlled test use `correlation_audit` (named vs blind)."""
+    mae, pearson and spearman pooled over all cells (descriptive: pooling mostly ranks measure levels),
+    spearman_within / p_within / n_within (groups ranked inside each measure, pooled; permutation p with probe
+    values shuffled across groups inside each measure), spearman_by_measure (across groups, >= 3), n_compared,
+    scale_warning (0-1 vs 0-100), and audit: the dict `evaluate(memorization=...)` reads. audit durum is "uyari"
+    when the used numbers reach within-measure Spearman >= warn_spearman with p_within < warn_p (recalled or
+    "best estimate": either way the model ranks the groups as the table does), "tamam" below warn_spearman,
+    "atlandi" when no measure has >= 3 comparable groups or the match is high but too few groups to tell it from
+    chance (p_within >= warn_p; one measure with 4 groups needs a perfect match). One probe has no blind control:
+    general knowledge ("young voters lean left") can also rank groups well, so for a controlled test use
+    `correlation_audit` (named vs blind).
+
+    reference: optional table in the truth shapes, e.g. our own submitted prediction while the truth is sealed.
+    out["vs_reference"] then holds the same comparison against it (per_group MAE, spearman_within, ...): how far
+    our forecast sits from what the model says unprompted. It is not a memorization test and makes no audit."""
     groups = [str(g) for g in groups]
     measures = [measures] if isinstance(measures, str) else [str(m) for m in measures]
     fill = {"source": source, "groups": json.dumps(groups, ensure_ascii=False),
@@ -465,38 +534,30 @@ def recall_probe(llm, source: str, groups, measures, truth=None, best_estimate_r
            "retry_refusal": kind2, "used": used, "values": values,
            "n_values": int(sum(v is not None for r in values.values() for v in r.values())),
            "n_cells": len(groups) * len(measures), "calls": calls, "errors": hata[:5]}
+    if reference is not None:
+        out["vs_reference"] = _compare(_truth_cells(reference, groups, measures), cells, groups, measures)
     if truth is None:
         return out
-    t = _truth_cells(truth, groups, measures)
-    ok = [c for c in t if np.isfinite(t[c]) and c in cells and np.isfinite(cells[c])]
-    _f = lambda x: float(x) if x is not None and np.isfinite(x) else None
-    per_group = {}
-    for g in groups:
-        d = [abs(cells[c] - t[c]) for c in ok if c[0] == g]
-        per_group[g] = {"mae": float(np.mean(d)) if d else None, "n": len(d)}
-    y = np.array([t[c] for c in ok])
-    x = np.array([cells[c] for c in ok])
-    pear = float(np.corrcoef(x, y)[0, 1]) if len(ok) >= 3 and np.std(x) > 0 and np.std(y) > 0 else np.nan
-    rho = _spearman(y, x) if len(ok) >= 3 else np.nan
-    by_m = {}
-    for m in measures:
-        cm = [c for c in ok if c[1] == m]
-        by_m[m] = _f(_spearman(np.array([t[c] for c in cm]), np.array([cells[c] for c in cm]))) if len(cm) >= 3 else None
-    mae = float(np.mean(np.abs(x - y))) if len(ok) else None
+    k = _compare(_truth_cells(truth, groups, measures), cells, groups, measures)
+    rw, pw, nw, mae = k["spearman_within"], k["p_within"], k["n_within"], k["mae"]
     kol = {"first": "ilk cevap (hatırlıyor)" if recalls else "ilk cevap (hatırlamıyor dedi, sayı verdi)",
            "retry": f"ilk cevap ret ({kind}), 'best estimate' tekrarı", None: "sayı yok"}[used]
-    fmt = lambda v: "—" if v is None or not np.isfinite(v) else f"{v:+.3f}"
-    if len(ok) < 3:
-        durum, ayrinti = "atlandi", (f"hatırlama sondası: yalnız {len(ok)} hücrede gerçek ve cevap birlikte var "
-                                     f"(en az 3 gerekli); {kol}")
+    fmt = lambda v: "—" if v is None else f"{v:+.3f}"
+    if rw is None:
+        durum, ayrinti = "atlandi", (f"hatırlama sondası: hiçbir ölçüde en az 3 grupta gerçek ve cevap birlikte yok "
+                                     f"({k['n_compared']} hücre); {kol}")
     else:
-        durum = "uyari" if np.isfinite(rho) and rho >= warn_spearman else "tamam"
-        ayrinti = (f"hatırlama sondası ({len(ok)} hücre, {kol}): Spearman {fmt(rho)}, MAE {mae:.3f}; eşik "
-                   f"{warn_spearman:.2f}" + (" · ezber şüphesi" if durum == "uyari" else " · ezber işareti yok")
-                   + " (tek sonda, adsız kontrol yok)")
-    audit = {"yontem": "tek çağrılık hatırlama sondası", "durum": durum, "ayrinti": ayrinti, "deger": _f(rho),
-             "alt": None, "ust": None, "n": len(ok), "recalls": bool(recalls), "refusal": kind, "used": used,
+        if rw < warn_spearman:
+            durum, not_ = "tamam", " · ezber işareti yok"
+        elif pw < warn_p:
+            durum, not_ = "uyari", " · ezber şüphesi"
+        else:
+            durum, not_ = "atlandi", f" · uyum yüksek ama grup az, şanstan ayrılmıyor (p ≥ {warn_p:g})"
+        ayrinti = (f"hatırlama sondası ({nw} hücre, {kol}): ölçü içi Spearman {fmt(rw)} (permütasyon p {pw:.3f}), "
+                   f"MAE {mae:.3f}; eşik {warn_spearman:.2f}" + not_ + " (tek sonda, adsız kontrol yok)"
+                   + (f"; {k['scale_warning']}" if k["scale_warning"] else ""))
+    audit = {"yontem": "tek çağrılık hatırlama sondası", "durum": durum, "ayrinti": ayrinti, "deger": rw,
+             "alt": None, "ust": None, "p": pw, "n": nw, "recalls": bool(recalls), "refusal": kind, "used": used,
              "mae": mae, "esik": warn_spearman}
-    out.update({"per_group": per_group, "mae": mae, "pearson": _f(pear), "spearman": _f(rho),
-                "spearman_by_measure": by_m, "n_compared": len(ok), "audit": audit})
+    out.update({**k, "audit": audit})
     return out
