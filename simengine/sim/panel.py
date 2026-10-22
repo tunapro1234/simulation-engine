@@ -440,7 +440,8 @@ def schema_responder(seed: int = 0) -> Callable[[str, str], str]:
     """FakeLLM responder that answers simengine.sim prompts with deterministic hashed values:
     panel prompts (ids from '### <id>' lines, fields from the field list), distribution prompts (option
     percentages), per-persona probability vectors, per-person prediction prompts (keyed 0-100 values or SSR
-    sentences). For dry runs, not measurement."""
+    sentences), `ab_many` prompts with the default MANY_TEMPLATE layout (one {"id": "<reader>|<test>", a, b,
+    choice} vote per reader and test). For dry runs, not measurement."""
 
     def respond(system: str, user: str) -> str:
         tag = hashlib.sha256((system + "\x00" + user).encode()).hexdigest()[:6] + str(seed)
@@ -451,6 +452,17 @@ def schema_responder(seed: int = 0) -> Callable[[str, str], str]:
             specs.pop("id", None)
             return json.dumps([{"id": pid, **{k: _fake_value(pid, k, v, tag) for k, v in specs.items()}}
                                for pid in ids])
+        m = re.search(r"^Readers:\n(.*?)\n\nTests:\n(.*?)(?:\n\n|\Z)", user, re.S | re.M)
+        if m:                      # ab_many: one vote per (reader, test)
+            rids = re.findall(r"^- (.+?): ", m.group(1), re.M)
+            tids = re.findall(r'^- (.+?): A = "', m.group(2), re.M)
+            out = []
+            for pid in rids:
+                for tid in tids:
+                    a, b = 1 + int(_h(tag, pid, tid, "a") * 10), 1 + int(_h(tag, pid, tid, "b") * 10)
+                    c = "A" if a > b or (a == b and _h(tag, pid, tid) < 0.5) else "B"
+                    out.append({"id": f"{pid}|{tid}", "a": min(a, 10), "b": min(b, 10), "choice": c})
+            return json.dumps(out)
         m = re.search(r"respondent IDs as keys \(([^)]*)\)", user)
         if m:
             pids = [x.strip() for x in m.group(1).split(",") if x.strip()]

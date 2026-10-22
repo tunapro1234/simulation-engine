@@ -12,6 +12,8 @@ panel matched the real winner 0.522 [0.468; 0.575] of the time (chance 0.50); se
 """
 from __future__ import annotations
 
+import warnings as _warnings
+
 import numpy as np
 import pandas as pd
 
@@ -307,7 +309,10 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
     The prompt defaults to the headline wording of the measured run; pass `system`/`template` for other content
     (template fields: {readers}, {tests}).
     Calls go through `sim.panel.ask_many` (soft refusals not cached and re-asked once, empty replies re-asked with
-    a larger max_tokens, a failed call gives no votes); `ask_kw` passes its options, `usage` collects the counts."""
+    a larger max_tokens, a failed call gives no votes); `ask_kw` passes its options, `usage` collects the counts.
+    A reply with no JSON counts in usage.unparsed_calls; every (reader, test) pair without a vote counts in
+    usage.missing (usage.refused when the call stayed refused). Calls that gave no vote at all raise a
+    RuntimeWarning and are listed in df.attrs["warnings"]; their tests get p_a = 0.5, n_votes = 0."""
     usage = usage if usage is not None else Usage()
     ps = as_personas(personas)
     df = pd.DataFrame(tests).reset_index(drop=True)
@@ -316,31 +321,57 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
             raise ValueError(f"tests needs column {c!r}")
     df["test_id"] = df["test_id"].astype(str)
     readers = "\n".join(f"- {p.pid}: " + p.text("en").replace("\n", " · ")[:400] for p in ps)
-    prompts = []
+    prompts, sizes = [], []
     for s in range(0, len(df), max(1, tests_per_call)):
         g = df.iloc[s:s + tests_per_call]
         block = "\n".join(f"- {r.test_id}: A = \"{str(r.a).strip()}\" | B = \"{str(r.b).strip()}\"" for r in g.itertuples())
         prompts.append((system, template.format(readers=readers, tests=block)))
+        sizes.append(len(ps) * len(g))
     if max_tokens is None:
         max_tokens = min(16000, 200 + 45 * len(ps) * max(1, tests_per_call))
     votes: dict[str, list] = {}
-    for r in ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="ab_many", reframe=REFRAME_NOTE_GENERIC,
-                      **(ask_kw or {})):
+    statuses: list = []
+    replies = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="ab_many", reframe=REFRAME_NOTE_GENERIC,
+                       statuses=statuses, **(ask_kw or {}))
+    no_votes = []
+    for k, (r, st, size) in enumerate(zip(replies, statuses, sizes)):
+        if r is None:
+            if st == "refused":
+                usage.refused += size
+            else:
+                usage.missing += size
+            no_votes.append(f"call {k + 1}: {st}")
+            continue
         data = parse_json(getattr(r, "text", None))
+        if data is None:
+            usage.unparsed_calls += 1
+        got = 0
         for x in (data if isinstance(data, list) else []):
             if not isinstance(x, dict) or "|" not in str(x.get("id")):
                 continue
             pid, tid = str(x["id"]).split("|", 1)
             c = str(x.get("choice", "")).strip().upper()[:1]
             if c in ("A", "B"):
+                got += 1
                 votes.setdefault(tid.strip(), []).append({"pid": pid.strip(), "choice": c, "a": x.get("a"),
                                                           "b": x.get("b")})
+        usage.missing += max(0, size - got)
+        if not got:
+            no_votes.append(f"call {k + 1}: " + ("no JSON" if data is None else "no parseable votes"))
+    warns = []
+    if no_votes:
+        warns.append(f"ab_many: {len(no_votes)} of {len(prompts)} calls returned no parseable votes "
+                     f"({'; '.join(no_votes[:5])}); their tests get p_a = 0.5, n_votes = 0")
+        _warnings.warn(warns[0], RuntimeWarning, stacklevel=2)
     rows = []
     for tid in df["test_id"]:
         vs = votes.get(tid, [])
         rows.append({"test_id": tid, "p_a": (sum(v["choice"] == "A" for v in vs) + 0.5) / (len(vs) + 1),
                      "n_votes": len(vs), "votes": vs})
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    out.attrs["warnings"] = warns
+    out.attrs["usage"] = usage.as_dict()
+    return out
 
 
 __all__ = ["ab_test", "ab_frame", "ab_many", "confidence_check", "paars_decision", "DEFAULT_QUESTION"]
