@@ -396,7 +396,8 @@ class DirectForecaster:
     ``target`` (what the model learns; predictions are always mapped back to the level of y):
     "level" = y[T+h] (default); "log_ratio" = log((y[T+h] + log_offset) / (y[T] + log_offset)), a growth target
     that can extrapolate past the training levels (rows with a non-positive ratio are dropped; a series with a
-    non-positive base is predicted flat); "logit" = logit(y[T+h] / upper) - logit(y[T] / upper), the change on
+    non-positive base is predicted flat; y[T] is the last value observed at or before T, so a gap at the origin
+    is not read as a fall to ``fill_value``); "logit" = logit(y[T+h] / upper) - logit(y[T] / upper), the change on
     the logit scale for saturating adoption, mapped back as upper * sigmoid(logit(y[T] / upper) + z), so no
     prediction can pass ``upper`` (shares clipped to [logit_eps, 1 - logit_eps]). D7 rehearsal (one run): the
     log-growth pool model was best on dev but took high-level countries to 150 per 100 at the test origin; the
@@ -463,6 +464,12 @@ class DirectForecaster:
                 return np.where((y + c > 0) & (base + c > 0), np.log((y + c) / (base + c)), np.nan)
             return _logit(self._share(y)) - _logit(self._share(base))
 
+    def _base(self, w) -> np.ndarray:
+        """Origin level y[T] for the growth / logit targets: last value observed at or before T (a missing cell
+        at the origin is not a fall to ``fill_value``), ``fill_value`` where nothing was observed yet."""
+        b = pd.DataFrame(w.raw).ffill(axis=1).to_numpy(dtype=float)
+        return np.where(np.isnan(b), self.fill_value, b)
+
     def _from_target(self, z, base):
         if self.target == "level":
             return z
@@ -486,6 +493,7 @@ class DirectForecaster:
                               f"1 - logit_eps on the share scale); raise upper if the level can pass it",
                               UserWarning, stacklevel=2)
         self.models_ = {}
+        B = self._base(w) if self.target != "level" else w.Y
         lo, hi = np.inf, -np.inf
         for h in self.horizons:
             Ts = list(range(p - h, need - 2, -self.origin_step))[:self.n_train_origins]
@@ -496,7 +504,7 @@ class DirectForecaster:
                 d = self._block(w, T, h)
                 yt = w.raw[:, T + h]
                 d["_lvl"] = yt
-                d["_y"] = self._to_target(yt, w.Y[:, T])
+                d["_y"] = self._to_target(yt, B[:, T])
                 parts.append(d)
             tr = pd.concat(parts, ignore_index=True)
             tr = tr[~tr["_y"].isna()]
@@ -518,7 +526,7 @@ class DirectForecaster:
         origin = self.origin_ if origin is None else origin
         w = self._wide(panel, origin)
         p = w.pos(origin)
-        base = w.Y[:, p]
+        base = self._base(w)[:, p] if self.target != "level" else w.Y[:, p]
         preds = np.zeros((len(w.ids), len(self.horizons)))
         for j, h in enumerate(self.horizons):
             z = self.models_[h].predict(self._X(self._block(w, p, h)))

@@ -65,6 +65,16 @@ class TestTargets(unittest.TestCase):
         fr0 = F.DirectForecaster("hgb", horizons=[2], target="log_ratio", **KW).fit(p, 15).predict(p, 15)
         self.assertTrue(np.isfinite(fr0["pred"]).all())
 
+    def test_gap_at_origin_uses_last_observed_level(self):
+        p = adoption_panel(n=60)
+        o = 28
+        gap = p[~((p.id == "s0") & (p.time == o))]             # s0 has no row at the origin
+        last = p[(p.id == "s0") & (p.time == o - 1)]["y"].iloc[0]
+        for tg, kw in (("log_ratio", {}), ("logit", {"upper": 100})):
+            fr = F.DirectForecaster("hgb", horizons=[1, 3], target=tg, **kw, **KW).fit(gap, o).predict(gap, o)
+            s0 = fr.loc[fr.id == "s0", "pred"].to_numpy()
+            self.assertTrue((s0 > 0.5 * last).all(), (tg, s0, last))     # not a fall to fill_value=0
+
     def test_validation_and_upper_warning(self):
         with self.assertRaises(ValueError):
             F.DirectForecaster(target="growth")
