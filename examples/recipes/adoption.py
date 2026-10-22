@@ -38,7 +38,8 @@ HORIZON, CUTOFFS = 8, (3, 5)          # periods ahead; backtest cutoffs = period
 SPEND_WHATIFS = (0.5, 1.5, 2.0)       # marketing spend multipliers tried on the target market
 SPEND_ELASTICITY = 0.5                # assumed: spend x k -> innovation p x k^0.5; put a measured value here
 OURS = "blend"                        # named BEFORE looking at results: mean of abm_analogy and llm_bass
-COMPARE = [(OURS, "llm_generic"), ("abm_analogy", "bass_abc"), ("llm_bass", "bass")]   # registered in the seal
+COMPARE = [(OURS, "blend_generic"),   # no-persona twin: same blend, LLM prior from a generic market text
+           ("abm_analogy", "bass_abc"), ("llm_bass", "bass")]                   # registered in the seal
 SYSTEM = ("You are a diffusion-of-innovations analyst. Given a product and a market, give Bass model parameters per "
           "period: p (innovation, 0.001-0.05), q (imitation, 0.05-0.8) and m (long-run ceiling, % of population). "
           "Reply with JSON only: {\"p\": <num>, \"q\": <num>, \"m\": <num>, \"reason\": \"...\"}")
@@ -164,6 +165,7 @@ frame = frame.drop(columns=[c for c in frame.columns if c.startswith(("lo80_", "
 for m in ("abm_analogy", "bass_abc"):                                 # series ABC cannot align: Bass-analogy fallback
     frame[f"pred_{m}"] = frame[f"pred_{m}"].fillna(frame.pred_bass_analogy)
 frame["pred_blend"] = (frame.pred_abm_analogy + frame.pred_llm_bass) / 2
+frame["pred_blend_generic"] = (frame.pred_abm_analogy + frame.pred_llm_generic) / 2   # control: text removed
 print(f"backtest rows: {len(frame)} | series {frame.series.nunique()} | ABC fallback: {frame.attrs['n_ineligible']}")
 
 # 5. Seal the forecasts BEFORE scoring (pre-registration; the card shows the seal and that OURS was named first).
@@ -194,17 +196,19 @@ for k in SPEND_WHATIFS:
               f"[{at(HORIZON).lo80:.1f}, {at(HORIZON).hi80:.1f}]")
 print("adopter types (model-implied):", [(p["name"], p["share"]) for p in abm_m.personas(fit)])
 
-# 7. Evidence card: baseline ladder, controls (generic-text LLM, Bass-simulator ABC), paired CIs, audits.
+# 7. Evidence card: baseline ladder, controls (generic-text blend, Bass-simulator ABC), paired CIs, audits.
 report = se.evidence.evaluate(frame, title="adoption backtest", ours=OURS, raw="llm_only", task="forecast",
                               unlabeled_baselines=["naive", "linear", "gompertz", "bass", "bass_analogy"],
                               compare=COMPARE, primary="mae", split="test", B=a.B, prereg=registry, ours_uses_llm=True)
 s = se.evidence.summary(report)
-print("\n" + str(s["headline"]))
-for r in s["ladder"]:
-    print(f"  {str(r['label'] or r['column']):34} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
+EN = {"tahmin_": "", "taban_": "baseline_", "rastgele": "random (look-ahead)", "marjinal": "median (look-ahead)"}
+print("\n" + str(s["headline_en"] or s["headline"]))
+for r in s["ladder"]:                                                 # internal ladder column names -> English
+    name = re.sub("|".join(EN), lambda m: EN[m.group()], str(r["column"] or r["label"]))
+    print(f"  {name:34} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
 for c in s.get("comparisons") or []:
     print(f"  {c['a'][7:]} - {c['b'][7:]}: {c['diff']:+.2f} [{c['lo']:+.2f}, {c['hi']:+.2f}] {c['verdict']}")
-print("badge:", s["badge"], "| audits with warnings:", [d["check"] for d in s["audits"] if d["status"] == "warning"])
+print("badge:", s["badge"], "| audits with warnings:", [d["name"] or d["check"] for d in s["audits"] if d["status"] == "warning"])
 se.evidence.card(report, out / "card.md", lang="en")
 se.evidence.dashboard([report], out / "dashboard.html")
 print(f"written: {out / 'card.md'}, {out / 'dashboard.html'}"

@@ -29,8 +29,8 @@ class TestAdoptionRecipe(unittest.TestCase):
             p = run("--out", d, "--B", "100")
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             self.assertLess(time.monotonic() - t0, 60)
-            for s in ("LLM calls: 11", "MAE llm_generic", "MAE bass_abc", "what-ifs for m09", "spend x2",
-                      "adopter types", "blend - llm_generic", "badge:"):
+            for s in ("LLM calls: 11", "unusable replies (default prior used): 0", "MAE llm_generic", "MAE bass_abc", "what-ifs for m09", "spend x2",
+                      "adopter types", "blend - blend_generic", "badge:"):
                 self.assertIn(s, p.stdout)
             card = (Path(d) / "card.md").read_text()
             self.assertIn("Sealed predictions", card)
@@ -77,6 +77,11 @@ class TestAdoptionRecipe(unittest.TestCase):
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("no new call made", p.stderr)
             self.assertNotIn("sk-test-not-a-real-key", p.stdout + p.stderr)
+            p = run("--live", "--key-file", str(key), "--max-usd", "0.1", "--model", "no-such-model",
+                    "--out", str(Path(d) / "run"), timeout=60)            # unpriced model: message, no traceback
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("--live setup failed", p.stderr)
+            self.assertNotIn("Traceback", p.stderr)
 
 
 if __name__ == "__main__":
