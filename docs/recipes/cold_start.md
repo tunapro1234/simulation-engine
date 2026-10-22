@@ -1,6 +1,6 @@
 # Recipe: cold start (rating or early demand of a brand-new item)
 
-Script: [`examples/recipes/cold_start.py`](../../examples/recipes/cold_start.py) (under 200 lines, numbered steps
+Script: [`examples/recipes/cold_start.py`](../../examples/recipes/cold_start.py) (about 220 lines, numbered steps
 0-8). Test: `tests/test_recipe_cold_start.py`.
 
 ```bash
@@ -51,12 +51,12 @@ everything about half a star too high.
 | 0 | `SYSTEM`, `KEY`, `NEW_ITEMS` | the brief's question and scale; keep the JSON reply | Silicon crowd / Schoenegger et al. (arXiv:2402.19379): one plain question per item, no persona needed for an item-level prior |
 | 1 | load, time split (newest 30 % = test), launch rows = `split == "new"` | a split the brief fixes; never a random split when launch dates exist | leakage guard of every result in `docs/RESULTS.md`; a time split is what "new item" means |
 | 2 | backend | `--live --max-usd`; Haiku by default (`--model` to change) | literature ranking "do not spend time on": bigger model ~1 point (Park et al. arXiv:2411.10109; Sonnet − Haiku +1.0, n.s., talp73) |
-| 3 | one call per item, named + blind (name hidden) | nothing; the blind arm is the recognition control | ranked #7: memorisation probe. D3 rehearsal (new-film cold start): the LLM gain was title recognition, ours − LLM-free +0.050 on dev, +0.017 [−0.001, 0.035] on test |
+| 3 | one call per item, named + blind (name hidden); a refused or failed call and a reply without a number count as unparsed (median prior); above 20 % unparsed the run stops instead of writing a card | nothing; the blind arm is the recognition control | ranked #7: memorisation probe. D3 rehearsal (new-film cold start): the LLM gain was title recognition, ours − LLM-free +0.050 on dev, +0.017 [−0.001, 0.035] on test |
 | 4 | category mean and TF-IDF kNN over category + description, train rows cross-fitted (5 item folds) | `--k`; add the client's own rule as another `baselines_oof` column; `methods.baselines.TextKNNRegressor` is the library twin when scikit-learn is installed | ranked #1: baseline ladder. Similar-item data is the cold-start baseline the LLM has to beat |
-| 5 | ridge `target ~ 1 + knn + cat_mean + llm` on train = `stack` (ours); the same with the blind LLM = `stack_blind` | nothing; `ours` is named before the truth | ranked #2: LLMs lean optimistic (silicon crowd: mean forecast 57 % vs 45 % resolved yes); the intercept and slope absorb it. ranked #3: LLM as a feature of the data model (`methods.hybrid`; honest gain small, +0.006 in Twin-2K-500). ranked #6: shrink the LLM's effects (Manning et al. 13.2x exaggeration; Hewitt et al. effects r = .85 but too large) |
+| 5 | ridge `target ~ 1 + knn + cat_mean + llm` on train = `stack` (ours); the same with the blind LLM = `stack_blind`; the same without the LLM = `stack_free`, the LLM-free rung ours has to beat | nothing; `ours` is named before the truth | ranked #2: LLMs lean optimistic (silicon crowd: mean forecast 57 % vs 45 % resolved yes); the intercept and slope absorb it. ranked #3: LLM as a feature of the data model (`methods.hybrid`; honest gain small, +0.006 in Twin-2K-500). ranked #6: shrink the LLM's effects (Manning et al. 13.2x exaggeration; Hewitt et al. effects r = .85 but too large) |
 | 6 | `se.seal` of the test predictions, `ours = stack` in the description | nothing; seal before you look at test outcomes | pre-registration; the selection-bias audit checks that `ours` is in the seal |
 | 7 | launch items: kNN from all labelled items, stack refit on all labelled items, 90 % interval from test residual quantiles | nothing; this is the answer to the brief | the interval is empirical (test residuals), not a model's own confidence |
-| 8 | `se.evidence.evaluate(task="continuous", primary=mae, baselines_oof=[cat_mean, knn], blind_col=...)` → ladder, shuffle control, blind arm, paired CIs, `card.md`, `dashboard.html` | `--B 1000` for the final card; `--cutoff <model cutoff>` when launch dates span it | ranked #1 again: the card is the deliverable |
+| 8 | `se.evidence.evaluate(task="continuous", primary=mae, baselines_oof=[cat_mean, knn, stack_free], blind_col=...)` → ladder, shuffle control, blind arm, paired CIs, `card.md`, `dashboard.html` | `--B 1000` for the final card; `--cutoff <model cutoff>` when launch dates span it | ranked #1 again: the card is the deliverable |
 
 Skipped on purpose (the literature ranking's "do not spend time on"): personas of imagined shoppers (the target is an
 item mean, not a person; persona variables explain < 10 % of variance, Hu & Collier), reflection / memory streams,
@@ -65,16 +65,18 @@ fine-tuning (Park 0.79, below the prompt), several samples per item.
 ## What the jury should see
 
 1. **The ladder, LLM-free rungs first**, with item-bootstrap 95 % CIs (MAE, lower is better). Offline run (FakeLLM,
-   72 test items): raw LLM 0.615, random 0.587, shuffled stack 0.466, overall mean 0.396, category mean 0.368,
-   kNN 0.340, stack without names 0.308, stack 0.303 [0.251, 0.366].
+   72 test items): raw LLM 0.615, random 0.587, shuffled stack 0.465, overall mean 0.396, category mean 0.368,
+   kNN 0.340, LLM-free blend 0.333, stack without names 0.307, stack 0.303 [0.251, 0.365].
 2. **The raw LLM is the worst rung**, and why: it rates everything +0.5 star (4.09 vs 3.56 observed). After the blend
-   its weight is 0.40 next to kNN 0.79; ours − kNN = +0.037 [+0.003, +0.068], but with category mean tied with kNN
-   the worst-case CI touches zero, so the badge is "inconclusive". Say that sentence as it is.
-3. **The controls**: the shuffle control (stack predictions permuted across items) collapses to 0.466, so the stack's
-   accuracy is item-specific; the blind arm (name hidden) loses nothing (−0.004 [−0.016, +0.009]), so the gain is not
+   its weight is 0.39 next to kNN 0.78. The LLM's own contribution is ours − LLM-free blend = +0.030 [+0.003, +0.058]
+   (not ours − kNN, +0.037: part of that is blending kNN with the category mean, no LLM needed). The three LLM-free
+   rungs are tied within their CIs and the worst case over them is [−0.001, +0.058], so the badge is
+   "inconclusive". Say that sentence as it is.
+3. **The controls**: the shuffle control (stack predictions permuted across items) collapses to 0.465, so the stack's
+   accuracy is item-specific; the blind arm (name hidden) loses nothing (−0.004 [−0.016, +0.008]), so the gain is not
    title recognition. With real products, show this row first: in D3 it was the whole story.
 4. **The launch answer**: each new item with its prediction, the 90 % interval and the raw LLM next to it (offline:
-   Orbit Buds 3.61 [3.19, 4.45], raw LLM 4.12).
+   Orbit Buds 3.61 [3.18, 4.44], raw LLM 4.12).
 5. **The seal and the spend**: the hash and time of the sealed test predictions, and with `--live` the ledger total
    against `--max-usd`.
 
@@ -100,10 +102,12 @@ fine-tuning (Park 0.79, below the prompt), several samples per item.
   look at the bias line (`--metric wmape` adds it).
 - **Small catalogues.** With fewer than ~100 labelled items the kNN and ridge are noisy and the badge will be
   "inconclusive"; keep `--k` below the smallest category size and say the CI out loud.
-- **Unparsed replies.** A reply without a numeric `KEY` becomes the median prior and is counted in the first
-  output line; above a few percent, fix `SYSTEM` before trusting the arms.
-- **Budget.** `--live` refuses to start without `--max-usd`. Calls are 2 x items (named + blind). Once the ledger
-  total reaches the cap the backend raises `BudgetExceeded` before any new call; finished replies stay in the cache,
+- **Unparsed replies.** A reply without a numeric `KEY` (quoted numbers and replies cut mid-reason still parse), a
+  refusal or a failed call becomes the median prior and is counted in the first output line; above a few percent,
+  fix `SYSTEM` before trusting the arms. Above 20 % the script stops and shows the first bad reply.
+- **Budget.** `--live` refuses to start without `--max-usd`. Calls are 2 x items (named + blind). The ledger
+  (`<out>/.cache/ledger.jsonl`) counts every run into that `--out`; once its total reaches the cap the backend
+  raises `BudgetExceeded` before any new call (up to 4 calls already in flight still finish); finished replies stay in the cache,
   so the same command with a higher cap resumes. The key comes from the environment or `--key-file` and is never
   printed.
 
