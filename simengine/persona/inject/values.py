@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import numbers
 from typing import Any, Sequence
 
 from ._base import Injector, MissingPersonField, Prompt, register
@@ -122,7 +123,9 @@ def _key(k: Any) -> str:
 
 
 def _fmt(x: float) -> str:
-    return str(int(x)) if float(x).is_integer() else f"{x:.2f}".rstrip("0")
+    """At most 2 decimals, no trailing zeros or dot (4.999 -> "5", 0.5 -> "0.5", -0.001 -> "0")."""
+    out = f"{float(x):.2f}".rstrip("0").rstrip(".")
+    return "0" if out == "-0" else out
 
 
 def _hash(*parts: Any) -> int:
@@ -147,8 +150,12 @@ def _scores(inj: Injector, person: dict, field: str, known: Sequence[str], alias
         if code not in known:
             raise ValueError(f"injector {inj.name!r}: unknown {field} key {k!r} (person {pid!r}); "
                              f"use {list(known)}")
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or math.isnan(v):
-            raise ValueError(f"injector {inj.name!r}: {field}[{k!r}] must be a number, got {v!r} (person {pid!r})")
+        if code in out:                     # e.g. "purity" and "sanctity" both given
+            raise ValueError(f"injector {inj.name!r}: {field} key {k!r} repeats {code!r} (person {pid!r})")
+        # numbers.Real admits numpy/pandas scalars; bool, NaN and inf are rejected
+        if isinstance(v, bool) or not isinstance(v, numbers.Real) or not math.isfinite(v):
+            raise ValueError(f"injector {inj.name!r}: {field}[{k!r}] must be a finite number, got {v!r} "
+                             f"(person {pid!r})")
         if scale is not None and not scale[0] <= v <= scale[1]:
             raise ValueError(f"injector {inj.name!r}: {field}[{k!r}]={v} outside scale {tuple(scale)} "
                              f"(person {pid!r})")
@@ -256,7 +263,7 @@ class SchwartzAnchor(Injector):
             if not isinstance(raw, (str, list, tuple)):
                 raise ValueError(f"injector {self.name!r}: person {person.get('id')!r} field 'schwartz' must be a "
                                  f"dict of scores, a value code or a list of codes, got {type(raw).__name__}")
-            codes = [_key(c) for c in ([raw] if isinstance(raw, str) else raw)]
+            codes = list(dict.fromkeys(_key(c) for c in ([raw] if isinstance(raw, str) else raw)))   # dedupe
             bad = [c for c in codes if c not in phrases]
             if bad:
                 raise ValueError(f"injector {self.name!r}: unknown Schwartz value code(s) {bad} "
@@ -359,7 +366,8 @@ class CulturalPrompting(Injector):
 
     def __init__(self, variant: int | str = 0, seed: int = 0, map: bool = False, **params: Any):  # noqa: A002
         super().__init__(variant=variant, seed=seed, map=map, **params)
-        if variant != "random" and not (isinstance(variant, int) and 0 <= variant < len(CULTURAL_DESCRIPTORS)):
+        if variant != "random" and not (isinstance(variant, int) and not isinstance(variant, bool)
+                                        and 0 <= variant < len(CULTURAL_DESCRIPTORS)):
             raise ValueError(f"variant must be 0-{len(CULTURAL_DESCRIPTORS) - 1} or 'random', not {variant!r}")
         self.variant, self.seed, self.map = variant, seed, bool(map)
         self.needs = ("country", "ivs_map") if self.map else ("country",)
