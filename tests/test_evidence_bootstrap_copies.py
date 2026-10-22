@@ -110,6 +110,25 @@ class TestKopyaMadde(unittest.TestCase):
                 gen.append(m["ust"] - m["alt"])
         self.assertLess(abs(gen[1] / gen[0] - 1), 0.15, gen)
 
+    def test_segment_rows_copy_aware(self):
+        # per-segment CI (analiz.segment_analizi) resamples the segment's clusters itself; it was ~1.5-1.7x
+        # binomial before the copy-aware codes reached it
+        import simengine.evidence as ev
+        madde, y, p, dogru = _ab(n=400, tohum=5)
+        seg = np.where(madde % 2, "x", "y")
+        df = pd.DataFrame({"item": madde, "truth": y, "pred_ours": p, "segment": seg})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rep = ev.evaluate(df, ours="ours", task="ab", B=500, multiplier=False)
+        satir = rep["segment"]["segment"]["satirlar"]
+        self.assertEqual(len(satir), 2)
+        for r in satir:
+            m = r["yontemler"][next(k for k in r["yontemler"] if "ours" in k)]
+            d = dogru[np.flatnonzero(seg[::2] == r["segment"])]
+            binom = 2 * 1.96 * np.sqrt(d.mean() * (1 - d.mean()) / len(d))
+            self.assertAlmostEqual(m["deger"], d.mean(), places=12)
+            self.assertLess(abs((m["ust"] - m["alt"]) / binom - 1), 0.3, (r["segment"], m, binom))
+
 
 if __name__ == "__main__":
     unittest.main()

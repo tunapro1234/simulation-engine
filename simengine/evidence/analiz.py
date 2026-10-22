@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import wasserstein_distance
 
-from .bootstrap import Orneklem, ga
+from .bootstrap import Orneklem, _madde_kod, ga, madde_yuvali
 from .metrik import tvd
 
 MAKS_SEGMENT = 40
@@ -114,10 +114,11 @@ def segment_analizi(veri, sutun_dizileri: dict, metrik, w, B: int, tohum: int, e
                     madde = d["madde"].to_numpy()[mm] if "madde" in d else None
                     nokta = _guvenli(metrik, y[mm], p[mm], madde)
                     orn = Orneklem(sub_k, B=min(B, 100), B_toplu=min(B, 100), tohum=tohum)
+                    mk = None if madde is None else _madde_kod(madde)
+                    ic = None if mk is None else madde_yuvali(sub_k, mk)
                     tek = []
                     for b in range(orn.B_toplu):
-                        ii, yeni = orn.satirlar(b)
-                        mdd = None if madde is None else madde[ii]
+                        ii, mdd = orn.satirlar(b, mk, ic)    # yuvalı maddenin kopyaları ayrı madde (ab çifti)
                         tek.append(_guvenli(metrik, y[mm][ii], p[mm][ii], mdd))
                     a, u = ga(np.array(tek))
                     satirlar[deg]["yontemler"][sutun] = {"deger": nokta, "alt": a, "ust": u}
