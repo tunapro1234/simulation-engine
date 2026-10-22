@@ -932,10 +932,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             ya, yu = al_, us_
         if not (np.isfinite(ya) and np.isfinite(yu)):
             sonuc = "GA yok"
-        elif ya > 0:
-            sonuc = "A iyi (GA 0'ın üstünde)" if b is not None else "0'ın üstünde"
+        elif ya > 0:  # yer: basılan ham GA'nın (alt, ust) 0'a göre yeri; küçük-iyi metrikte A iyi = GA 0'ın altında
+            sonuc = f"A iyi (GA 0'ın {'üstünde' if M.yon > 0 else 'altında'})" if b is not None else "0'ın üstünde"
         elif yu < 0:
-            sonuc = "B iyi (GA 0'ın altında)" if b is not None else "0'ın altında"
+            sonuc = f"B iyi (GA 0'ın {'altında' if M.yon > 0 else 'üstünde'})" if b is not None else "0'ın altında"
         else:
             sonuc = "belirsiz (GA 0'ı içeriyor)"
         return {"a": a, "b": b, "etiket": et_, "tur": tur_, "metrik": birincil, "fark": f_, "alt": al_, "ust": us_,

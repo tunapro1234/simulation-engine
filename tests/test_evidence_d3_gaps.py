@@ -474,6 +474,18 @@ class TestPairedDiff(unittest.TestCase):
         self.assertIn("anlamlı · 0&#x27;ın üstünde" if "&#x27;" in html else "anlamlı · 0'ın üstünde", html)
         self.assertNotIn("B iyi", html.split("kayıtlı · base vs 0")[1].split("</tr>")[0])
 
+    def test_lower_is_better_verdict_names_printed_ci_side(self):
+        """Regression (D5 #8c, D7 #8, D11 #5a): MAE 'ours − base' = −1.3 [−2.5; −0.4] read 'a better (CI above 0)'."""
+        r = _quiet(ev.evaluate, self.df, ours="ours", aggregate_by="movie_id", primary="mae",
+                   compare=[("ours", "base"), ("base", "ours", "rev")], **FAST)
+        fwd, rev = r["kayitli_karsilastirmalar"]
+        for row, en in ((fwd, ev.summary(r)["comparisons"][0]), (rev, ev.summary(r)["comparisons"][1])):
+            if row["sonuc"].startswith(("A iyi", "B iyi")):
+                side = "altında" if row["ust"] < 0 else "üstünde"
+                self.assertIn(f"GA 0'ın {side}", row["sonuc"])
+                self.assertIn(f"CI {'below' if row['ust'] < 0 else 'above'} 0", en["verdict"])
+                self.assertEqual(row["a_iyi"], row["fark"] < 0)     # lower is better
+
     def test_compare_errors(self):
         with self.assertRaises(ValueError):
             _quiet(ev.evaluate, self.df, ours="ours", aggregate_by="movie_id", compare=[("ours", "nope")], **FAST)

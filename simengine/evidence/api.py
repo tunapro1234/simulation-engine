@@ -997,7 +997,8 @@ def summary(report: dict) -> dict:
 
 def _comparison_en(c: dict) -> dict:
     v = c.get("sonuc") or ""
-    verdict = ("a better (CI above 0)" if v.startswith("A iyi") else "b better (CI below 0)" if v.startswith("B iyi")
+    yer = "below" if "altında" in v else "above"      # where the printed (raw) CI lies; lower-is-better flips it
+    verdict = (f"a better (CI {yer} 0)" if v.startswith("A iyi") else f"b better (CI {yer} 0)" if v.startswith("B iyi")
                else "above 0" if v.startswith("0'ın üstünde") else "below 0" if v.startswith("0'ın altında")
                else "no CI" if v == "GA yok" else "unclear (CI includes 0)")
     return {"label": c.get("etiket"), "a": c.get("a"), "b": c.get("b"), "kind": {"kor": "blind", "kayitli": "registered"}
