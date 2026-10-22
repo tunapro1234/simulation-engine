@@ -20,15 +20,37 @@ IDS: `from_table` checks the id column first and raises ValueError with the numb
 ids (an empty id never becomes the string "None" or "nan"). `id_col=None` uses the row number (position in the
 table before sampling) as the id: "row0", "row1", ...
 
+VALUE LABELS (codebook codes): `from_table(df, ..., value_labels={"Gender": {1: "male", 2: "female"}})` (or
+`Mapping.value_labels`) turns codes into labels before enum mapping and text rendering, so the persona reads
+"female" and not "Gender: 2". Codes match as numbers or strings (2, 2.0, "2" and "02" are one code); an unknown
+code is kept as is with one warning per column (counts per code). The id column is never relabelled.
+`read_codebook(table)` builds the dict from a (variable, code, label) or (code, label) table;
+`apply_value_labels(df, labels)` relabels a whole table.
+
+    labels = read_codebook(codebook_df)                       # columns: variable, code, label
+    personas = from_table(df, id_col="rid", value_labels=labels, forbidden=["target"])
+
+POOL: `pool_select(df, K, method="random"|"stratified"|"kmeans", features=, strata=, seed=)` picks K rows (index
+labels) for a small persona pool; k-means takes the row nearest each centroid on standardised features.
+`pool_curve(df, sizes, score_fn, method=...)` scores pools of growing size (how big must the pool be?).
+
+    idx = pool_select(df, 20, method="kmeans", features=["visits", "spend"], seed=0)
+    panel = from_table(df.loc[idx], id_col="rid", forbidden=["target"])
+    curve = pool_curve(df, [10, 20, 50], score, method=["random", "kmeans"], features=["visits", "spend"])
+
 LEAKAGE RULE: facets hold only what is known BEFORE the prediction time. The target label never goes in;
 `from_row` raises if a facet source column is listed in `forbidden`.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import os
+import warnings
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from .schema import AGE_BAND, Persona, enum_for
@@ -47,6 +69,7 @@ class Mapping:
     forbidden: list = field(default_factory=list)        # target/future columns: error if used as a facet
     locale: str = "en-US"
     source_name: str = "data"                            # evidence.measured_receipt contract_id
+    value_labels: dict = field(default_factory=dict)     # column -> {code: label}, applied before everything else
 
 
 def age_band(age) -> str | None:
@@ -103,6 +126,130 @@ def _plain(v):
     return v.item() if hasattr(v, "item") and not isinstance(v, (str, bytes)) else v
 
 
+def _code_key(v):
+    """Codebook code -> comparison key: 2, 2.0, "2", " 02 " and np.int64(2) all give 2; other text is stripped."""
+    v = _plain(v)
+    if isinstance(v, (bool, int)):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        try:
+            v = float(s)
+        except ValueError:
+            return s
+        if not math.isfinite(v):
+            return s
+    if isinstance(v, float):
+        return int(v) if v.is_integer() else v
+    return v
+
+
+def _label_map(labels: dict, column=None) -> dict:
+    out = {}
+    for code, label in labels.items():
+        k = _code_key(code)
+        if k in out and out[k] != label:
+            raise ValueError(f"value_labels[{column!r}]: codes {code!r} and an earlier one are the same code "
+                             f"({k!r}) with different labels ({out[k]!r} vs {label!r})")
+        out[k] = label
+    return out
+
+
+def _label_value(v, lm: dict, unknown: Counter):
+    """Label one cell: empty stays empty, a known code becomes its label, anything else is kept and counted."""
+    if _is_empty(v):
+        return v
+    try:
+        return lm[_code_key(v)]
+    except (KeyError, TypeError):
+        unknown[str(_plain(v))] += 1
+        return _plain(v)
+
+
+def warn_unlabelled(unlabelled: dict, value_labels: dict | None = None, n_rows: int | None = None) -> None:
+    """One UserWarning per column whose codes have no label: counts per code (the values are kept as is).
+    `unlabelled`: {column: Counter(code -> rows)}, filled by `from_row(..., unlabelled=...)`."""
+    for col, cnt in unlabelled.items():
+        if not cnt:
+            continue
+        total = sum(cnt.values())
+        vals = ", ".join(f"{v!r} x{k}" for v, k in cnt.most_common(8)) + (", ..." if len(cnt) > 8 else "")
+        known = list((value_labels or {}).get(col, {}))
+        of = f" of {n_rows}" if n_rows is not None else ""
+        warnings.warn(f"value_labels[{col!r}]: {total}{of} rows have codes without a label ({vals}); kept as is. "
+                      f"Labelled codes: {', '.join(map(repr, known[:12]))}{', ...' if len(known) > 12 else ''}.",
+                      UserWarning, stacklevel=3)
+
+
+def apply_value_labels(df: pd.DataFrame, value_labels: dict, *, skip=()) -> pd.DataFrame:
+    """Copy of `df` with codebook codes replaced by labels; `value_labels` = {column: {code: label}}.
+    Codes match as numbers or strings (2, 2.0, "2" and "02" are one code). Empty cells stay empty. A code without a
+    label is kept as is, with one UserWarning per column (counts per code); a column missing from `df` warns too.
+    `skip`: columns to leave alone (e.g. the id column)."""
+    out = df.copy()
+    missing = [c for c in value_labels if c not in skip and c not in set(out.columns)]
+    if missing:
+        warnings.warn(f"value_labels: columns not in the table, ignored: {', '.join(map(repr, missing))}",
+                      UserWarning, stacklevel=2)
+    unlabelled: dict = {}
+    for col, labels in value_labels.items():
+        if col in skip or col not in out.columns:
+            continue
+        lm, unknown = _label_map(labels, col), Counter()
+        out[col] = out[col].astype(object).map(lambda v: _label_value(v, lm, unknown))
+        unlabelled[col] = unknown
+    warn_unlabelled(unlabelled, value_labels, len(out))
+    return out
+
+
+def _labelled_row(row, mapping: "Mapping", unlabelled: dict):
+    """Row with `mapping.value_labels` applied (the id column is never relabelled); same type as the input."""
+    labels = {c: (_label_map(m, c), unlabelled.setdefault(c, Counter())) for c, m in mapping.value_labels.items()
+              if c != mapping.id_col}
+
+    def lab(c, v):
+        return _label_value(v, *labels[c]) if c in labels else v
+
+    if isinstance(row, pd.Series):
+        return pd.Series({c: lab(c, v) for c, v in row.items()}, dtype=object, name=row.name)
+    if hasattr(row, "items"):
+        return {c: lab(c, v) for c, v in row.items()}
+    raise TypeError("value_labels need a dict or pandas Series row")
+
+
+def read_codebook(table, *, variable: str | None = None, columns=None) -> dict:
+    """Codebook table -> `value_labels` dict {variable: {code: label}}.
+    Three columns (variable, code, label): one entry per variable; a blank variable cell repeats the one above
+    (codebooks often list the variable once). Two columns (code, label): pass `variable=`. `columns` picks
+    (variable, code, label) or (code, label) out of a wider table. `table`: DataFrame or a .csv/.tsv path.
+    Codes are normalised like `from_table` compares them (2, "2" and "02" -> 2); one code with two different
+    labels raises ValueError."""
+    if isinstance(table, (str, os.PathLike)):
+        path = str(table)
+        sep = "\t" if path.lower().endswith((".tsv", ".tab", ".txt")) else ","
+        table = pd.read_csv(path, sep=sep, dtype=str, keep_default_na=False)
+    t = table[list(columns)] if columns is not None else table
+    if t.shape[1] == 2:
+        if variable is None:
+            raise ValueError("a two-column codebook (code, label) needs variable=")
+        rows = [(variable, c, lab) for c, lab in t.itertuples(index=False)]
+    elif t.shape[1] == 3:
+        var = t.iloc[:, 0].map(lambda v: None if _is_empty(v) or not str(v).strip() else str(v).strip()).ffill()
+        rows = list(zip(var, t.iloc[:, 1], t.iloc[:, 2]))
+    else:
+        raise ValueError(f"codebook has {t.shape[1]} columns; pass columns=(variable, code, label) or (code, label)")
+    out: dict = {}
+    for var, code, label in rows:
+        if _is_empty(var) or _is_empty(code) or _is_empty(label) or not str(code).strip():
+            continue
+        label = label.strip() if isinstance(label, str) else _plain(label)
+        m, k = out.setdefault(var, {}), _code_key(code)
+        if k in m and m[k] != label:
+            raise ValueError(f"codebook {var!r}: code {k!r} has two labels ({m[k]!r}, {label!r})")
+        m[k] = label
+    return out
+
+
 ROW_ID_PREFIX = "row"
 
 
@@ -110,10 +257,18 @@ def _id_text(v) -> str:
     return str(_plain(v))
 
 
-def from_row(row, mapping: Mapping, *, pid: str | None = None) -> Persona:
+def from_row(row, mapping: Mapping, *, pid: str | None = None,
+             unlabelled: dict | None = None) -> Persona:
     """One row (dict or pandas Series) -> Persona. Out-of-enum TALP values are dropped silently.
     `pid` overrides the id column (from_table passes the row number when `mapping.id_col` is None).
-    An empty/NaN id raises ValueError (it never becomes the string "None")."""
+    An empty/NaN id raises ValueError (it never becomes the string "None").
+    `mapping.value_labels` are applied to the row first; `unlabelled`: a dict collecting {column: Counter(code)}
+    of codes without a label for one aggregated warning (`warn_unlabelled`); None = warn here for this row."""
+    if mapping.value_labels:
+        seen = {} if unlabelled is None else unlabelled
+        row = _labelled_row(row, mapping, seen)
+        if unlabelled is None:
+            warn_unlabelled(seen, mapping.value_labels)
     get = row.get if hasattr(row, "get") else row.__getitem__
     if pid is None:
         if mapping.id_col is None:
@@ -212,13 +367,16 @@ def check_ids(df: pd.DataFrame, id_col: str) -> None:
 def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str | None = None,
                fields: dict | None = None, facets: dict | None = None, text: dict | None = None,
                segment=None, forbidden=(), locale: str = "en-US", source_name: str = "data",
-               n: int | None = None, seed: int = 0, stratify: str | None = None) -> list[Persona]:
+               n: int | None = None, seed: int = 0, stratify: str | None = None,
+               value_labels: dict | None = None) -> list[Persona]:
     """Table -> list of Persona.
 
     Either pass a `Mapping`, or keyword pieces of one (`id_col` + `fields`/`facets`/...). With only `id_col`
     the mapping is guessed by `auto_mapping` (every non-forbidden column becomes a facet, so put the target in
     `forbidden`). `n` samples n rows (`seed`); with `stratify` (a column) the sample is proportional-stratified.
 
+    `value_labels` {column: {code: label}} (merged over `mapping.value_labels`) relabels codebook codes before
+    the enum mapping and the text; unknown codes are kept with one warning per column (see the module docstring).
     The id column is checked first: empty/NaN or duplicated ids raise ValueError with their counts. `id_col=None`
     (or a Mapping with id_col None) numbers the rows instead: "row<i>", i = position in `df` before sampling."""
     if mapping is None:
@@ -230,6 +388,8 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
             mapping = Mapping(id_col=id_col, fields=dict(fields or {}), facets=dict(facets or {}),
                               text=dict(text or {}), segment=segment, forbidden=list(forbidden),
                               locale=locale, source_name=source_name)
+    if value_labels:
+        mapping = replace(mapping, value_labels={**mapping.value_labels, **value_labels})
     if mapping.id_col is None:
         df = df.reset_index(drop=True)          # index label = row number, kept through sampling
     else:
@@ -242,6 +402,9 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
             df = pd.concat(parts).head(n)
         else:
             df = df.sample(n, random_state=seed)
+    if mapping.value_labels:                    # once for the table: one warning per column
+        df = apply_value_labels(df, mapping.value_labels, skip=(mapping.id_col,))
+        mapping = replace(mapping, value_labels={})
     if mapping.id_col is None:
         return [from_row(r, mapping, pid=f"{ROW_ID_PREFIX}{i}") for i, r in df.iterrows()]
     return [from_row(r, mapping) for _, r in df.iterrows()]
@@ -313,5 +476,159 @@ def to_frames(personas) -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.DataFrame(rows), pd.DataFrame(feats, columns=["id", "item", "value"])
 
 
+POOL_METHODS = ("random", "stratified", "kmeans")
+
+
+def _strata_positions(df: pd.DataFrame, K: int, strata, rng) -> np.ndarray:
+    """Proportional allocation (largest remainder; a stratum smaller than n/K may get 0), random rows within."""
+    if strata is None:
+        raise ValueError("method='stratified' needs strata= (a column or a list of columns)")
+    cols = [strata] if isinstance(strata, str) else list(strata)
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"strata columns not in the table: {missing}")
+    keys = df[cols].astype(str).agg("|".join, axis=1) if len(cols) > 1 else df[cols[0]].astype(str)
+    groups = [np.flatnonzero((keys == k).to_numpy()) for k in sorted(keys.unique())]
+    sizes = np.array([len(g) for g in groups])
+    quota = K * sizes / len(df)
+    alloc = np.floor(quota).astype(int)
+    for j in np.argsort(-(quota - alloc), kind="stable")[:K - int(alloc.sum())]:
+        alloc[j] += 1                           # quota < size (K < n), so alloc never exceeds the stratum
+    return np.concatenate([rng.choice(g, a, replace=False) for g, a in zip(groups, alloc) if a])
+
+
+def _feature_matrix(df: pd.DataFrame, features) -> np.ndarray:
+    """Standardised (z-score) feature matrix; text columns are one-hot, NaN -> column mean (0)."""
+    if features is None:
+        raise ValueError("method='kmeans' needs features= (the columns to cluster on; keep ids and targets out)")
+    cols = [features] if isinstance(features, str) else list(features)
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"features not in the table: {missing}")
+    parts = []
+    for c in cols:
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
+            parts.append(pd.to_numeric(s, errors="coerce").astype(float).to_frame())
+        else:
+            parts.append(pd.get_dummies(s.astype("string"), prefix=str(c), dtype=float))
+    X = pd.concat(parts, axis=1).to_numpy(dtype=float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)         # all-NaN column
+        mu, sd = np.nanmean(X, axis=0), np.nanstd(X, axis=0)
+    mu = np.where(np.isfinite(mu), mu, 0.0)
+    sd = np.where(np.isfinite(sd) & (sd > 0), sd, 1.0)
+    X = (X - mu) / sd
+    X[~np.isfinite(X)] = 0.0
+    return X
+
+
+def _sqdist(X: np.ndarray, C: np.ndarray) -> np.ndarray:
+    d = (X * X).sum(1)[:, None] - 2 * X @ C.T + (C * C).sum(1)[None, :]
+    return np.maximum(d, 0.0)
+
+
+def _kmeans(X: np.ndarray, K: int, rng, n_init: int = 4, max_iter: int = 100) -> np.ndarray:
+    """Lloyd's k-means with k-means++ starts (numpy only); returns the centroids of the best of `n_init` runs."""
+    n, best = len(X), None
+    for _ in range(max(1, n_init)):
+        idx = [int(rng.integers(n))]
+        d2 = _sqdist(X, X[idx])[:, 0]
+        for _ in range(1, K):
+            p = d2.copy()
+            p[idx] = 0.0
+            if p.sum() <= 0:                    # fewer distinct rows than K: any unused row
+                p = np.ones(n)
+                p[idx] = 0.0
+            idx.append(int(rng.choice(n, p=p / p.sum())))
+            d2 = np.minimum(d2, _sqdist(X, X[idx[-1:]])[:, 0])
+        C = X[idx].copy()
+        for _ in range(max_iter):
+            d = _sqdist(X, C)
+            lab = d.argmin(1)
+            counts = np.bincount(lab, minlength=K)
+            sums = np.zeros_like(C)
+            np.add.at(sums, lab, X)
+            new = C.copy()
+            full = counts > 0
+            new[full] = sums[full] / counts[full, None]
+            if (~full).any():                   # empty cluster: restart it at the worst-fitted rows
+                far = np.argsort(-d[np.arange(n), lab], kind="stable")[:int((~full).sum())]
+                new[~full] = X[far]
+            done = np.allclose(new, C)
+            C = new
+            if done:
+                break
+        inertia = float(_sqdist(X, C).min(1).sum())
+        if best is None or inertia < best[0]:
+            best = (inertia, C)
+    return best[1]
+
+
+def _nearest_unique(X: np.ndarray, C: np.ndarray) -> np.ndarray:
+    """One distinct row per centroid: centroids with the closest row choose first."""
+    d = _sqdist(X, C)
+    out = []
+    for k in np.argsort(d.min(0), kind="stable"):
+        col = d[:, k]
+        i = int(col.argmin())
+        out.append(i)
+        d[i, :] = np.inf
+    return np.array(out)
+
+
+def pool_select(df: pd.DataFrame, K: int, *, method: str = "random", features=None, strata=None, seed: int = 0,
+                n_init: int = 4, max_iter: int = 100) -> pd.Index:
+    """Pick K rows of `df` for a persona pool; returns their index labels in table order (`df.loc[idx]`).
+
+    random      K rows uniformly; for one seed a smaller pool is a subset of a larger one (nested curves).
+    stratified  proportional to the `strata` column(s) (largest remainder), random rows within each stratum.
+    kmeans      k-means (K clusters, k-means++ starts, `n_init`) on standardised `features` (text columns
+                one-hot, NaN = mean); the row nearest each centroid, all distinct.
+    K >= len(df) returns every row. `df.index` must be unique."""
+    if method not in POOL_METHODS:
+        raise ValueError(f"method must be one of {POOL_METHODS}, got {method!r}")
+    if isinstance(K, bool) or int(K) != K or K < 1:
+        raise ValueError(f"K must be a positive int, got {K!r}")
+    if not df.index.is_unique:
+        raise ValueError("df.index has duplicates; df.reset_index(drop=True) first")
+    K, n = int(K), len(df)
+    if K >= n:
+        return df.index.copy()
+    rng = np.random.default_rng(seed)
+    if method == "random":
+        pos = rng.permutation(n)[:K]
+    elif method == "stratified":
+        pos = _strata_positions(df, K, strata, rng)
+    else:
+        X = _feature_matrix(df, features)
+        pos = _nearest_unique(X, _kmeans(X, K, rng, n_init, max_iter))
+    return df.index[np.sort(pos)]
+
+
+def pool_curve(df: pd.DataFrame, sizes, score_fn: Callable, *, method="random", draws: int = 20, seed: int = 0,
+               features=None, strata=None, level: float = 0.9, long: bool = False) -> pd.DataFrame:
+    """Pool-size curve: for each method and K in `sizes`, `draws` pools (seeds seed, seed+1, ...) from
+    `pool_select`, each scored by `score_fn(df.loc[idx]) -> float` (e.g. 1 - TVD of the pool's answers against
+    held-out people). `method`: one name or a list (one curve each). A K >= len(df) is the whole table (one draw).
+    Returns one row per (method, size): draws, mean, lo, hi (central `level` interval of the draws, default
+    5%-95%); `long=True` returns the per-draw scores (method, size, seed, score) instead."""
+    methods = [method] if isinstance(method, str) else list(method)
+    rows = []
+    for m in methods:
+        for K in sizes:
+            for d in range(1 if K >= len(df) else draws):
+                idx = pool_select(df, K, method=m, features=features, strata=strata, seed=seed + d)
+                rows.append({"method": m, "size": int(K), "seed": seed + d, "score": float(score_fn(df.loc[idx]))})
+    raw = pd.DataFrame(rows, columns=["method", "size", "seed", "score"])
+    if long:
+        return raw
+    a = (1 - level) / 2
+    g = raw.groupby(["method", "size"], sort=False)["score"]
+    return pd.DataFrame({"draws": g.size(), "mean": g.mean(), "lo": g.quantile(a), "hi": g.quantile(1 - a)}
+                        ).reset_index()
+
+
 __all__ = ["Mapping", "from_row", "from_table", "check_ids", "auto_mapping", "narrate", "age_band", "gender_value",
-           "to_frames", "TALP_FIELDS", "NARRATE_TASK"]
+           "to_frames", "TALP_FIELDS", "NARRATE_TASK",
+           "apply_value_labels", "read_codebook", "warn_unlabelled", "pool_select", "pool_curve", "POOL_METHODS"]

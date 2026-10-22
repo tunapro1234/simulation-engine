@@ -2,6 +2,7 @@
 
     import simengine.persona as sp
     personas = sp.from_table(df, id_col="user_id", forbidden=["target"])      # personas from survey rows
+    idx = sp.pool_select(df, 20, method="kmeans", features=["visits", "spend"])  # small persona pool
     personas = sp.from_history(survey, id_col="uid", level="L2", purchases=orders, cutoff="2022-07-01")
     src = sp.ClaudeSource(llm)                                                 # any simengine.types.LLM
     panel = src.generate(sp.AudienceSpec(...), n=20)
@@ -12,8 +13,9 @@
 from . import methods
 from .bigfive import (DOMAINS as BIGFIVE_DOMAINS, PROFILES, SOTO_JOHN_2017_CORR, SOTO_JOHN_2017_NORMS,
                       US_ADULT_NORMS, bfi2_text, bigfive_audience, bigfive_traits, sample_bigfive)
-from .builders import (TALP_FIELDS, Mapping, age_band, auto_mapping, from_row, from_table, gender_value,
-                       narrate, to_frames)
+from .builders import (POOL_METHODS, TALP_FIELDS, Mapping, age_band, apply_value_labels, auto_mapping, from_row,
+                       from_table, gender_value, narrate, pool_curve, pool_select, read_codebook, to_frames,
+                       warn_unlabelled)
 from .history import (LEVELS, from_history, purchase_history_text, summarize_purchases,
                       survey_profile_text)
 from .schema import (ABSOLUTE_WORDS, AGE_BAND, BRAND_AWARENESS, COMMITMENT, ENUMS, GENDER, HOUSEHOLD,
@@ -39,7 +41,8 @@ __all__ = [
     "SYSTEM_GENERATE", "SYSTEM_ASK", "GENERATE_PROMPT", "ASK_PROMPT",
     # builders
     "Mapping", "from_row", "from_table", "auto_mapping", "narrate", "age_band", "gender_value", "to_frames",
-    "TALP_FIELDS",
+    "TALP_FIELDS", "apply_value_labels", "read_codebook", "warn_unlabelled", "pool_select", "pool_curve",
+    "POOL_METHODS",
     # history
     "from_history", "survey_profile_text", "summarize_purchases", "purchase_history_text", "LEVELS",
     # persona method zoo

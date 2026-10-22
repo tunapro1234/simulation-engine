@@ -76,6 +76,42 @@ Ported from the TALP prep branches (read-only research code):
   sp.from_table(df, id_col="ResponseId")   # ValueError: id column 'ResponseId' (602 rows): 512 empty/NaN ids. ...
   panel = sp.from_table(df, id_col=None, forbidden=["target"])   # ids row0, row1, ...
   ```
+- **Codebook value labels.** `from_table(df, ..., value_labels={"Gender": {1: "male", 2: "female"}})` (or
+  `Mapping.value_labels`; the keyword is merged over the Mapping's, per column) replaces codes with labels
+  before the enum mapping and the text, so a persona reads `female` and not `Gender: 2`. Codes compare as
+  numbers or strings: `2`, `2.0`, `"2"` and `"02"` are one code, and two labels for one code raise
+  `ValueError`. Empty cells stay empty. The id column is never relabelled. A code with no label is kept as is,
+  with one `UserWarning` per column that gives the counts per code. `from_row` applies the same labels to one
+  row. `apply_value_labels(df, labels)` relabels a whole table. `read_codebook(table)` builds the dict from a
+  `(variable, code, label)` table, where a blank variable cell repeats the one above, or from a `(code, label)`
+  table with `variable=`. The table can be a DataFrame or a .csv/.tsv path, and `columns=` picks the three or
+  two columns out of a wider table.
+
+  ```python
+  labels = sp.read_codebook(codebook)          # variable, code, label
+  panel = sp.from_table(df, id_col="rid", value_labels=labels, forbidden=["target"])
+  ```
+- **Persona pool selection.** `pool_select(df, K, method=, features=, strata=, seed=0)` returns the index labels
+  of K rows in table order, so `df.loc[idx]` goes straight into `from_table`. The methods are:
+  - `"random"`: uniform. For one seed, a smaller pool is a subset of a larger one.
+  - `"stratified"`: proportional to the `strata` column(s) by largest remainder, so a stratum smaller than n/K
+    can get 0 rows, with random rows inside each stratum.
+  - `"kmeans"`: K clusters on z-scored `features`, with k-means++ starts and the best of `n_init=4`. Text
+    columns are one-hot and NaN is the mean. It picks the row nearest each centroid, and every row picked is
+    distinct. `features` is required, so keep ids and targets out of it.
+
+  K >= len(df) returns every row. `pool_curve(df, sizes, score_fn, method="random" | [...], draws=20)` scores
+  `draws` pools per size with `score_fn(pool_frame) -> float`. It returns `method, size, draws, mean, lo, hi`,
+  where lo and hi are the 5-95% interval of the draws, and `long=True` returns one row per draw. A size of at
+  least len(df) is the whole table, scored once. The score is the caller's, e.g. 1 - TVD of the pool members'
+  own answers against held-out cells. In the G5 rehearsal, k-means pools scored 3-5 points below random ones,
+  so put random in every curve as the reference.
+
+  ```python
+  idx = sp.pool_select(train, 20, method="kmeans", features=["age", "income", "visits"], seed=0)
+  curve = sp.pool_curve(train, [10, 20, 50, 100], score, method=["random", "stratified", "kmeans"],
+                        strata="region", features=["age", "income", "visits"])
+  ```
 - `narrate(source, personas, context=...)`: an LLM writes the name, tagline, backstory and voice, and leaves
   the facets alone. Without `context`, the LLM may invent the sector.
 - `to_frames(personas)` returns `(people, features)`. `people` has `id`, `seg_*`, `segment` and
