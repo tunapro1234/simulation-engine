@@ -341,9 +341,15 @@ open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, fact
   (observed behaviour). For each prediction column (`"llm"` → `pred_llm`; None = every `pred_*`) it gives the
   distance of the panel mean to each anchor mean, the person-level MAE to each anchor, and the paired difference
   `say − do` (negative = closer to say) for both, with a percentile CI from a cluster bootstrap over `cluster`
-  (rows of one person move together; no such column → rows, noted). The verdict reads the CI of the `on`
+  (rows of one person move together). The default `"person"` falls back to `"group"`, the EvalFrame cluster key
+  that `survey_frame(level="person")` fills with the persona id, so its frame needs no renaming; a named column
+  that is missing raises; with neither column, or `cluster=None`, rows are resampled (noted: too narrow when a
+  person has several rows). The verdict reads the CI of the `on`
   difference: *closer to what people say* / *closer to what people do* / *undecided*. An anchor row gives
   mean do − mean say with its CI; if that CI covers 0 the anchors are not apart and every verdict is undecided.
+  Coverage (simulated, 40 persons × 3 rows, 300 runs): level and MAE CIs 0.93-0.95, a midpoint prediction gets a
+  wrong verdict 5-6 % of the time; when the panel mean sits exactly on an anchor the level CI's far bound is too
+  tight (0.84; the difference is pinned at ∓gap there), the bound near 0 and the verdict are unaffected.
   Each prediction carries a `card_line` for the evidence card. Missing values are dropped per prediction and
   counted. Gap G2 #2 (rehearsal: the person bootstrap and the "which anchor" scene were hand-written).
   *Export:* import from `simengine.evidence.extras` for now; the package-level `ev.say_do` lands with the
@@ -355,9 +361,10 @@ open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, fact
   print(extras.section_markdown(sd)); [r["card_line"] for r in sd["predictions"]]
   ```
 
-Tests: `tests/test_evidence_say_do.py` (7 tests, synthetic, < 1 s): a prediction equal to `say` plus noise reads
+Tests: `tests/test_evidence_say_do.py` (8 tests, synthetic, < 1 s): a prediction equal to `say` plus noise reads
 closer to say, `do` plus noise closer to do, the midpoint undecided; exact point values; anchors not apart →
-undecided; person-cluster CI wider than the row CI when errors are tied within person; Turkish `tahmin_`
+undecided; person-cluster CI wider than the row CI when errors are tied within person; `group` (and
+`grup`) used as the cluster when there is no `person` column, a missing named cluster raises; Turkish `tahmin_`
 alias, missing rows, no cluster column, errors and rendering.
 
 Tests: `tests/test_evidence_extras.py` (21 tests, synthetic data, < 1 s): variance ratio 1 on identical data and
