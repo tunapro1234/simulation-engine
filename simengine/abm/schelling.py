@@ -10,7 +10,8 @@ Three dynamics share one lattice (``simengine.abm.grid`` convention: int (H, W),
   empty cell where it would be happy (stay if none), ``"nearest"`` closest such cell, distance = squares traversed
   horizontally + vertically (Schelling 1971).
 * :class:`ZhangSwap` (Zhang 2004, JEBO 54:533). No vacancies; each period one random agent of type 0 and one of
-  type 1 consider trading places. Payoff u(x) is kinked with a peak at a 50-50 neighbourhood
+  type 1 consider trading places (a pair of neighbours is skipped: Zhang draws the pair "from two different
+  neighborhoods", and only then is the pair's gain exactly -M/(2n) x the change in rho). Payoff u(x) is kinked with a peak at a 50-50 neighbourhood
   (u = Z x/n for x <= n, (2Z - M) + (M - Z) x/n above, n = k/2, Z = 1, M = 0.6 as in his Table 4); the swap happens
   with logit probability exp(bV) / (exp(bU) + exp(bV)) (U, V = summed payoff without / with the swap). The number of
   unlike neighbour pairs rho is the (negative) potential, so it falls in the long run although every agent prefers
@@ -274,20 +275,23 @@ class Schelling:
     def _still(self, ex: dict) -> bool:
         if ex["moved"]:
             return False
-        if self.mover is None:
-            return self.movers == "unhappy"
+        if self.mover is None:                                       # nobody moved -> next sweep sees the same state
+            return True
         return ex.get("asked", 0) == 0 or (not self.mover.n_options and ex.get("wanted", 0) == 0)
 
     def run(self, n_steps: int = 100, seed: G.SeedLike = None, lattice: np.ndarray | None = None,
             stop_when_still: bool = True, metrics: bool = True) -> SchellingRun:
         """n_steps sweeps (LLM rounds with a mover). Stops early (converged=True) after a still step: nobody moved
-        under the classic rule with movers='unhappy'; with an LLM mover, nobody was asked, or (no vacancy options)
+        in a classic sweep (with movers='all' too: no agent found a satisfying vacancy, a frozen state); with an LLM mover, nobody was asked, or (no vacancy options)
         nobody chose to move. With options a still round does not stop the run, since the offered vacancies are
         re-drawn each round. metrics=True adds the final segregation coefficient and dissimilarity."""
         rng = G.make_rng(seed)
         if lattice is None:
             lattice = G.random_lattice(self.grid, self.fractions, seed=rng)
         lattice = np.asarray(lattice)
+        if lattice.shape != self.grid.shape or lattice.min() < G.EMPTY or lattice.max() >= self.n_types:
+            raise ValueError(f"lattice must be {self.grid.shape} with values EMPTY or 0..{self.n_types - 1} "
+                             f"(one per entry of fractions)")
         st = _State(self.grid, lattice, self.n_types)
         if self.mover is not None:
             self.mover.reset()
@@ -348,7 +352,11 @@ class ZhangRun:
 
 
 class ZhangSwap:
-    """Zhang's all-integrationist swap game on a full two-type lattice (no vacancies)."""
+    """Zhang's all-integrationist swap game on a full two-type lattice (no vacancies).
+
+    Each period draws one type-0 and one type-1 agent at random; if they are neighbours the period passes without a
+    trade (Zhang pairs agents "from two different neighborhoods"). Otherwise they swap with logit probability on the
+    pair's summed payoff, so -rho x M/(2n) is an exact potential and the stationary law is exp(-beta M/(2n) rho)."""
 
     def __init__(self, grid: G.Grid, beta: float = 10.0, Z: float = 1.0, M: float = 0.6, share: float = 0.5):
         if not Z > M > 0:
@@ -364,6 +372,8 @@ class ZhangSwap:
         lat = np.asarray(lattice).ravel().astype(np.int64)
         if (lat == G.EMPTY).any():
             raise ValueError("Zhang's model has no vacancies")
+        if lat.size != self.grid.size or not np.isin(lat, (0, 1)).all():
+            raise ValueError(f"lattice must be {self.grid.shape} with types 0 and 1 only")
         nbr = self.grid.neighbour_table()
         if (nbr < 0).any():
             raise ValueError("Zhang's model needs a torus (every agent has 2n neighbours)")
@@ -386,21 +396,21 @@ class ZhangSwap:
                 break
             A, B = int(cells[0][ia[p]]), int(cells[1][ib[p]])
             nA, nB = nbr[A], nbr[B]
-            adj = int((nA == B).any())
+            if (nA == B).any():                                      # Zhang: partners from two different
+                continue                                             # neighbourhoods (else -rho is no potential)
             xa, xb = int(like[A]), int(like[B])
-            # after the swap, the type-0 agent sits at B: its like count = (k - like[B]) unlike-of-1 cells, minus A
-            ya, yb = k - xb - adj, k - xa - adj
+            ya, yb = k - xb, k - xa                                  # type 0 at B has B's k - like[B] type-0 cells
             dv = (u[ya] + u[yb]) - (u[xa] + u[xb])
             if draws[p] >= 1.0 / (1.0 + np.exp(-self.beta * dv)):
                 continue
             # neighbours of A lose a type-0 neighbour and gain a type-1 one; neighbours of B the reverse
-            # (a common neighbour gets -1 and +1; A and B themselves are overwritten below)
+            # (a common neighbour gets -1 and +1)
             like[nA] += np.where(lat[nA] == 0, -1, 1)
             like[nB] += np.where(lat[nB] == 1, -1, 1)
             lat[A], lat[B] = 1, 0
             like[A], like[B] = yb, ya
             cells[0][ia[p]], cells[1][ib[p]] = B, A
-            rho += (xa + xb) - (ya + yb)                             # edge A-B stays unlike; others follow like counts
+            rho += (xa + xb) - (ya + yb)                             # edges at A and at B are disjoint
             swaps += 1
         return ZhangRun(lat.reshape(self.grid.shape), pd.DataFrame(hist), reached)
 
@@ -416,6 +426,8 @@ class Decision:
 _YES = re.compile(r"\b(yes|move|moving|leave|relocate)\b", re.I)
 _NO = re.compile(r"\b(no|stay|staying|remain)\b", re.I)
 _OPT = re.compile(r"\b(?:option|home|choice)\s*#?\s*(\d+)\b", re.I)
+_NEG = re.compile(r"\b(?:not|never|don't|do not|won't|will not|wouldn't|would not|shouldn't|no need to|no reason to)\b"
+                  r"[^.!?\n]{0,25}?\b(?:move|moving|leave|leaving|relocate)\b", re.I)
 
 
 def _as_bool(v) -> bool | None:
@@ -436,9 +448,15 @@ def parse_decision(text: str | None, n_options: int = 0) -> Decision:
     """Parse a move / stay reply. Accepted (first match wins):
     JSON {"choice": "stay" | 1..n} or {"move": bool|"yes"|"no", "option": 1..n}; Cheng et al. style
     {"yes_rating": r1, "no_rating": r0} (move iff r1 > r0); plain text "stay" / "no" vs "move" / "yes" /
-    "option 2" (a bare number is an option when options were offered). Anything else -> stay, valid=False.
+    "option 2" (a bare number is an option when options were offered); a negated move ("I would not move",
+    "don't want to leave") is stay. Anything else -> stay, valid=False.
     An option outside 1..n is invalid."""
     def opt(v):
+        if isinstance(v, bool):                                      # {"choice": true} is not option 1
+            return None
+        if isinstance(v, str):                                       # "2", "Option 2", "#2"
+            m = re.fullmatch(r"\s*(?:(?:option|home|choice)\s*)?#?\s*(\d+)\s*", v, re.I)
+            v = m.group(1) if m else v
         try:
             i = int(v)
         except (TypeError, ValueError):
@@ -477,6 +495,8 @@ def parse_decision(text: str | None, n_options: int = 0) -> Decision:
     s = text.strip()
     if n_options and re.fullmatch(r"\d+", s):
         return Decision(True, opt(s)) if opt(s) else Decision(False, valid=False)
+    if _NEG.search(s):                                               # "I would not move" / "don't want to leave"
+        return Decision(False)
     yes, no = _YES.search(s), _NO.search(s)
     if yes and (not no or yes.start() < no.start()):
         return Decision(True)
