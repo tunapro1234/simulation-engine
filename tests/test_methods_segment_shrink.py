@@ -106,7 +106,26 @@ class SegmentShrinkTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             select_m(df, "q1", "seg", list("abc"), folds=1)
         with self.assertRaises(ValueError):
+            select_m(df, "q1", "seg", list("abc"), score="nope")
+        with self.assertRaises(ValueError):
             select_m(df, "q1", "seg", list("abc"), unit_col="hh", folds=2, min_eval=10 ** 6)
+
+    def test_select_m_leave_one_row_out_is_not_degenerate(self):
+        # one held-out answer per cell: 1-TVD is linear in the shrink weight, so it can only pick an end of the
+        # grid; the default l2 score is proper and lands inside it, near the m that is best against the truth
+        df, truth = self._synthetic(n_seg=6, per_seg=12, spread=0.5, seed=0)
+        grid = (0, 2, 5, 10, 20, 50, 200)
+        l2 = select_m(df, "q1", "seg", list("abc"), folds=None, grid=grid)
+        tv = select_m(df, "q1", "seg", list("abc"), folds=None, grid=grid, score="tvd")
+        self.assertIn(tv.m, (0.0, 200.0))
+        self.assertNotIn(l2.m, (0.0, 200.0))
+        self.assertEqual(set(l2.tvd), set(grid))
+        self.assertEqual(tv.scores, tv.tvd)
+
+        def err(mm):
+            d = segment_distributions(df, "q1", "seg", list("abc"), mode="shrunk", m=mm)
+            return np.mean([_tvd(d[s], truth[s]) for s in truth])
+        self.assertLess(err(l2.m), err(tv.m))
 
 
 if __name__ == "__main__":

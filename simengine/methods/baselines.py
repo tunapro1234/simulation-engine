@@ -261,8 +261,9 @@ def segment_distributions(df: pd.DataFrame, value_col: str, segment_col, categor
     with no rows gets the target itself under "shrunk" and the uniform distribution under "own"/"pair".
 
     "shrunk" is the LLM-free baseline to beat for segment distribution tasks: in the G5 rehearsal (segment x item
-    answer distributions, 1-TVD) shrunk segment empirical (m=20) was the strongest LLM-free arm, above the
-    population copy and the raw segment empirical, and the LLM hybrid did not beat it across 5 seeds.
+    answer distributions, 1-TVD) shrunk segment empirical (m=20) led on seed 0 (0.912 against population copy
+    0.906; on seed 1 the population copy led), and the LLM hybrid did not beat it across 5 seeds. Report it next
+    to the population copy ("overall"), not instead of it.
     Pick ``m`` on training cells with ``select_m``.
     """
     w = df[weight_col] if weight_col else None
@@ -308,26 +309,36 @@ M_GRID = (0, 1, 2, 5, 10, 20, 50, 100, 200, 500)
 
 @dataclass
 class ShrinkSelection:
-    """``select_m`` result: chosen pseudo-count, mean 1-TVD per grid value, number of scored cells per fold."""
+    """``select_m`` result: chosen pseudo-count, mean held-out score per grid value (the criterion, higher is
+    better), number of scored cells summed over folds, and mean held-out 1-TVD per grid value (for display)."""
     m: float
     scores: dict
     n_cells: int
+    tvd: dict | None = None
 
 
 def select_m(df: pd.DataFrame, value_col, segment_col, categories, grid: Sequence[float] = M_GRID,
              folds: int | None = 5, unit_col: str | None = None, weight_col: str | None = None,
-             min_eval: int = 1, seed: int = 0) -> ShrinkSelection:
-    """Pick ``m`` for ``mode="shrunk"`` by K-fold 1-TVD on training data only.
+             min_eval: int = 1, seed: int = 0, score: str = "l2") -> ShrinkSelection:
+    """Pick ``m`` for ``mode="shrunk"`` by K-fold cross-validation on training data only.
 
     Units (rows, or ``unit_col`` groups such as households, so one unit never sits on both sides) are split into
     ``folds`` folds; ``folds=None`` is leave-one-unit-out. Each fold is held out once: shrunk distributions are fit
-    on the rest (overall marginal from the rest too) and scored against the held-out segment's own empirical
-    marginal by 1 - TVD. Cells (segment x item) with fewer than ``min_eval`` held-out answers are skipped; the
-    score is the mean over scored cells and folds. ``value_col`` may be a list of item columns; ``categories`` is
-    then one shared list or a dict {column: categories}. Ties go to the smaller ``m``.
-    Note: the held-out empirical is noisy, so small folds favour larger ``m`` a little less than the truth would;
-    5 folds is the default for that reason.
+    on the rest (overall marginal from the rest too) and compared with the held-out segment's own empirical
+    marginal. Cells (segment x item) with fewer than ``min_eval`` held-out answers are skipped; the score is the
+    mean over scored cells and folds. ``value_col`` may be a list of item columns; ``categories`` is then one
+    shared list or a dict {column: categories}. Ties go to the smaller ``m``.
+
+    score: "l2" (default) 1 - squared L2 distance to the held-out empirical. The held-out empirical is a noisy
+           copy of the truth and its noise adds the same constant to every candidate, so this ranks m as the
+           truth would, whatever the fold size (also leave-one-unit-out).
+           "tvd"  1 - TVD to the held-out empirical, the task metric itself. Not a proper score: on small
+           held-out cells it rewards sharp predictions, so it drifts toward m = 0; with one answer per cell
+           (leave-one-row-out) it always returns an end of the grid. Use only with large held-out cells.
+    ``tvd`` on the result always reports the mean held-out 1-TVD, the number a reader expects next to the task.
     """
+    if score not in ("l2", "tvd"):
+        raise ValueError(f"unknown score {score!r}; use 'l2' or 'tvd'")
     items = [value_col] if isinstance(value_col, str) else list(value_col)
     cats = {c: list(categories[c] if isinstance(categories, dict) else categories) for c in items}
     units = df[unit_col].to_numpy() if unit_col else np.arange(len(df))
@@ -341,6 +352,7 @@ def select_m(df: pd.DataFrame, value_col, segment_col, categories, grid: Sequenc
     keys = _segment_keys(df, segment_col)
     w = df[weight_col] if weight_col else None
     tot = {g: [] for g in grid}
+    tvd = {g: [] for g in grid}
     n_cells = 0
     for j in range(k):
         tr, ho = df[f != j], df[f == j]
@@ -355,12 +367,15 @@ def select_m(df: pd.DataFrame, value_col, segment_col, categories, grid: Sequenc
             for g in grid:
                 pred = segment_distributions(tr, c, segment_col, cats[c], weight_col, mode="shrunk", m=g,
                                              segments=segs)
-                tot[g] += [1.0 - 0.5 * np.abs(pred[s] - truth[s]).sum() for s in segs]
+                t = [1.0 - 0.5 * np.abs(pred[s] - truth[s]).sum() for s in segs]
+                tvd[g] += t
+                tot[g] += t if score == "tvd" else [1.0 - float(((pred[s] - truth[s]) ** 2).sum()) for s in segs]
     if not n_cells:
         raise ValueError("no held-out cell with enough answers; lower min_eval or folds")
     scores = {g: float(np.mean(v)) for g, v in tot.items()}
     best = max(grid, key=lambda g: (round(scores[g], 12), -g))
-    return ShrinkSelection(m=float(best), scores=scores, n_cells=n_cells)
+    return ShrinkSelection(m=float(best), scores=scores, n_cells=n_cells,
+                           tvd={g: float(np.mean(v)) for g, v in tvd.items()})
 
 
 # ---------------------------------------------------------------- persistence (person's own past behaviour)
