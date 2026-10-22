@@ -93,7 +93,7 @@ class Injector:
 
     @property
     def label(self) -> str:
-        """Arm name in comparisons: name, plus params when given (e.g. "fewshot(k=3)")."""
+        """Arm name in comparisons: name, plus the params given to get_injector (e.g. "fewshot(k=3)")."""
         if not self.params:
             return self.name
         return f"{self.name}({','.join(f'{k}={v}' for k, v in sorted(self.params.items()))})"
@@ -183,7 +183,9 @@ def get_injector(name: str | Injector, **params: Any) -> Injector:
         cls = REGISTRY[name]
     except KeyError:
         raise ValueError(f"unknown injector {name!r}; choose from {sorted(REGISTRY)}") from None
-    return cls(**params)
+    inst = cls(**params)
+    inst.params = dict(params)          # the arm label shows what the caller set, not constructor defaults
+    return inst
 
 
 # ---------------------------------------------------------------- built-ins

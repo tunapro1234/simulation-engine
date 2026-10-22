@@ -55,6 +55,7 @@ class TestRegistry(unittest.TestCase):
         inj = pi.get_injector("plain_fields", keys=["age"])
         self.assertIs(pi.get_injector(inj), inj)
         self.assertEqual(inj.label, "plain_fields(keys=['age'])")
+        self.assertEqual(pi.get_injector("plain_fields").label, "plain_fields")
 
         @register
         class T(Injector):
