@@ -30,6 +30,7 @@ answer shares per group), `norm_from_dist` (a K-category distribution such as ab
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter
 from typing import Any, Iterable, Mapping, Sequence
@@ -74,6 +75,20 @@ TONES = {"plain": ("{a}",),
 
 
 # ---------------------------------------------------------------- helpers
+def _blank(v: Any) -> bool:
+    """None, "", NaN (float / numpy) or pandas NA / NaT: no value."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return True
+    if isinstance(v, float) and math.isnan(v):
+        return True
+    return type(v).__name__ in ("NAType", "NaTType")
+
+
+def _check_k(k: int | None) -> None:
+    if k is not None and (isinstance(k, bool) or not isinstance(k, int) or k < 1):
+        raise ValueError(f"k must be a positive int or None (all), not {k!r}")
+
+
 def _rng(seed: int, person: dict, question: dict) -> random.Random:
     # str seed -> sha512 in Random.seed: stable across runs and processes
     return random.Random(f"{seed}|{person.get('id')}|{question.get('id')}")
@@ -92,12 +107,13 @@ def neighbors_of(person: dict) -> list[dict]:
 
 
 def _pick(items: list, k: int | None, select: str, rng: random.Random) -> list:
-    """k items, kept in their oldest-first order: the last k (recent) or a seeded sample (random)."""
+    """k items in oldest-first order (by `time` when every item has one, else list order): the last k (recent) or
+    a seeded sample (random)."""
+    if items and all(i.get("time") is not None for i in items):
+        items = sorted(items, key=lambda i: i["time"])          # stable: equal times keep list order
     if k is None or len(items) <= k:
         return list(items)
     if select == "recent":
-        if all(i.get("time") is not None for i in items):
-            items = sorted(items, key=lambda i: i["time"])      # stable: equal times keep list order
         return list(items[-k:])
     idx = sorted(rng.sample(range(len(items)), k))
     return [items[i] for i in idx]
@@ -106,10 +122,10 @@ def _pick(items: list, k: int | None, select: str, rng: random.Random) -> list:
 def _persona_lines(inj: Injector, person: dict) -> list[str]:
     """Optional persona block: the narrative text and the attribute lines, when present."""
     out = []
-    if person.get("text"):
+    if not _blank(person.get("text")):
         out.append(str(person["text"]))
     f = inj.person_fields(person)
-    attrs = [f"- {k.replace('_', ' ')}: {v}" for k, v in f.items() if v not in (None, "") and k not in SOCIAL_KEYS]
+    attrs = [f"- {k.replace('_', ' ')}: {v}" for k, v in f.items() if k not in SOCIAL_KEYS and not _blank(v)]
     if attrs:
         out.append("You are a person with these attributes:\n" + "\n".join(attrs))
     return out
@@ -118,15 +134,16 @@ def _persona_lines(inj: Injector, person: dict) -> list[str]:
 def _state(person: dict, question: dict) -> Any:
     s = person.get("state")
     if isinstance(s, Mapping):
-        return s.get(question.get("id"), s.get(str(question.get("id"))))
-    return s if s not in (None, "") else None
+        qid = question.get("id")
+        s = s[qid] if qid in s else s.get(str(qid))
+    return None if _blank(s) else s
 
 
 def _neighbor_answer(n: dict, question: dict) -> Any:
     ans = n.get("answers") or {}
     qid = question.get("id")
-    v = ans.get(qid, ans.get(str(qid)))
-    return None if v in (None, "") else v
+    v = ans[qid] if qid in ans else ans.get(str(qid))
+    return None if _blank(v) else v
 
 
 def _quote(v: Any) -> str:
@@ -146,7 +163,7 @@ def _ordered(counts: Mapping[Any, float], question: dict) -> list[tuple[Any, flo
 
 
 def _shares(counts: Mapping[Any, float], question: dict) -> list[tuple[Any, float]]:
-    rows = [(k, float(v)) for k, v in _ordered(counts, question) if float(v) > 0]
+    rows = [(k, float(v)) for k, v in _ordered(counts, question) if not _blank(v) and float(v) > 0]
     tot = sum(v for _, v in rows)
     if tot <= 0:
         return []
@@ -184,13 +201,14 @@ class PeerMessages(_Social):
             raise ValueError(f"bias must be one of {sorted(BIAS)}")
         if select not in SELECT:
             raise ValueError(f"select must be one of {SELECT}")
+        _check_k(k)
         super().__init__(k=k, bias=bias, closed_world=closed_world, select=select, persona=persona, seed=seed,
                          **params)
         self.k, self.bias, self.closed_world, self.select = k, bias, closed_world, select
         self.persona, self.seed = persona, seed
 
     def render(self, person: dict, question: dict) -> Prompt:
-        msgs = [n for n in neighbors_of(person) if n.get("message")]
+        msgs = [n for n in neighbors_of(person) if not _blank(n.get("message"))]
         if not msgs:
             raise _missing(self, person, "at least one neighbour with a 'message'")
         shown = _pick(msgs, self.k, self.select, _rng(self.seed, person, question))
@@ -221,12 +239,13 @@ class NeighborActivity(_Social):
                  persona: bool = True, seed: int = 0, **params: Any):
         if select not in SELECT:
             raise ValueError(f"select must be one of {SELECT}")
+        _check_k(k)
         super().__init__(k=k, action=action, select=select, persona=persona, seed=seed, **params)
         self.k, self.action, self.select, self.persona, self.seed = k, action, select, persona, seed
 
     def render(self, person: dict, question: dict) -> Prompt:
         nb = neighbors_of(person)
-        acts = [n for n in nb if n.get("action") or n.get("message")]
+        acts = [n for n in nb if not (_blank(n.get("action")) and _blank(n.get("message")))]
         if not acts:
             raise _missing(self, person, "at least one neighbour with an 'action' or 'message'")
         shown = _pick(acts, self.k, self.select, _rng(self.seed, person, question))
@@ -237,8 +256,8 @@ class NeighborActivity(_Social):
         lines = []
         for n in shown:
             who = n.get("label") or "Someone you follow"
-            verb = n.get("action") or "posted"
-            lines.append(f"- {who} {verb}: {_quote(n['message'])}" if n.get("message") else f"- {who} {verb}")
+            verb = "posted" if _blank(n.get("action")) else n["action"]
+            lines.append(f"- {who} {verb}" if _blank(n.get("message")) else f"- {who} {verb}: {_quote(n['message'])}")
         user = "Recent activity from accounts you follow (oldest first):\n" + "\n".join(lines)
         meta = {"shown": [n.get("id") for n in shown]}
         if self.action:
@@ -267,6 +286,7 @@ class AschMajority(_Social):
                  k: int | None = None, persona: bool = False, seed: int = 0, **params: Any):
         if tone not in TONES:
             raise ValueError(f"tone must be one of {sorted(TONES)}")
+        _check_k(k)
         if answer is not None and n < 1:
             raise ValueError("n (number of confederates) must be >= 1")
         super().__init__(tone=tone, distill=distill, answer=answer, n=n, k=k, persona=persona, seed=seed, **params)
@@ -345,8 +365,8 @@ class DescriptiveNorm(_Social):
         qid = question.get("id")
         if self.source == "norms":
             norms = person.get("norms") or {}
-            v = norms.get(qid, norms.get(str(qid)))
-            if v is None or (isinstance(v, Mapping) and not v):
+            v = norms[qid] if qid in norms else norms.get(str(qid))
+            if _blank(v) or (isinstance(v, Mapping) and not v):
                 raise _missing(self, person, f"norms[{qid!r}]")
             return v
         vals = [a for n in neighbors_of(person) if (a := _neighbor_answer(n, question)) is not None]
@@ -397,12 +417,13 @@ class NewsFeed(_Social):
                  seed: int = 0, **params: Any):
         if select not in SELECT:
             raise ValueError(f"select must be one of {SELECT}")
+        _check_k(k)
         super().__init__(k=k, context=context, select=select, persona=persona, seed=seed, **params)
         self.k, self.context, self.select, self.persona, self.seed = k, context, select, persona, seed
 
     def render(self, person: dict, question: dict) -> Prompt:
         items = [{"text": m} if isinstance(m, str) else dict(m) for m in person.get("media") or ()]
-        items = [m for m in items if m.get("text")]
+        items = [m for m in items if not _blank(m.get("text"))]
         if not items:
             raise _missing(self, person, "at least one media item with 'text'")
         shown = _pick(items, self.k, self.select, _rng(self.seed, person, question))
@@ -421,6 +442,8 @@ def attach_neighbors(people: Sequence[dict], edges: Iterable[tuple[Any, Any]] | 
     means a sees b (a follows b). Each neighbour carries its id and `keys` from the neighbour's person dict,
     updated with `states[id]` (e.g. {"action": "adopted"} from an ABM step). Self-loops are dropped."""
     by_id = {str(p["id"]): p for p in people}
+    if len(by_id) != len(people):
+        raise ValueError("person ids must be unique")
     adj: dict[str, list[str]] = {i: [] for i in by_id}
     pairs = ((a, b) for a, bs in edges.items() for b in bs) if isinstance(edges, Mapping) else edges
     for a, b in pairs:
@@ -451,16 +474,45 @@ def attach_norms(people: Sequence[dict], questions: Sequence[dict], *, by: str |
         f = p.get("fields") if isinstance(p.get("fields"), dict) else p
         return f.get(by)
 
+    if len({str(p["id"]) for p in people}) != len(people):
+        raise ValueError("person ids must be unique")
+
+    def val(p: dict, q: dict) -> Any:
+        v = (p.get("answers") or {}).get(q["id"])
+        if _blank(v):
+            return None
+        return float(v) if not q.get("options") else str(v)
+
+    # group totals once, then subtract the person's own answer (leave-one-out) in O(people x questions)
+    tot: dict[tuple[Any, str], Any] = {}
+    for p in people:
+        for q in questions:
+            if (v := val(p, q)) is None:
+                continue
+            t = tot.setdefault((key(p), q["id"]), Counter() if q.get("options") else [0.0, 0])
+            if q.get("options"):
+                t[v] += 1
+            else:
+                t[0] += v
+                t[1] += 1
     out = []
     for p in people:
-        peers = [o for o in people if str(o["id"]) != str(p["id"]) and key(o) == key(p)]
         norms: dict[str, Any] = {}
         for q in questions:
-            qid = q["id"]
-            vals = [v for o in peers if (v := (o.get("answers") or {}).get(qid)) not in (None, "")]
-            if not vals:
+            t, v = tot.get((key(p), q["id"])), val(p, q)
+            if t is None:
                 continue
-            norms[qid] = dict(Counter(str(v) for v in vals)) if q.get("options") else sum(map(float, vals)) / len(vals)
+            if q.get("options"):
+                c = Counter(t)
+                if v is not None:
+                    c[v] -= 1
+                c = {k: n for k, n in c.items() if n > 0}
+                if c:
+                    norms[q["id"]] = c
+            else:
+                s, n = (t[0] - v, t[1] - 1) if v is not None else (t[0], t[1])
+                if n > 0:
+                    norms[q["id"]] = s / n
         out.append({**p, "norms": norms})
     return out
 
@@ -476,7 +528,10 @@ def norm_from_dist(dist: Sequence[float], options: Sequence[Any]) -> dict[str, f
 def prevalence_item(share: float, population: str, event: str, *, source: str = "the newspaper",
                     decimals: int = 1, time: Any = None) -> dict:
     """News item in the Williams et al. template: '<X>% of <population> <event>.' (share in 0-1)."""
-    item = {"source": source, "text": f"{_pct(float(share), decimals)} of {population} {event}."}
+    share = float(share)
+    if not 0 <= share <= 1:
+        raise ValueError(f"share must be in [0, 1] (a proportion, not a percentage), not {share!r}")
+    item = {"source": source, "text": f"{_pct(share, decimals)} of {population} {event}."}
     if time is not None:
         item["time"] = time
     return item
