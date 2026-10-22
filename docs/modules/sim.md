@@ -448,7 +448,7 @@ res["conditions"]["norms"]       # mean, sd, n, assigned, refused, unparsed, no_
 res["effects"]["norms"]          # diff, g, d, se, ci, n_treat, n_control, no_persona_g, no_persona_diff
 frame = sim.experiment_frame({"study1": res, "study2": res2},
                              human={"study1": {"norms": {"g": 0.21, "se": 0.06}, "fear": -0.05}})
-fit = sim.exaggeration_ratio(frame.pred_g, frame.truth, family=frame.group)
+fit = sim.exaggeration_ratio(frame.pred_g, frame.truth, family=frame.group, human_se=frame.truth_se)
 corrected = sim.correct_effects(frame.pred_g, human_g=frame.truth, family=frame.group)   # LOO
 sim.human_equivalent_n(corrected, frame.truth, frame.truth_se, family=frame.group)
 section = sim.effect_section(frame.pred_g, frame.truth, frame.truth_se, family=frame.group)
@@ -461,7 +461,9 @@ section = sim.effect_section(frame.pred_g, frame.truth, frame.truth_se, family=f
   `ask_kw={"ssr": ..., "free_text": True}`; `free_text` defaults to False here). `ask_kw` passes any other
   `survey` option (batch, parallel, tag, refusal_retry, ...).
 - `samples=k` re-asks with the personas reshuffled, so batches (prompts, cache keys) differ, and averages each
-  persona's answers. With `batch=1` the prompts repeat and the backend's cache returns the same answer.
+  persona's answers. With `batch=1` the prompts repeat and the backend's cache returns the same answer. The
+  averaging takes answer noise out of the sd, so g grows with `samples`; a human study asks each person once,
+  so compare g with human g at `samples=1` (the default) or compare `diff`.
 - The no_persona arm sees the same condition texts. Its g is what a generic respondent gives; a warning fires
   when it is at least the persona arm's.
 - Refused and unparsed personas are counted per condition and left out of the means, never imputed.
@@ -470,18 +472,29 @@ section = sim.effect_section(frame.pred_g, frame.truth, frame.truth_se, family=f
   slope with clustered CIs, Pearson r, sign agreement, verdict `exaggerates` / `understates` / `about right` /
   `too few` (< 3 effects), and the LOO block: the leave-one-family-out ratio scale and MAE raw vs ratio- vs
   affine-corrected. With a single family the LOO leaves out single effects.
+- The OLS slope is pulled toward 0 when the human effects carry sampling noise (errors in the regressor): in a
+  simulation with se 0.1 and 20 families its CI held the true slope 0.68 of the time. Pass `human_se=` and read
+  `slope_corrected` (cov / (var(human) − mean se²), with `reliability`; None below reliability 0.2), which
+  covered 0.91-0.95. The ratio kept its coverage in the same runs; the affine correction (human ~ sim, noise in
+  the outcome) is not attenuated.
+- Every CI here is a family-clustered percentile interval pushed away from the estimate by
+  t(G−1)/z · √(G/(G−1)) for G families. With 3-6 families the plain interval covered 0.72-0.90; widened, the
+  ratio, slope and N CIs covered 0.89-0.97 at 3-30 families (simulated). With 3 families the factor is 2.7, so
+  the CIs are wide: that is the honest width.
 - `correct_effects(sim, human_g=..., family=...)` corrects every effect with a fit from the other families
   only, so an effect is never corrected with its own human value. `correct_effects(new_sim, fit)` applies a
   measured ratio (`method="ratio"`, sim / ratio) or affine fit (`method="affine"`, human ~ a + b sim) to new
   effects.
 - `human_equivalent_n`: err = mean((sim − human)²) − mean(human_se²), then N = (4 + mean(human²)/2) / err, the
-  total two-arm human sample with the same sampling variance (var d ≈ 4/N). It uses a cluster-bootstrap CI.
+  total two-arm human sample with the same sampling variance (var d ≈ 4/N). It uses the widened cluster CI.
   When err ≤ 0 (the simulation is within the human noise) it returns `n: None` with a note, not infinity. An
   open upper CI end is `None`.
 - `effect_section` puts the raw and LOO-corrected N next to a baseline that predicts every effect as the mean
   of the other human effects. When the simulation is not worth more humans than that baseline, a note says the
   N reflects small effects, not information from the model (the G2 lesson: show the multiplier next to the
-  strongest baseline).
+  strongest baseline). A simulation within the human noise counts as better than any finite N; when the
+  baseline itself is within the noise, the note says these effects cannot show added information. With
+  `human_se` the section also shows the noise-corrected slope.
 - Measured on FakeLLM only (tests: a panel whose effects are 2× the truth gives ratio ≈ 1.9, slope ≈ 2.0, and
   LOO MAE 0.39 → 0.08). No real-model number yet.
 
@@ -633,7 +646,7 @@ robustness_frame(rb)                           # segment x question x condition,
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
 profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
 `test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
-`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers), `test_sim_experiment.py` (Hedges / paired g, balanced assignment, between / within runs, the 2× panel: ratio recovered, LOO correction lowers MAE, LOO never uses the own value, human-equivalent N and its noise floor, card section) (offline, FakeLLM, a few seconds):
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers), `test_sim_experiment.py` (Hedges / paired g, balanced assignment, between / within runs, the 2× panel: ratio recovered, LOO correction lowers MAE, LOO never uses the own value, human-equivalent N and its noise floor, card section, few-family CI widening, noise-corrected slope, within-noise vs baseline note) (offline, FakeLLM, a few seconds):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
