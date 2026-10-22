@@ -109,7 +109,11 @@ by crc32 of the group name. Each unit's baseline comes from folds that did not s
 **random** (0.5, uniform, within-item permutation, or ties for A/B), **marginal** (item mean or median, or
 class shares; leave-one-out for distributions; the arm-majority direction for A/B), **demography**
 (item × first segment, shrunk toward the item with k = 10). Label-free rules you supply (for example "what
-they did last year") join as baselines through `unlabeled_baselines`. A **shuffle control** permutes "ours"
+they did last year") join as baselines through `unlabeled_baselines`. For a continuous task, a one-row item
+cannot be permuted within itself (that would copy its truth: MAE 0, the strongest baseline, and a zero division
+in the ceiling ratio). Its random value is instead drawn from the other items' rows (a leave-one-out pool). When
+every item has one row the rung is labelled "Rastgele (başka maddenin gerçek değeri; madde başına tek satır)".
+A **shuffle control** permutes "ours"
 within each item. It keeps the marginal and removes the person information.
 - *Works:* the strongest baseline is often not the LLM. On open e-commerce (OE class), label-free
   persistence reaches macro-F1 0.781 and a label-trained LightGBM reaches 0.783 [0.756–0.809]. The paired
@@ -416,6 +420,15 @@ ladder now lists every `pred_` column, where the original showed at most 6.
 ```python
 ev.evaluate(df, ours="hybrid", raw="llm", baselines_oof=["ridge"], unlabeled_baselines=["persistence"])
 ```
+
+**Strongest baseline uncertain (selection noise).** With two or more setting-A baselines, the audit "en güçlü taban
+belirsiz mi" (`denetim.taban_belirsizligi`) takes the paired bootstrap difference between the best baseline (by point
+estimate) and every other one. When the runner-up is not separated (its CI includes 0), the row is a warning:
+"strongest baseline uncertain: B3, B2, B1 within CI". It lists the tied set (`esitler`), ours − baseline in the worst
+case over that set (`en_kotu`: per replicate, ours against the best tied baseline, with a paired CI, plus the tied
+baseline with the lowest single lower bound), and a selection-noise note with the number of baselines. A separated
+runner-up gives an `ok` row. The badge and headline do not change: read them against every tied baseline. In the D5
+rehearsal, four baselines were tied on dev, the card picked one, and a hidden learned baseline won on test.
 
 **Model/oracle ceiling.** `ceiling_col="pred_oracle"` (or any column name) gives a model ceiling in place of the
 human `retest`. The column leaves the method list and gives the ceiling and gap closed for every metric.
