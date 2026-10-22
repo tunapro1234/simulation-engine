@@ -17,7 +17,8 @@ decorate it with `@register` and are imported automatically by `simengine.person
 Person dict:   {"id": str, "text": str, "fields": {k: v}, "answers": {qid: answer}, "interview": str | [(q, a)],
                 "history": [(role, text)] | [event dicts], ...}; only "id" is required, `needs` lists the rest.
 Question dict: {"id": str, "text": str, "options": [str, ...] (choice) | absent (number, optional "min"/"max"),
-                "exclude": [qid, ...] (other items hidden from answers= as well)}.
+                "exclude": [qid, ...] (other items hidden from answers= as well),
+                "exclude_people": [person id, ...] (never shown as neighbours / peers; Swap adds the scored person)}.
 LEAKAGE RULE: an injector that shows a person's own answers uses `known_answers(person, question)`, which drops
 the target question and `exclude` ids.
 """
@@ -226,7 +227,8 @@ class PlainFields(Injector):
 
 class Swap(Injector):
     """Control wrapper: render `inner` with a different person's persona (a fixed derangement over `people`), so
-    the reply is scored against the original person's truth. Not registered (needs the people list)."""
+    the reply is scored against the original person's truth. The inner question carries the scored person's id in
+    `exclude_people`, so pool-based injectors never show them to their own donor. Not registered (needs people)."""
     family = "control"
     paper = "persona-swap / shuffle control"
 
@@ -246,7 +248,9 @@ class Swap(Injector):
 
     def render(self, person: dict, question: dict) -> Prompt:
         donor = self.donors[str(person["id"])]
-        p = self.inner(donor, question)
+        # the scored person must not reach the donor's prompt as a neighbour / peer (inject.neighbours, .social)
+        held = [*(question.get("exclude_people") or ()), person["id"]]
+        p = self.inner(donor, {**question, "exclude_people": held})
         p.meta.update(donor=donor.get("id"), swap_of=self.inner.name)
         return p
 
