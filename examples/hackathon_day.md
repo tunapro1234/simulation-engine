@@ -44,10 +44,11 @@ the first 401 or spend-limit error, and it does not send `temperature`, which Ha
 - **Shared spend log.** `export SIMENGINE_SPEND_LOG=<path>` and `SIMENGINE_AGENT=<name>` make every real call append
   one tab-separated line (time, agent, model, input, output, usd, tag) next to the JSONL ledger; or pass
   `Claude(..., spend_log=..., agent=...)`. Give each step a `tag=` so the cost splits by step. With your own ledger
-  the TSV settings go on the ledger instead: `Claude(..., ledger=se.llm.CostLedger(".cache/ledger.jsonl",
-  tsv_path=..., agent=...))`. Passing `spend_log=` / `agent=` / `tag_prefix=` as well raises `ValueError`.
-- **Counters.** `llm.stats` is a property (a dict; `llm.stats()` is a TypeError): `calls`, `cache_hits`, `retries`,
-  `errors`, `cost_usd` for this instance and `ledger_total_usd` for everything in its ledger.
+  set them once, on either side: `Claude(..., ledger=se.llm.CostLedger(".cache/ledger.jsonl", tsv_path=...,
+  agent=...))` or `Claude(..., ledger=".cache/ledger.jsonl", spend_log=..., agent=...)`. Both together work while
+  they agree; a different value on each side raises `ValueError`.
+- **Counters.** `llm.stats` is a dict (`llm.stats()` gives a copy): `calls`, `cache_hits`, `retries`, `errors`,
+  `cost_usd` for this instance and `ledger_total_usd` for everything in its ledger; `llm.spent_usd` = `cost_usd`.
 - **Repeats.** The cache returns the same reply for the same prompt; `complete(..., sample=k)` with k = 0, 1, ...
   gives independent draws, each cached under its own key. Re-runs with a cleared cache differ (no `temperature`).
 - **Embedding model offline (SSR).** `SSR` loads its embedding model offline. Point `SIMENGINE_HF_CACHE` at the

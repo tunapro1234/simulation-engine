@@ -31,14 +31,19 @@ def _frame(n=200, seed=0, split=True):
 
 
 class Step0Setup(unittest.TestCase):
-    def test_spend_log_with_own_ledger_raises(self):
+    def test_spend_log_and_own_ledger(self):
         with tempfile.TemporaryDirectory() as t:
-            with self.assertRaises(ValueError):
-                CachedBackend(ledger=CostLedger(Path(t) / "l.jsonl"), spend_log=Path(t) / "s.tsv")
-            b = CachedBackend(ledger=CostLedger(Path(t) / "l.jsonl", tsv_path=Path(t) / "s.tsv", agent="a"))
-            self.assertIsInstance(b.stats, dict)              # a property, not a method
+            tsv = Path(t) / "s.tsv"
+            b = CachedBackend(ledger=CostLedger(Path(t) / "l.jsonl"), spend_log=tsv, agent="a")
+            self.assertEqual(b.ledger.tsv_path, tsv)          # set on the backend side: lands on the ledger
+            CachedBackend(ledger=CostLedger(Path(t) / "l.jsonl", tsv_path=tsv, agent="a"), spend_log=tsv)
+            with self.assertRaises(ValueError):               # the two sides disagree
+                CachedBackend(ledger=CostLedger(Path(t) / "l.jsonl", agent="a"), agent="b")
+            self.assertIsInstance(b.stats, dict)
+            self.assertEqual(b.stats(), dict(b.stats))
             for k in ("calls", "cache_hits", "retries", "errors", "cost_usd", "ledger_total_usd"):
                 self.assertIn(k, b.stats)
+            self.assertEqual(b.spent_usd, b.stats["cost_usd"])
 
 
 class Step2Prereg(unittest.TestCase):
