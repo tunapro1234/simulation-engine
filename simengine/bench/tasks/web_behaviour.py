@@ -15,11 +15,13 @@ selected by a qualification test, buy an instructed product on a simulated Amazo
 one JSON line per page visited (page type, url, goal, content); the last line carries the episode reward. Actions are
 not logged; they are derived from consecutive pages (`classify_step`):
   * -> done: buy;  -> item_sub_page: view_detail (description / features / reviews);  -> index: back_to_search
-  * index -> search_results: search;  search_results -> search_results: next_page / prev_page by the page number
+  * index -> search_results, or any page -> results for other keywords (a new query after a browser back, which
+    the server does not log): search;  search_results -> search_results: next_page / prev_page by the page number
   * search_results -> item_page, or item_page -> item_page of another product: click_item
   * item_page -> item_page, same product, other options: select_option;  item_page / sub page -> previous page: back
   * anything else (reloads: same page, same content; index -> item_page): other
-Rows: every action except each session's first one (always `search` from the start page). A row sees the goal, the
+Rows: every action except each session's first one (`search` from the start page; in 84 of the 1,643 human
+sessions a start-page reload, `other`, whose search then is the first row). A row sees the goal, the
 pages and actions before it, and the current page; truth = the action taken there.
 Split (option split="batch", default): sessions of the collection batches dated before 2022-05-13 train, the
 2022-05-13 / 2022-05-14 batches (posted after a scoring fix and a server speed-up) test. split="random" holds out
@@ -30,6 +32,7 @@ never evaluated; they feed `uxagent_markov`, a chain learnt from LLM agents and 
 """
 from __future__ import annotations
 
+import ast
 import glob
 import json
 import os
@@ -81,6 +84,17 @@ def _pageno(c: dict | None) -> int:
         return 0
 
 
+def _kw(c: dict | None) -> tuple | None:
+    """Search keywords of a page: a list on results pages, its repr string on item pages; None if absent."""
+    k = (c or {}).get("keywords")
+    if isinstance(k, str):
+        try:
+            k = ast.literal_eval(k)
+        except (ValueError, SyntaxError):
+            return (k,)
+    return tuple(str(x) for x in k) if isinstance(k, (list, tuple)) else None
+
+
 def classify_step(pa: str, pb: str, ca: dict | None = None, cb: dict | None = None) -> str:
     """Action name for the move from page `pa` (content ca) to page `pb` (content cb); rules in the module docstring."""
     if pb == "done":
@@ -92,6 +106,9 @@ def classify_step(pa: str, pb: str, ca: dict | None = None, cb: dict | None = No
     if pb == "search_results":
         if pa == "index":
             return "search"
+        ka, kb = _kw(ca), _kw(cb)
+        if ka is not None and kb is not None and ka != kb:
+            return "search"                   # new query typed after a browser back to the (unlogged) start page
         if pa == "search_results":
             d = _pageno(cb) - _pageno(ca)
             return "next_page" if d > 0 else "prev_page" if d < 0 else "other"
@@ -173,14 +190,17 @@ _UX_OTHER = ("filter", "sorter", "cart", "proceed_to_checkout", "navigate", "ter
 
 def map_uxagent_action(a: dict) -> str | None:
     """UXAgent action dict (type, name) -> action name, None for `terminate` (end of session). add_to_cart counts as
-    buy (the agents' purchase); cart / checkout, filters, sorting and URL navigation are `other`."""
+    buy (the agents' purchase); cart / checkout (also typing into its fields), filters, sorting and URL navigation
+    are `other`."""
     typ, name = str(a.get("type") or ""), str(a.get("name") or "").lower()
     if typ == "terminate":
         return None
     if typ == "back" or name == "back":
         return "back"
-    if typ == "type_and_submit" or name.endswith("search_button") or name.endswith("search_input"):
+    if "search_box" in name or name.endswith(("search_button", "search_input")):
         return "search"
+    if typ in ("type_and_submit", "input_text"):
+        return "other"                            # typing into checkout / quantity fields
     if name.endswith("view_product") or name.startswith(("related.", "product_link")):
         return "click_item"                       # before the substring tests: product names are free text
     if "add_to_cart" in name:
@@ -528,8 +548,8 @@ def parse_action(text: str) -> np.ndarray | None:
             v = np.zeros(K)
             for k, x in obj.items():
                 j = A.get(str(k).strip().lower().replace(" ", "_"))
-                if j is not None:
-                    v[j] += max(float(x), 0.0)
+                if j is not None and np.isfinite(x := float(x)) and x > 0:      # NaN / inf / negative dropped
+                    v[j] += x
             if v.sum() > 0:
                 return v
         except (ValueError, TypeError, AttributeError):
