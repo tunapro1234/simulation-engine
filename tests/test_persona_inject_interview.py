@@ -117,6 +117,10 @@ class TestRender(unittest.TestCase):
         self.assertIn("Question 0?", ht[0])
         self.assertIn("Question 39?", ht[-1])
         self.assertTrue(any("omitted" in u for u in ht))
+        omitted = sum(int(u.split()[1]) for u in ht if u.startswith("[..."))
+        self.assertEqual(omitted + sum(not u.startswith("[...") for u in ht), 40)   # markers count what was cut
+        rnd = iv.fit_budget(units, 400, "random", seed=1)
+        self.assertEqual(rnd, sorted(rnd, key=units.index))                         # original order kept
         self.assertEqual(iv.fit_budget(units, None), units)
         self.assertEqual(iv.fit_budget(["x" * 50], 10, "head"), ["x" * 10])
         p = pi.get_injector("interview_transcript", budget_tokens=100)(person(0, 40), Q_CAR)
