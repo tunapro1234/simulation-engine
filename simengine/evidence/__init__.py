@@ -5,6 +5,8 @@
     ev.card(report, "card.md"); ev.dashboard([report], "pano.html")
     ev.worth_humans(frame, prior="llm", n=100)                              # PPI++ "worth N humans"
     ev.seal(predictions, "before truth")                                    # = se.seal; evaluate(prereg=".onkayit")
+    ev.why_match({"persona": gen}, candidates, truth_idx)                   # N-way 'why' recognition -> EvalFrame
+    ev.evaluate_distribution_persons(people, ["age"], items, arms)          # person-cluster distribution bootstrap
 
 Report schema: docs/modules/evidence.md (keys keep the original Turkish names; `summary(report)` gives an
 English flat view). Internals are verbatim ports; the English API lives in `api.py`.
@@ -19,6 +21,8 @@ from .api import (MULTIPLIER_MAX_ROWS, audit_prompts, chain_paths, correlation_a
                   worth_humans, worth_theory_curve)
 from .extras import (coefficient_recovery, completion_from_frame, completion_row, published_findings,
                      section_html, section_markdown, stylized_facts_score, variance_ratio)
+from .persons import DIST_METRICS, evaluate_distribution_persons
+from .why import TfidfEncoder, tfidf_encoder, why_match, why_summary
 
 __all__ = [
     "evaluate", "evaluate_aggregate", "summary", "card", "card_markdown", "card_dict", "dashboard", "dashboard_html", "save_json",
@@ -32,5 +36,6 @@ __all__ = [
     "badge", "panel_cost",
     "variance_ratio", "completion_row", "completion_from_frame", "published_findings", "stylized_facts_score",
     "coefficient_recovery", "section_markdown", "section_html",
+    "why_match", "why_summary", "tfidf_encoder", "TfidfEncoder", "evaluate_distribution_persons", "DIST_METRICS",
     "TASK_TO_INTERNAL", "TASK_TO_ENGLISH", "METRIC_TO_INTERNAL", "METRIC_TO_ENGLISH", "BADGE_TO_ENGLISH", "VERSION", "MULTIPLIER_MAX_ROWS",
 ]
