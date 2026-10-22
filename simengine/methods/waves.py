@@ -7,8 +7,9 @@ rung beat the preregistered method on dev (0.0990 vs 0.1007 TVD), and nothing in
 
 Input: a long frame, one row per respondent x question, with a wave column, a segment column, an item column and
 an answer column (``value``); optional ``weight`` (survey weight), regime and subgroup columns. A wide frame
-(one column per question) works with ``item=None, value=[<question columns>]``. Answers outside ``categories``
-(NaN, "skipped") are ignored. ``categories`` is one list for every item or a dict {item: list}.
+(one column per question) works with ``item=None, value=[<question columns>]``; the subgroup of
+``subgroup_mixture`` may be one of them (party ID is both a question and the mixing variable). Answers outside
+``categories`` (NaN, "skipped") are ignored. ``categories`` is one list for every item or a dict {item: list}.
 
 Every predictor uses only waves strictly before ``target`` (default: one after the last wave, i.e. the future
 wave), and returns the distribution frame `evaluate(task="distribution")` takes: one row per segment x item with
@@ -59,14 +60,17 @@ def one_minus_tvd(p, q) -> float:
     return float(1.0 - 0.5 * np.abs(p / p.sum() - q / q.sum()).sum())
 
 
-def _long(df: pd.DataFrame, item, value) -> tuple[pd.DataFrame, str, str]:
-    """Wide (item=None, value=[question columns]) -> long with columns '_item', '_value'; long passes through."""
+def _long(df: pd.DataFrame, item, value, also=()) -> tuple[pd.DataFrame, str, str]:
+    """Wide (item=None, value=[question columns]) -> long with columns '_item', '_value'; long passes through.
+    Question columns named in ``also`` (e.g. the subgroup pid3, itself a question) stay as per-row columns too."""
     if item is None:
         if isinstance(value, str):
             raise ValueError("item=None needs value=[question columns] (wide frame)")
         cols = list(value)
         keep = [c for c in df.columns if c not in cols]
         out = df.melt(id_vars=keep, value_vars=cols, var_name="_item", value_name="_value")
+        for c in dict.fromkeys(a for a in also if isinstance(a, str) and a in cols):
+            out[c] = np.tile(df[c].to_numpy(), len(cols))   # melt stacks the columns in order, rows kept
         return out, "_item", "_value"
     return df, item, value
 
@@ -158,8 +162,8 @@ def _frame(preds: dict, ntrain: dict, df, wave, segment, item, value, categories
     return pd.DataFrame(rows)
 
 
-def _prepare(df, wave, segment, item, value, target):
-    df, item, value = _long(df, item, value)
+def _prepare(df, wave, segment, item, value, target, also=()):
+    df, item, value = _long(df, item, value, also)
     if target is None:
         target = _default_target(df, wave)
     return df, item, value, target
@@ -339,7 +343,7 @@ def subgroup_mixture(df: pd.DataFrame, wave: str, segment: str, item: str | None
     swap: ``role_swap`` mapping applied to the conditionals of ``swap_items``, which must be given with it: swapping
         a stable item (party ID itself, religion) hands each party the other's answers.
     """
-    df, item, value, target = _prepare(df, wave, segment, item, value, target)
+    df, item, value, target = _prepare(df, wave, segment, item, value, target, also=[subgroup])
     if k < 1 or (m is not None and m < 0):
         raise ValueError("k must be >= 1 and m >= 0")
     if isinstance(weights, str) and weights != "target":
@@ -442,7 +446,9 @@ def transition_backtest(df: pd.DataFrame, waves: Sequence, methods: Mapping[str,
     ``target=<wave>`` and ``method=name``), or {name: callable(df, target) -> frame with pred_<name> (or a single
     pred_ column, renamed)}. Cells are the target wave's segment x item cells unless ``segments`` / ``items`` say.
     """
-    df, item, value = _long(df, item, value)
+    also = [kw.get(a) for spec in methods.values() if isinstance(spec, tuple)
+            for kw in [dict(spec[1])] for a in ("subgroup", "regime")]
+    df, item, value = _long(df, item, value, also)
     cols = dict(wave=wave, segment=segment, item=item, value=value, categories=categories, weight=weight,
                 segments=segments, items=items)
     per_wave, used = [], {}

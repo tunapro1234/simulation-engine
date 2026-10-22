@@ -197,6 +197,25 @@ class Mixture(unittest.TestCase):
                                          Q2["s0"]))
 
 
+    def test_wide_frame_with_subgroup_as_a_question(self):
+        # D6 shape: one row per person, the subgroup (party ID) is itself one of the question columns
+        wide = DF.pivot_table(index=["rid", "year", "seg", "regime"], columns="q", values="ans",
+                              aggfunc="first").reset_index()
+        wide = wide.merge(DF.drop_duplicates("rid")[["rid", "pid"]], on="rid")
+        cats = dict(CATS, pid=["Dem", "Rep"])
+        cols = dict(wave="year", segment="seg", item=None, value=["approve", "q2", "pid"], categories=cats)
+        kw = dict(subgroup="pid", swap={"Dem": "Rep", "Rep": "Dem"}, swap_items=["approve"])
+        a = subgroup_mixture(wide, **cols, **kw, target=2012)
+        b = subgroup_mixture(DF, **COLS, **kw, target=2012)
+        for s in SEGS:
+            for it in CATS:
+                np.testing.assert_allclose(_cell(a, s, it, "pred_mixture"), _cell(b, s, it, "pred_mixture"))
+        np.testing.assert_allclose(_cell(a, "s0", "pid", "pred_mixture"),
+                                   _emp(DF[(DF.year == 2011) & (DF.q == "approve")].assign(ans=lambda d: d.pid),
+                                        "s0", "approve", ["Dem", "Rep"]))
+        bt = transition_backtest(wide, waves=[2012], methods={"mx": (subgroup_mixture, kw)}, **cols)
+        self.assertEqual(len(bt.frame), 12)
+
     def test_target_weights_from_labels_without_answers(self):
         # future wave: subgroup labels known, answers missing; s0 is all Rep there
         fut = DF[DF.year == 2012].assign(year=2013, ans=np.nan)
