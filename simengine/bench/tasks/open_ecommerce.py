@@ -10,10 +10,17 @@ Primary metric `acc_1b_c`: balanced within-person accuracy. For each person k = 
 bought + k not-bought categories are drawn (default_rng(1000 + s)); the half with the highest p is called "yes"
 (ties: a separate U(0,1) matrix from default_rng(1000 + s)). Chance = 0.5. Person bootstrap via a weight matrix
 (default_rng(42), B = 1000), as in the source.
+
+    task = bench.get("open_ecommerce", seed=0)
+    data = task.load(root)                     # ValueError names the "fully observed" rule if too few persons
+    frame = task.run(data=data)                # baselines; survey_lgbm is skipped (warning) if Q-* columns lack
+    truth = truth_dict(data)                   # {uid: {category: 0/1}} for sim.prediction_frame(truth=...)
+    people = survey_people(data)               # {uid: {Q-* column: answer}} for sim.predict_people (sim.AMAZON)
 """
 from __future__ import annotations
 
 import os
+import warnings
 from datetime import date, timedelta
 
 import numpy as np
@@ -45,6 +52,10 @@ LIFE = {"Moved place of residence": "hd_tasindi", "Lost a job": "hd_is_kaybi", "
 STATEMENTS = ["siklik_beyan", "sigara", "esrar", "alkol", "diyabet", "tekerlekli_sandalye", "veri_satis_kendi",
               "veri_satis_genel", "kucuk_isletme_erisim", "nufus_sayimi_kullanim", "arastirma_kullanim"] + list(LIFE.values())
 SURVEY_FEATURES = DEMOGRAPHICS + STATEMENTS
+# internal feature name -> raw survey.csv column (the LIFE flags all come from Q-life-changes)
+RAW_COLUMN = {**{v: k for k, v in SURVEY_COLS.items()}, **{v: "Q-life-changes" for v in LIFE.values()}}
+SURVEY_RAW_REQUIRED = sorted({RAW_COLUMN[f] for f in SURVEY_FEATURES})   # needed by the survey_lgbm baseline
+FULLY_OBSERVED_RULE = f"a person is fully observed if their last purchase is on or after {TEST_END}"
 LGBM_PARAMS = dict(objective="binary", learning_rate=0.03, num_leaves=31, min_data_in_leaf=50, feature_fraction=0.8,
                    bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0, num_threads=4, verbose=-1)
 
@@ -61,13 +72,30 @@ def read_purchases(root: str) -> pd.DataFrame:
                          "category": a["Category"]})
 
 
-def read_survey(root: str) -> pd.DataFrame:
-    s = pd.read_csv(need(os.path.join(root, "survey.csv")), dtype=str, keep_default_na=False, na_values=[""])
-    s = s.rename(columns=SURVEY_COLS)
-    hd = s["hayat_degisimi_2021"].fillna("")
-    for k, v in LIFE.items():
-        s[v] = hd.str.contains(k, regex=False).astype(int).astype(str)
+def read_survey_raw(root: str) -> pd.DataFrame:
+    """survey.csv as is: Survey ResponseID + raw Q-* columns (the keys of sim.AMAZON.questions)."""
+    return pd.read_csv(need(os.path.join(root, "survey.csv")), dtype=str, keep_default_na=False, na_values=[""])
+
+
+def survey_internal(raw: pd.DataFrame) -> pd.DataFrame:
+    """Raw survey -> internal (talp73) names: uid, yas, cinsiyet, ... plus hd_* life-change flags when
+    Q-life-changes is present. Columns missing in the raw file stay missing."""
+    s = raw.rename(columns=SURVEY_COLS)
+    if "hayat_degisimi_2021" in s.columns:
+        hd = s["hayat_degisimi_2021"].fillna("")
+        for k, v in LIFE.items():
+            s[v] = hd.str.contains(k, regex=False).astype(int).astype(str)
     return s
+
+
+def read_survey(root: str) -> pd.DataFrame:
+    """Survey with internal names (see survey_internal); read_survey_raw keeps the raw Q-* names."""
+    return survey_internal(read_survey_raw(root))
+
+
+def missing_survey_columns(survey: pd.DataFrame, features: list | None = None) -> list:
+    """Raw Q-* columns needed for `features` (default SURVEY_FEATURES) that `survey` (internal names) lacks."""
+    return sorted({RAW_COLUMN[f] for f in (features or SURVEY_FEATURES) if f not in survey.columns})
 
 
 def _ts(d: date) -> pd.Timestamp:
@@ -214,15 +242,33 @@ class OpenEcommerce(BenchTask):
     }
     kind = "binary"
     data_subdir = "open-ecommerce"
-    layout = """
+    layout = f"""
     <root>/open-ecommerce/amazon-purchases.csv   Order Date, Purchase Price Per Unit, Quantity, Category,
                                                  Survey ResponseID (Berke et al. 2024 Open e-commerce 1.0)
     <root>/open-ecommerce/survey.csv             Survey ResponseID + Q-demos-* / Q-* survey answers
+    persons: {FULLY_OBSERVED_RULE}; at least n_persons (default {N_PERSONS})
+             such persons are needed. History < {HISTORY_END}, test window {HISTORY_END} -> {TEST_END} (exclusive).
+    survey_lgbm baseline needs these survey.csv columns (skipped with a warning otherwise):
+             {", ".join(SURVEY_RAW_REQUIRED)}
     """
     source = "talp-simulation-hackathon-2026 uretim/talp73/PROTOKOL.md, kod/panel/panel.py, kod/klasik/klasik.py, kod/degerlendir.py"
     metrics = (Metric("acc_1b_c", True, _acc_1b_c, "balanced within-person top-half accuracy (chance 0.5)"),
-               Metric("acc_1a", True, _acc_1a, "accuracy of p >= 0.5 on all 8,000 rows ('never buys' ~0.77)"),
+               Metric("acc_1a", True, _acc_1a, "accuracy of p >= 0.5 on all test rows (8,000 in the protocol; 'never buys' ~0.77)"),
                Metric("person_auc", True, _person_auc, "mean within-person AUC (bought vs not bought)"))
+
+    def load(self, data_root: str | None = None) -> TaskData:
+        """TaskData for the 2022-H2 holdout.
+
+        test: uid, category, y (bought in [2022-07-01, 2023-01-01)), n_persons x n_categories rows, person-major.
+        train: uid, category, y (bought in [2022-01-01, 2022-07-01)) for persons outside the sample.
+        meta keys: sample (sorted test uids), train_persons, categories (top categories by distinct buyers in
+        history), prior_rate (Series category -> train buy rate), purchases (all purchases: uid, date, price, qty,
+        category), survey (internal talp73 names: uid, yas, cinsiyet, ..., hd_*), survey_raw (raw Survey
+        ResponseID / Q-* columns as keyed in sim.AMAZON.questions), survey_missing (raw columns absent from
+        survey.csv), n_fully_observed, history_end, train_cut, mask (n_persons x n_categories bool, balanced
+        subset), tiebreak (same shape, U(0,1)), split (text), seed, source.
+        Raises ValueError naming the fully observed rule when fewer than n_persons persons qualify."""
+        return super().load(data_root)
 
     def _load(self, root: str) -> TaskData:
         s = int(self.options.get("seed", 0))
@@ -233,7 +279,9 @@ class OpenEcommerce(BenchTask):
         hist = a[a["uid"].isin(set(persons)) & (a["date"] < _ts(HISTORY_END)) & a["category"].notna()]
         n_cat, n_per = int(self.options.get("n_categories", N_CAT)), int(self.options.get("n_persons", N_PERSONS))
         if len(persons) < n_per:
-            raise ValueError(f"only {len(persons)} fully observed persons, need n_persons={n_per}")
+            raise ValueError(f"only {len(persons)} fully observed persons, need n_persons={n_per} "
+                             f"({FULLY_OBSERVED_RULE}; {len(persons_prev)} persons have a purchase on or after "
+                             f"{HISTORY_END}). Lower n_persons for toy data.")
         buyers = hist.drop_duplicates(["uid", "category"]).groupby("category").size().rename("n").reset_index()
         cats = buyers.sort_values(["n", "category"], ascending=[False, True]).head(n_cat)["category"].tolist()
         sample = sorted(np.random.default_rng(s).choice(persons, n_per, replace=False).tolist())
@@ -246,10 +294,13 @@ class OpenEcommerce(BenchTask):
         y_tr = labels(a, cats, out, TRAIN_CUT, TRAIN_CUT + timedelta(days=LABEL_DAYS))
         train = pd.DataFrame({"uid": np.repeat(out, len(cats)), "category": np.tile(cats, len(out)), "y": y_tr})
         Y = y.reshape(len(sample), len(cats))
-        meta = {"split": "test: 2022-07-01 -> 2022-12-31 purchases of a 400-person sample; history < 2022-07-01; "
+        raw = read_survey_raw(root)
+        survey = survey_internal(raw)
+        meta = {"split": f"test: 2022-07-01 -> 2022-12-31 purchases of a {n_per}-person sample; history < 2022-07-01; "
                          "train: labels 2022-01-01 -> 2022-06-30 for persons outside the sample (features < 2022-01-01)",
                 "seed": s, "categories": cats, "sample": sample, "train_persons": out, "prior_rate": prior,
-                "purchases": a, "survey": read_survey(root), "n_fully_observed": len(persons),
+                "purchases": a, "survey": survey, "survey_raw": raw,
+                "survey_missing": missing_survey_columns(survey), "n_fully_observed": len(persons),
                 "history_end": str(HISTORY_END), "train_cut": str(TRAIN_CUT),
                 "mask": balanced_mask(Y, s), "tiebreak": np.random.default_rng(1000 + s).random(Y.shape),
                 "source": "Open e-commerce 1.0 (Berke et al. 2024, Harvard Dataverse); CC BY 4.0"}
@@ -262,8 +313,9 @@ class OpenEcommerce(BenchTask):
     def _lgbm(self, data, cols, s):
         import lightgbm as lgb  # optional dependency
         cats, sv = data.meta["categories"], data.meta["survey"]
-        surv = sv[["uid"] + SURVEY_FEATURES].drop_duplicates("uid").set_index("uid")
-        levels = {c: sorted(surv[c].dropna().unique().tolist()) for c in SURVEY_FEATURES}
+        used = [c for c in SURVEY_FEATURES if c in cols]   # history_lgbm needs no survey columns
+        surv = sv[["uid"] + used].drop_duplicates("uid").set_index("uid")
+        levels = {c: sorted(surv[c].dropna().unique().tolist()) for c in used}
 
         def table(uids, cut):
             d = self.history_features(data, uids, cut)
@@ -289,6 +341,10 @@ class OpenEcommerce(BenchTask):
         return np.clip(final.predict(xt), 0, 1)
 
     def baselines(self, data: TaskData) -> dict:
+        """{name: p per data.test row}: never, constant_rate, random, popularity (prior_rate of the category),
+        persistence (bought in the last 180 days of history), decayed_count; with lgbm=True and lightgbm installed
+        also survey_lgbm (category + survey features) and history_lgbm (category + history features).
+        survey_lgbm is skipped with a warning naming the raw Q-* columns when survey.csv lacks them."""
         s = data.meta["seed"]
         n = len(data.test)
         cats = data.meta["categories"]
@@ -299,21 +355,53 @@ class OpenEcommerce(BenchTask):
                "persistence": (ft["k_180"].to_numpy() > 0).astype(float),
                "decayed_count": 1 - np.exp(-ft["son_180"].to_numpy(float))}
         if self.options.get("lgbm", True):
+            missing = missing_survey_columns(data.meta["survey"])
+            if missing:
+                warnings.warn(f"open_ecommerce: skipping survey_lgbm, survey.csv lacks {missing}", stacklevel=2)
             try:
                 import lightgbm  # noqa: F401
             except ImportError:
                 return out
             hist = ["category"] + HISTORY_FEATURES
-            out["survey_lgbm"] = self._lgbm(data, ["category"] + SURVEY_FEATURES, s)
+            if not missing:
+                out["survey_lgbm"] = self._lgbm(data, ["category"] + SURVEY_FEATURES, s)
             out["history_lgbm"] = self._lgbm(data, hist, s)
         assert len(cats) * len(data.meta["sample"]) == n
         return out
 
+    def frame(self, data: TaskData, preds: dict) -> pd.DataFrame:
+        """EvalFrame, one row per data.test row: unit ("uid|category"), group (= uid), item (= category),
+        uid, category, truth (0/1), balanced (row is in the acc_1b_c subset), tiebreak (U(0,1) for equal p),
+        segment (age group, Q-demos-age), seg_gender (Q-demos-gender), split ("test"), pred_<method>."""
+        return super().frame(data, preds)
+
     def _frame(self, data: TaskData) -> pd.DataFrame:
         t = data.test
         sv = data.meta["survey"].drop_duplicates("uid").set_index("uid")
+
+        def seg(col):
+            return t["uid"].map(sv[col]).fillna("NA").to_numpy() if col in sv.columns else np.full(len(t), "NA")
         return pd.DataFrame({"unit": t["uid"] + "|" + t["category"], "group": t["uid"], "item": t["category"],
+                             "uid": t["uid"].to_numpy(), "category": t["category"].to_numpy(),
                              "truth": t["y"].to_numpy(int), "balanced": data.meta["mask"].ravel(),
                              "tiebreak": data.meta["tiebreak"].ravel(),
-                             "segment": t["uid"].map(sv["yas"]).fillna("NA").to_numpy(),
-                             "seg_gender": t["uid"].map(sv["cinsiyet"]).fillna("NA").to_numpy()})
+                             "segment": seg("yas"), "seg_gender": seg("cinsiyet")})
+
+
+def truth_dict(data: TaskData) -> dict:
+    """{uid: {category: 0/1}} of data.test (the `truth` argument of sim.prediction_frame)."""
+    out: dict = {}
+    for u, k, y in zip(data.test["uid"], data.test["category"], data.test["y"]):
+        out.setdefault(u, {})[k] = int(y)
+    return out
+
+
+def survey_people(data: TaskData, uids: list | None = None) -> dict:
+    """{uid: {raw Q-* column: answer}} for `uids` (default the test sample), missing answers left out; the
+    `people` argument of sim.predict_people with spec=sim.AMAZON (whose questions are keyed by these columns)."""
+    raw = data.meta["survey_raw"].drop_duplicates("Survey ResponseID").set_index("Survey ResponseID")
+    out = {}
+    for u in (data.meta["sample"] if uids is None else uids):
+        if u in raw.index:
+            out[u] = {c: v for c, v in raw.loc[u].items() if isinstance(v, str)}
+    return out
