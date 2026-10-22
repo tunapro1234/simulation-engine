@@ -16,6 +16,8 @@ Knobs (all constructor params, so they show in the arm label):
              the persona is the interviewee's earlier answers, the question comes from the interviewer)
   format     bullets | prose | json | qa (question/answer pairs, one per attribute)
   order      given | sorted | reversed | shuffle (seeded per person, deterministic); `keys` picks and orders.
+Wording: header= (opening line), header_sep= (between header and block), closing= (after the block), lead= (before
+the question text), phrases= ({attr: "... {value} ..."} sentence templates).
 Only person["fields"] is read. A field keyed by the target question id or its `exclude` ids is dropped (leakage
 guard: a prep step that copied the target into fields does not reach the prompt).
 """
@@ -80,7 +82,8 @@ class Framed(Injector):
 
     def __init__(self, placement: str | None = None, voice: str | None = None, format: str | None = None,
                  order: str = "given", keys: Sequence[str] | None = None, seed: int = 0,
-                 header: str | None = None, phrases: dict[str, str] | None = None, **params: Any):
+                 header: str | None = None, phrases: dict[str, str] | None = None, closing: str | None = None,
+                 lead: str | None = None, header_sep: str | None = None, **params: Any):
         d = type(self).defaults
         self.placement = placement or d["placement"]
         self.voice = voice or d["voice"]
@@ -94,6 +97,9 @@ class Framed(Injector):
         self.seed = seed
         self.header = d.get("header") if header is None else header
         self.phrases = dict(phrases or d.get("phrases") or {})   # {attr: "In terms of my age, I am {value}."}
+        self.closing = d.get("closing", CLOSINGS[self.voice]) if closing is None else closing
+        self.lead = d.get("lead", "") if lead is None else lead              # text before the question itself
+        self.header_sep = d.get("header_sep", "\n") if header_sep is None else header_sep
         super().__init__(placement=self.placement, voice=self.voice, format=self.fmt, order=order,
                          keys=self.keys, seed=seed, **params)
 
@@ -159,23 +165,26 @@ class Framed(Injector):
     def render(self, person: dict, question: dict) -> Prompt:
         items = self.attributes(person, question)
         qtext = self.question_block(question)
+        if self.lead:
+            qtext = f"{self.lead} {qtext}"
         body = self.block(items)
         meta = {"framing": {"placement": self.placement, "voice": self.voice, "format": self.fmt,
                             "order": self.order}, "keys": [k for k, _ in items]}
-        persona = self._join(self.heading(), body, CLOSINGS[self.voice])
+        persona = self._join(self._join(self.heading(), body, sep=self.header_sep), self.closing)
         if self.placement in ("system", "user"):
+            sep = "\n\n"
             if self.voice == "interview":
-                qtext = "Interviewer: " + qtext
+                qtext, sep = "Interviewer: " + qtext, "\n"        # the question is the next interviewer line
             if self.placement == "system":
                 return Prompt(system=persona, user=qtext, meta=meta)
-            return Prompt(system="", user=persona + "\n\n" + qtext, meta=meta)
+            return Prompt(system="", user=persona + sep + qtext, meta=meta)
         # placement == "turns": the persona is an earlier exchange; flatten() / messages() label the roles
         if self.voice == "interview" and self.fmt == "qa":       # one exchange per attribute (Lutz et al.)
             hist = [t for k, v in items for t in zip(("user", "assistant"), self.qa_pair(k, v))]
             return Prompt(system=self.header if self.header is not None else INTERVIEWEE, user=qtext,
                           history=hist, meta=meta)
         if self.voice in ("first", "interview"):                 # the model itself told its story
-            told = self._join(self.heading(), body) if self.voice == "first" else body
+            told = self._join(self.heading(), body, sep=self.header_sep) if self.voice == "first" else body
             system = "" if self.voice == "first" else (self.header if self.header is not None else INTERVIEWEE)
             user = qtext if self.voice == "interview" else "Answer as the person you just described would.\n\n" + qtext
             return Prompt(system=system, user=user, history=[("user", INTRO), ("assistant", told)], meta=meta)
@@ -196,32 +205,38 @@ class ArgyleBackstory(Framed):
 
 @register
 class HuCollierProfile(Framed):
-    """'Your Profile:' + second-person declarative sentences in the system prompt (chat models in the paper)."""
+    """'Your Profile: ' + second-person declarative sentences in the system prompt (chat models in the paper)."""
     name = "hu_collier_profile"
     paper = "Hu & Collier 2024, Quantifying the Persona Effect in LLM Simulations, arXiv:2402.10811"
-    description = ("System: 'Your Profile:' + second-person sentences ('Your age is 34.'); the paper also varied "
-                   "attribute order (order=shuffle, seed=...).")
-    defaults = {"placement": "system", "voice": "second", "format": "prose", "header": "Your Profile:"}
+    description = ("System: 'Your Profile: Your age is 34. ...' (header inline, as in the paper's templates); the "
+                   "paper also varied attribute order (order=shuffle, seed=...).")
+    defaults = {"placement": "system", "voice": "second", "format": "prose", "header": "Your Profile:",
+                "header_sep": " ", "closing": ""}
 
 
 @register
 class LutzThirdPerson(Framed):
-    """Third-person role adoption ('Think of a ...') in the user prompt."""
+    """Third-person role adoption ('Think of a ...') in the user prompt; the task asks how this person would answer."""
     name = "lutz_third_person"
     paper = "Lutz et al. 2025, The Prompt Makes the Person(a), arXiv:2507.16076 (third-person role adoption)"
-    description = "User turn: 'Think of a person with the following profile.' + third-person sentences, then the question."
+    description = ("User turn: 'Think of a person with the following profile.' + third-person sentences, then "
+                   "'How would this person answer the following question: ...' (the paper's OpinionsQA task line).")
     defaults = {"placement": "user", "voice": "third", "format": "prose",
-                "header": "Think of a person with the following profile."}
+                "header": "Think of a person with the following profile.", "closing": "",
+                "lead": "How would this person answer the following question:"}
 
 
 @register
 class LutzInterview(Framed):
-    """Interview role adoption: one interviewer/interviewee exchange per attribute, then the question."""
+    """Interview role adoption: one user prompt with the interviewee line, one interviewer/interviewee exchange per
+    attribute, then the question as the last interviewer line (paper Table 3; placement="turns" splits the exchanges
+    into Prompt.history instead)."""
     name = "lutz_interview"
     paper = "Lutz et al. 2025, The Prompt Makes the Person(a), arXiv:2507.16076 (interview role adoption)"
-    description = ("System: 'You are an interviewee ...'; prior turns 'What is your age?' / 'My age is 34.' per "
-                   "attribute; the question is the last interviewer turn.")
-    defaults = {"placement": "turns", "voice": "interview", "format": "qa"}
+    description = ("User turn: 'You are an interviewee ...', then 'Interviewer: What is your age?' / 'Interviewee: "
+                   "My age is 34.' per attribute, then 'Interviewer: How would you answer the following question: ...'.")
+    defaults = {"placement": "user", "voice": "interview", "format": "qa",
+                "lead": "How would you answer the following question:"}
 
 
 def grid(placements: Iterable[str] = PLACEMENTS, voices: Iterable[str] = VOICES, formats: Iterable[str] = FORMATS,
