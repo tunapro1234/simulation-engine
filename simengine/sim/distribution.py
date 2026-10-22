@@ -96,13 +96,20 @@ def distribution_prompt(framing: str, group: str, question: dict, *, population:
 
 def segment_distribution(llm, segments, questions, *, population: str = "adults", source: str | None = None,
                          when: str | None = None, framings: Mapping[str, str] | None = None,
-                         max_tokens: int = 300, fallback: str = "uniform", ask_kw: dict | None = None) -> dict:
-    """One call per segment x question x framing; vectors averaged over framings.
+                         max_tokens: int = 300, fallback: str = "uniform", ask_kw: dict | None = None,
+                         repeats: int = 1) -> dict:
+    """One call per segment x question x framing (x repeat); vectors averaged over framings and repeats.
 
     segments: {key: group description} or a list of descriptions. framings default: FRAMINGS_NAMED when
     `source` is given (the pre-registered arm), else FRAMINGS_HIDDEN. An invalid answer becomes a uniform
     vector before averaging (fallback='uniform', as in the measured kit) or is skipped (fallback='skip').
-    Returns {"dist": {segment: {question_id: [p...]}}, "cells": [...], "invalid": n, "calls": n, "usage"}.
+    repeats=k asks every prompt k times with `sample=0..k-1` passed to llm.complete (Claude keys its disk cache
+    on `sample`, so repeats are independent draws, and sample 0 is the plain call's cache entry); an
+    `ask_kw["sample"]` offsets the indices.
+    Returns {"dist": {segment: {question_id: [p...]}}, "cells": [...], "invalid": n, "calls": n, "usage",
+    "filled": {segment: {question_id: share of the cell's answers replaced by a uniform vector}}, "filled_share",
+    "repeats", "sample_dist": [one dist per sample, framings averaged], "samples": long rows (unit = segment,
+    item, sample, p) for `retest_stats(..., kind="distribution")`}. Each cell row carries `sample` and `filled`.
     Calls go through `sim.panel.ask_many`: a soft refusal is not cached and is re-asked once with a
     research-forecast note; an empty reply (EmptyResponseError) is re-asked once with a larger max_tokens; a cell
     still without a reply counts as invalid (usage refused_calls / empty_calls / error_calls). `ask_kw` passes
@@ -114,23 +121,40 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
     prompts = [("", distribution_prompt(framings[v], segs[s], q, population=population, source=source, when=when))
                for v, s, q in jobs]
     usage = Usage()
-    resp = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="distribution",
-                    reframe=REFRAME_NOTE_GENERIC, **(ask_kw or {}))
-    cells, acc, invalid = [], {}, 0
-    for (v, s, q), r in zip(jobs, resp):
-        k = len(q["options"])
-        p = parse_distribution(getattr(r, "text", None), k, q["options"])
-        if p is None:
-            invalid += 1
-        cells.append({"variant": v, "segment": s, "item": q["id"], "p": None if p is None else p.tolist()})
-        if p is None and fallback == "uniform":
-            p = np.full(k, 1.0 / k)
-        if p is not None:
-            acc.setdefault(s, {}).setdefault(q["id"], []).append(p)
+    repeats = max(1, int(repeats))
+    kw = dict(ask_kw or {})
+    s0 = int(kw.pop("sample", 0))
+    cells, acc, per, fill, invalid = [], {}, [{} for _ in range(repeats)], {}, 0
+    for i in range(repeats):
+        skw = {**kw, "sample": s0 + i} if (repeats > 1 or s0) else kw    # plain call unchanged when k = 1
+        resp = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="distribution",
+                        reframe=REFRAME_NOTE_GENERIC, **skw)
+        for (v, s, q), r in zip(jobs, resp):
+            k = len(q["options"])
+            p = parse_distribution(getattr(r, "text", None), k, q["options"])
+            filled = p is None and fallback == "uniform"
+            if p is None:
+                invalid += 1
+            cells.append({"variant": v, "segment": s, "item": q["id"], "sample": i,
+                          "p": None if p is None else p.tolist(), "filled": filled})
+            f = fill.setdefault(s, {}).setdefault(q["id"], [0, 0])
+            f[0], f[1] = f[0] + int(filled), f[1] + 1
+            if filled:
+                p = np.full(k, 1.0 / k)
+            if p is not None:
+                acc.setdefault(s, {}).setdefault(q["id"], []).append(p)
+                per[i].setdefault(s, {}).setdefault(q["id"], []).append(p)
     dist = {s: {qid: np.mean(v, axis=0).tolist() for qid, v in d.items()} for s, d in acc.items()}
+    sample_dist = [{s: {qid: np.mean(v, axis=0).tolist() for qid, v in d.items()} for s, d in a.items()} for a in per]
+    samples = [{"unit": s, "segment": s, "item": qid, "sample": i, "p": p}
+               for i, sd in enumerate(sample_dist) for s, d in sd.items() for qid, p in d.items()]
+    n_fill = sum(f[0] for d in fill.values() for f in d.values())
     return to_jsonable({"method": "segment_distribution", "dist": dist, "cells": cells, "invalid": invalid,
-                        "calls": len(prompts), "framings": list(framings), "options": {q["id"]: q["options"] for q in qs},
-                        "usage": usage.as_dict()})
+                        "calls": len(prompts) * repeats, "framings": list(framings),
+                        "options": {q["id"]: q["options"] for q in qs}, "usage": usage.as_dict(),
+                        "filled": {s: {qid: f[0] / f[1] for qid, f in d.items()} for s, d in fill.items()},
+                        "filled_share": n_fill / len(cells) if cells else 0.0, "repeats": repeats,
+                        "sample_dist": sample_dist, "samples": samples})
 
 
 def _person_block(questions) -> str:
@@ -139,12 +163,23 @@ def _person_block(questions) -> str:
 
 
 def persona_distribution(llm, personas, questions, *, setting: str = "a survey of adults", batch: int = 12,
-                         session: str = "s1", max_tokens: int | None = None, ask_kw: dict | None = None) -> dict:
+                         session: str = "s1", max_tokens: int | None = None, ask_kw: dict | None = None,
+                         segments: Mapping[str, Any] | None = None) -> dict:
     """Per-persona probability vectors, many respondents per call (k2.py arm (iii), OLAS_ISTEM, generalised:
     `setting` replaces the measured "a public opinion survey of US adults in October 2020, ..." line; tables are
     filled within segment).
     Returns {"person": {pid: {question_id: [p...] | None}}, "dist": {segment: {question_id: mean vector}},
-    "invalid": n personas with an unusable answer}. Segment means use a uniform vector for invalid personas."""
+    "invalid": n personas with an unusable answer}. Segment means use a uniform vector for invalid personas; the
+    share of such personas per cell is in "filled" ({segment: {question_id: share}}) and "filled_share".
+    Accounting as in `survey`: `refused` / `unparsed` (int counts: personas whose batch still refused after the
+    reframed re-ask / personas unanswered for any other reason; refused + unparsed == invalid), their id lists
+    `refused_ids` / `unparsed_ids` and `invalid_ids` (persona order), `refusal_rate` (batches refused at the
+    first ask / batches) and `status` {pid: "ok" | "refused" | "unparsed"}.
+    segments: {scheme: column | callable} adds one dist per scheme next to the persona segment: "dist_by"
+    {scheme: {label: {question_id: vector}}}, "filled_by" and "segments_by" {scheme: {pid: label}}. A column is
+    looked up like `survey(stimulus_col=)` (flat key, facet, identity / demographic field, trait label,
+    authored, extra, attribute); a callable gets the original persona item. A missing value gives label "NA".
+    `person_distribution_frame(result)` gives one row per persona x question."""
     ps = as_personas(personas)
     order = {sg: i for i, sg in enumerate(dict.fromkeys(p.seg for p in ps))}
     ps = sorted(ps, key=lambda p: order[p.seg])     # tables within a segment, as in the measured run
@@ -165,10 +200,15 @@ def persona_distribution(llm, personas, questions, *, setting: str = "a survey o
         max_tokens = min(16000, 200 + batch * len(qs) * 12 * max(len(q["options"]) for q in qs))
     usage = Usage()
     person: dict[str, dict] = {}
-    invalid = 0
+    status: dict[str, str] = {}
+    kw = dict(ask_kw or {})
+    user_st = kw.pop("statuses", None)
+    st: list = []
     resp = ask_many(llm, [p for p, _ in plan], max_tokens=max_tokens, usage=usage, tag="persona_distribution",
-                    reframe=REFRAME_NOTE_GENERIC, **(ask_kw or {}))
-    for (_, ids), r in zip(plan, resp):
+                    reframe=REFRAME_NOTE_GENERIC, statuses=st, **kw)
+    if user_st is not None:
+        user_st.extend(st)
+    for (_, ids), r, c in zip(plan, resp, st):
         js = parse_json(getattr(r, "text", None))
         js = js if isinstance(js, dict) else {}
         for pid in ids:
@@ -180,33 +220,96 @@ def persona_distribution(llm, personas, questions, *, setting: str = "a survey o
                 if any(v is None for v in vecs):
                     vecs = None
             if vecs is None:
-                invalid += 1
+                status[pid] = "refused" if r is None and c == "refused" else "unparsed"
                 person[pid] = {q["id"]: None for q in qs}
             else:
+                status[pid] = "ok"
                 person[pid] = {q["id"]: v.tolist() for q, v in zip(qs, vecs)}
     seg = {p.pid: p.seg for p in ps}
+    dist, filled = _persona_means(person, seg, qs)
+    out = {"method": "persona_distribution", "person": person, "dist": dist, "filled": filled,
+           "calls": len(plan), "segments": seg, "options": {q["id"]: q["options"] for q in qs},
+           "usage": usage.as_dict()}
+    if segments:
+        from .survey import persona_value
+        by = {name: {p.pid: _label(how(p.source if p.source is not None else p) if callable(how)
+                                   else persona_value(p, str(how))) for p in ps}
+              for name, how in segments.items()}
+        means = {name: _persona_means(person, lab, qs) for name, lab in by.items()}
+        out.update({"segments_by": by, "dist_by": {k: v[0] for k, v in means.items()},
+                    "filled_by": {k: v[1] for k, v in means.items()}})
+    pids = [p.pid for p in ps]
+    refused_ids = [p for p in pids if status.get(p) == "refused"]
+    unparsed_ids = [p for p in pids if status.get(p) == "unparsed"]
+    first = usage.first_calls
+    out.update({"invalid": len(refused_ids) + len(unparsed_ids), "refused": len(refused_ids),
+                "unparsed": len(unparsed_ids), "refused_ids": refused_ids, "unparsed_ids": unparsed_ids,
+                "invalid_ids": [p for p in pids if status.get(p) != "ok"],
+                "refusal_rate": round(usage.refused_calls / first, 4) if first else 0.0, "status": status,
+                "filled_share": (len(refused_ids) + len(unparsed_ids)) / len(pids) if pids else 0.0})
+    return to_jsonable(out)
+
+
+def _label(v) -> str:
+    if v is None or (isinstance(v, float) and v != v) or (isinstance(v, str) and not v.strip()):
+        return "NA"
+    return str(v)
+
+
+def _persona_means(person: dict, seg: Mapping[str, str], qs: list[dict]) -> tuple[dict, dict]:
+    """Segment means of per-persona vectors (uniform for an invalid persona) and the filled share per cell."""
     dist: dict[str, dict] = {}
+    filled: dict[str, dict] = {}
     for sg in sorted(set(seg.values())):
+        members = [p for p in seg if seg[p] == sg]
         for q in qs:
             k = len(q["options"])
-            vs = [np.asarray(person[p][q["id"]]) if person.get(p, {}).get(q["id"]) is not None else np.full(k, 1 / k)
-                  for p in seg if seg[p] == sg]
+            got = [person.get(p, {}).get(q["id"]) for p in members]
+            vs = [np.asarray(v) if v is not None else np.full(k, 1 / k) for v in got]
             dist.setdefault(sg, {})[q["id"]] = np.mean(vs, axis=0).tolist()
-    return to_jsonable({"method": "persona_distribution", "person": person, "dist": dist, "invalid": invalid,
-                        "calls": len(plan), "segments": seg, "options": {q["id"]: q["options"] for q in qs},
-                        "usage": usage.as_dict()})
+            filled.setdefault(sg, {})[q["id"]] = sum(v is None for v in got) / len(got)
+    return dist, filled
+
+
+def person_distribution_frame(result: dict) -> pd.DataFrame:
+    """One row per persona x question from a `persona_distribution` result: pid, item, p (list or None),
+    status ("ok" | "refused" | "unparsed"), segment, one column per `segments=` scheme, and E_pos (expected
+    option index 0..K-1, NaN when invalid). For person-level resampling and re-aggregation in other schemes."""
+    seg = result.get("segments") or {}
+    by = result.get("segments_by") or {}
+    status = result.get("status") or {}
+    rows = []
+    for pid, d in (result.get("person") or {}).items():
+        for qid, p in d.items():
+            row = {"pid": pid, "item": qid, "p": None if p is None else list(p),
+                   "status": status.get(pid, "ok" if p is not None else "unparsed"), "segment": seg.get(pid)}
+            row.update({name: lab.get(pid) for name, lab in by.items()})
+            row["E_pos"] = float(np.dot(np.arange(len(p)), p)) if p is not None else np.nan
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def distribution_frame(result: dict, truth: Mapping[str, Mapping[str, Sequence[float]]] | None = None,
-                       method: str = "llm_dist") -> pd.DataFrame:
-    """EvalFrame (kind 'distribution'), one row per segment x question: truth (list) and pred_<method> (list)."""
+                       method: str = "llm_dist", scheme: str | None = None) -> pd.DataFrame:
+    """EvalFrame (kind 'distribution'), one row per segment x question: truth (list), pred_<method> (list) and
+    filled_<method> (float: share of the cell's answers that were invalid and replaced by a uniform vector; NaN
+    when the result does not record it). scheme: a `persona_distribution(segments=)` scheme name instead of the
+    persona segment."""
     truth = truth or {}
+    if scheme is None:
+        dist, filled = result.get("dist") or {}, result.get("filled") or {}
+    else:
+        if scheme not in (result.get("dist_by") or {}):
+            raise KeyError(f"scheme {scheme!r} not in result; have {sorted(result.get('dist_by') or {})}")
+        dist, filled = result["dist_by"][scheme], (result.get("filled_by") or {}).get(scheme) or {}
     rows = []
-    for s, d in (result.get("dist") or {}).items():
+    for s, d in dist.items():
         for qid, p in d.items():
             t = (truth.get(s) or {}).get(qid)
+            f = (filled.get(s) or {}).get(qid)
             rows.append({"unit": f"{s}|{qid}", "truth": list(t) if t is not None else np.nan,
-                         f"pred_{method}": list(p), "segment": s, "item": qid, "group": qid})
+                         f"pred_{method}": list(p), f"filled_{method}": float(f) if f is not None else np.nan,
+                         "segment": s, "item": qid, "group": qid})
     return pd.DataFrame(rows)
 
 
@@ -220,4 +323,4 @@ def w1_ordinal(p: Any, q: Any) -> float:
 
 
 __all__ = ["segment_distribution", "persona_distribution", "distribution_prompt", "distribution_frame",
-           "w1_ordinal", "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE"]
+           "person_distribution_frame", "w1_ordinal", "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE"]
