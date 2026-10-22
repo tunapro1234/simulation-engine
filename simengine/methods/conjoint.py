@@ -266,11 +266,14 @@ def wtp(model: MNL, price: str = "price", ci: str = "delta", cluster: str | None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             m.fit(_resample(df, cluster, rng))
-        draws.append([-_raw_coef(m, a) / _raw_coef(m, price) for a in names])
+        # an ASC whose alternative a replicate never drew is NaN, not a KeyError
+        draws.append([-_raw_coef(m, a) / _raw_coef(m, price) if a in m.coef_.index else np.nan for a in names])
     D = np.asarray(draws)
     a = (1 - level) / 2
-    return pd.DataFrame({"wtp": w, "se": D.std(0, ddof=1), "lo": np.quantile(D, a, axis=0),
-                         "hi": np.quantile(D, 1 - a, axis=0)}, index=names)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)               # all-NaN column -> NaN bounds
+        return pd.DataFrame({"wtp": w, "se": np.nanstd(D, 0, ddof=1), "lo": np.nanquantile(D, a, axis=0),
+                             "hi": np.nanquantile(D, 1 - a, axis=0)}, index=names)
 
 
 def _market(model: MNL, market: pd.DataFrame) -> pd.DataFrame:
@@ -328,7 +331,7 @@ def elasticity(model: MNL, market: pd.DataFrame, price: str = "price",
             m2 = m.copy()
             m2.iloc[i, m2.columns.get_loc(price)] = p[i] * k
             s2 = model.predict_proba(m2)[i]
-            dp = (p[i] * k - p[i]) / ((p[i] * k + p[i]) / 2)
+            dp = (p[i] * k - p[i]) / ((p[i] * k + p[i]) / 2) if p[i] * (k + 1) != 0 else 0.0  # zero price: no arc
             ds = (s2 - s[i]) / ((s2 + s[i]) / 2) if s2 + s[i] > 0 else 0.0
             rows.append({"alternative": labels[i], "factor": k, "price": p[i] * k, "share": s2,
                          "arc": ds / dp if dp else np.nan})

@@ -123,6 +123,23 @@ class TestInference(unittest.TestCase):
         ints = elasticity(self.m, MARKET.astype({"price": int}))
         np.testing.assert_allclose(ints["own"].to_numpy(), elasticity(self.m, MARKET)["own"].to_numpy())
 
+    def test_zero_price_arc_is_nan_without_warnings(self):
+        free = MARKET.assign(price=[0.0, 110.0, 100.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            arc = elasticity(self.m, free)["arc"]
+        self.assertTrue(arc.loc[arc["alternative"] == 1, "arc"].isna().all())
+        self.assertTrue(arc.loc[arc["alternative"] != 1, "arc"].notna().all())
+
+    def test_bootstrap_asc_missing_in_replicate(self):
+        # alternative 3 only for one person: replicates that skip that person have no ASC_3
+        d = self.df[self.df["person"] < 30]
+        d = d[(d["alternative"] != 3) | (d["person"] == 0)]
+        m = MNL(ATTRS, scale={"price": 100}).fit(d)
+        b = wtp(m, ci="bootstrap", B=20, seed=0, attrs=["quality", "ASC_3"])
+        self.assertTrue(np.isfinite(b.loc["quality"]).all())
+        self.assertEqual(list(b.index), ["quality", "ASC_3"])
+
 
 class TestValidation(unittest.TestCase):
     def setUp(self):
