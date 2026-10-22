@@ -67,7 +67,15 @@ a respondent) and 0/1 covariates (`ga`, `car_user`, `first`, `male`, `employer_p
   and all their situations go to test. The model sees nobody from the test set, so this measures generalisation to
   new people.
 - **`situation`**: each respondent's last `n_test` answered situations are the test set. Every test respondent has
-  earlier answers in train, which the `own_shares` baseline uses.
+  their other answers in train, which the `own_shares` baseline uses. "Last" means last in file order. The file has
+  no presentation-order column, and the nine positions follow a fixed design order: attribute means and choice shares
+  differ by position (in the `biogeme` sample, train is chosen in 7.2% of position-0 rows and 18.0% of position-8
+  rows; mean train headway is 89.3 min at position 0 and 50.5 min at position 8). So this split holds out two fixed design
+  positions, not a random or a known-later pair of answers. Nothing from the test rows reaches training, but read it
+  as "same people, other design rows", not as forecasting later behaviour.
+
+`respondent_split` refuses a `test_frac` that leaves no respondent in test or in train, and `situation_split`
+refuses `n_test < 1` or a value that leaves no training rows.
 
 The EvalFrame columns are `unit`, `group` (respondent, the bootstrap cluster), `item` (situation index), `truth`
 (0/1/2), `segment` (`car_user` / `rail_user`, i.e. the survey group), `seg_ga`, `seg_purpose`, `av_train`, `av_sm`,
@@ -115,21 +123,27 @@ alternatives with time, cost as the respondent sees it ("covered by your GA" for
 and headway. `prompts(df)` pairs `SYSTEM`, which asks for a JSON probability object, with persona + situation +
 question.
 
-`llm_method(llm, smooth=0.05)` sends one prompt per test row through `llm.map`. `parse_choice` reads the JSON object,
-or else the first alternative word in the reply. The parsed vector is mixed with `smooth` of the uniform-over-available
-vector, so a confident wrong answer does not score log 1e-6. Unparseable replies become uniform and are counted in
-`method.last_unparsed`. The tests run it with `FakeLLM`. No real LLM run has been scored on this task yet.
+`llm_method(llm, smooth=0.05)` sends one prompt per test row through `llm.map`. `parse_choice` reads the JSON object
+(numbers or `"20%"` strings; non-finite and negative values are ignored), else `key: number` pairs, else the first
+alternative word in the reply. An object that names alternatives but has no usable positive value is unparsed rather
+than read as its first key. The parsed vector is mixed with `smooth` of the uniform-over-available
+vector, so a confident wrong answer does not score log 1e-6. Unparseable replies, and replies that put no mass on an available alternative,
+become uniform and are counted in `method.last_unparsed`. The tests run it with `FakeLLM`. No real LLM run has been scored on this task yet.
 
 ## Provenance
 
-- Data: Swissmetro SP survey, Sept 1997 – Mar 1998 (441 rail travellers surveyed on board, 751 car drivers reached by
-  licence plate). It is distributed by EPFL TRANSP-OR as the Biogeme example file (`transp-or.epfl.ch/data/swissmetro.dat`).
+- Data: Swissmetro SP survey (441 rail travellers interviewed on trains between St. Gallen and Geneva in March 1998;
+  751 car drivers reached through licence plates recorded on the motorways in September 1997, survey packs mailed
+  until April 1998; dates from the Bierlaire 2018 codebook `swissmetro.pdf` shipped with the data). It is distributed by EPFL TRANSP-OR as the Biogeme example file (`transp-or.epfl.ch/data/swissmetro.dat`).
   The download page carries no licence text. The data is not in the repository.
 - Paper: M. Bierlaire, K. Axhausen, G. Abay (2001), "The acceptance of modal innovation: the case of Swissmetro",
   1st Swiss Transport Research Conference.
 - Reference estimates: the Biogeme example outputs `b01a_logit` (LL −5331.252, null LL −6964.663, ASC_TRAIN −0.7012,
-  ASC_CAR −0.1546, B_TIME −1.2779, B_COST −1.0838, robust SE of B_TIME 0.104) and `b09_nested` (LL −5236.900,
-  μ_existing 2.054). These are taken from the Biogeme example pages and asserted in `TestRealData`.
+  ASC_CAR −0.1546, B_TIME −1.2779, B_COST −1.0838, robust SEs 0.0826 / 0.0582 / 0.1043 / 0.0682) and `b09_nested`
+  (LL −5236.9; ASC_TRAIN −0.511953 (0.079114), ASC_CAR −0.167141 (0.054528), B_TIME −0.898716 (0.107108), B_COST
+  −0.856701 (0.060033), nest parameter 2.053862 (0.164154)). These are taken from the Biogeme example pages
+  (`plot_b01a_logit`, `plot_b09_nested`, re-read 22 Oct 2026) and asserted in `TestRealData`. Biogeme's b09 bounds the
+  nest parameter to [1, 3]; this module uses [1, ∞), which gives the same optimum because 2.05 is interior.
 
 ## Measured numbers
 
@@ -154,8 +168,13 @@ for opts in ({}, {"split": "situation"}, {"sample": "all"}, {"sample": "all", "s
 | b09 nested | −5236.900 | 0.2481 | ASC_TRAIN −0.5119 (0.0791), ASC_CAR −0.1672 (0.0545), B_TIME −0.8987 (0.1071), B_COST −0.8567 (0.0600), μ 2.0541 (0.1642) |
 | rich MNL | −4509.466 | 0.3525 | 19 parameters (`fit.table()`) |
 
-The b01 and b09 values match the Biogeme outputs to every printed digit. The real-data test checks the coefficients
-to 4 decimals and LL to 2.
+The b01 values match the Biogeme output to every printed digit; the test checks the coefficients and robust SEs to
+4 decimals and LL to 2. For b09 this module gives ASC_TRAIN −0.511948 (0.079114), ASC_CAR −0.167156 (0.054529),
+B_TIME −0.898664 (0.107113), B_COST −0.856665 (0.060035), μ 2.054065 (0.164204) against Biogeme's −0.511953 (0.079114),
+−0.167141 (0.054528), −0.898716 (0.107108), −0.856701 (0.060033), 2.053862 (0.164154): estimates within 2.1e-4 and
+robust SEs within 5e-5 (numerical gradient and finite-difference Hessian). The test allows 2e-3 and 1e-3.
+
+A review re-ran both measurement scripts on 22 Oct 2026 and reproduced every number in this section exactly.
 
 ### Held-out scores
 
@@ -204,7 +223,8 @@ What these show:
 
 - **Respondent split:** the textbook b01 and b09 models are far from the ceiling. Respondent covariates (`mnl_rich`) or
   a tree model add about 0.07-0.10 nats per choice.
-- **Situation split:** a respondent's own two to seven earlier answers (`own_shares`) beat every attribute-only model
+- **Situation split:** a respondent's own seven other answers (`own_shares`; every
+  respondent in both samples has all nine situations) beat every attribute-only model
   except gbdt. Stated choices are strongly habitual: 30.4% of the 752 `biogeme`-sample respondents (29.1% of 1,191
   in `all`) chose the same alternative in every answered situation.
 - **Bar for an LLM persona method:** on the respondent split it has to beat `shares` (−0.870) to show any signal, and
@@ -224,7 +244,10 @@ What these show:
   implemented. Panel effects would likely narrow the gap between the logit models and `own_shares` on the situation
   split.
 - **Nested logit fitting:** the nested logit uses numerical derivatives. Its standard errors come from a
-  finite-difference Hessian (step 1e-4); only the estimates and LL are checked against Biogeme, not the nested
-  standard errors.
+  finite-difference Hessian (step 1e-4). On the full `biogeme` sample they agree with Biogeme's to 5e-5; on other
+  data or nest structures they are not checked.
+- **GA cost in the prompts:** the codebook says TRAIN_CO is the annual ticket price for GA holders and SM_CO ignores
+  the GA. Following Biogeme, the models and `situation_text` treat both as free for GA holders. What GA holders were
+  actually shown in the survey is not recorded, so the prompt for them is a modelling assumption.
 - **LLM methods:** no measured LLM numbers yet. `parse_choice` falls back to the first alternative word, so a
   free-text reply mentioning several modes is read as its first mention.
