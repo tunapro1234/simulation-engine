@@ -72,7 +72,8 @@ There is no code from other libraries in this module.
 ## Measured numbers
 
 Every number in this section comes from runs made for this document on 22 Oct 2026, using synthetic arms only. The
-outputs are outside the repo, in `bandits_rates.csv`, `bandits_extra.json` and `bandits_racing.log`. Commands, run
+LUCB1 numbers were re-run after its round index was corrected to start at K + 1 (the other columns did not change).
+The outputs are outside the repo, in `bandits_rates.csv`, `bandits_extra.json` and `bandits_racing.log`. Commands, run
 from the repo root:
 
 ```bash
@@ -90,21 +91,21 @@ literature number, not a run of ours.
 
 | problem (K, n) | uniform | SR | LUCB1 | UCB1 | TS Beta | TS Gauss | paper Fig. 5: Unif / SR |
 |---|---|---|---|---|---|---|---|
-| exp1 (20, 2000) | 0.446 | 0.187 | 0.193 | 0.294 | 0.197 | 0.261 | 0.46 / 0.155 |
-| exp2 (20, 2000) | 0.421 | 0.177 | 0.195 | 0.287 | 0.176 | 0.249 | 0.395 / 0.19 |
-| exp3 (4, 2000) | 0.286 | 0.258 | 0.266 | 0.248 | 0.257 | 0.256 | 0.145 / 0.107 |
-| exp4 (6, 600) | 0.220 | 0.166 | 0.157 | 0.151 | 0.130 | 0.150 | 0.222 / 0.16 |
-| exp5 (15, 4000) | 0.142 | 0.043 | 0.022 | 0.027 | 0.015 | 0.011 | 0.33 / 0.205 |
-| exp6 (20, 6000) | 0.299 | 0.200 | 0.234 | 0.235 | 0.140 | 0.177 | 0.315 / 0.187 |
-| exp7 (30, 6000) | 0.523 | 0.182 | 0.242 | 0.350 | 0.190 | 0.320 | 0.55 / 0.225 |
-| exp7 (30, 12000) | 0.299 | 0.040 | 0.062 | 0.120 | 0.044 | 0.083 | 0.30 / 0.04 |
-| Gaussian sd 1, means 1, .8, .7, .6, .5, .2 (6, 600) | 0.091 | 0.045 | 0.052 | 0.062 | 0.114 | 0.041 | - |
+| exp1 (20, 2000) | 0.446 | 0.187 | 0.203 | 0.294 | 0.197 | 0.261 | 0.46 / 0.155 |
+| exp2 (20, 2000) | 0.421 | 0.177 | 0.199 | 0.287 | 0.176 | 0.249 | 0.395 / 0.19 |
+| exp3 (4, 2000) | 0.286 | 0.258 | 0.252 | 0.248 | 0.257 | 0.256 | 0.145 / 0.107 |
+| exp4 (6, 600) | 0.220 | 0.166 | 0.146 | 0.151 | 0.130 | 0.150 | 0.222 / 0.16 |
+| exp5 (15, 4000) | 0.142 | 0.043 | 0.034 | 0.027 | 0.015 | 0.011 | 0.33 / 0.205 |
+| exp6 (20, 6000) | 0.299 | 0.200 | 0.218 | 0.235 | 0.140 | 0.177 | 0.315 / 0.187 |
+| exp7 (30, 6000) | 0.523 | 0.182 | 0.243 | 0.350 | 0.190 | 0.320 | 0.55 / 0.225 |
+| exp7 (30, 12000) | 0.299 | 0.040 | 0.075 | 0.120 | 0.044 | 0.083 | 0.30 / 0.04 |
+| Gaussian sd 1, means 1, .8, .7, .6, .5, .2 (6, 600) | 0.091 | 0.045 | 0.051 | 0.062 | 0.114 | 0.041 | - |
 
 The settings were: LUCB1 with delta 0.05, epsilon 0 and the budget as a cap; UCB1 and LUCB with scale 1 on the
 Bernoulli rows and scale 4 on the Gaussian row; TS Beta with bounds (-3, 4) on the Gaussian row; TS Gauss with the
 paper's sigma 1 and prior 0. The regret policies recommend the empirical best when the budget runs out.
 
-Three things to read from the table:
+Four things to read from the table:
 
 - On the six problems other than exp3 and exp5, our uniform and SR rates are within 0.045 of the bars read off the
   paper's figure. The largest gaps are exp1 SR (0.187 against about 0.155) and exp7 SR at n = 6000 (0.182 against
@@ -112,13 +113,19 @@ Three things to read from the table:
 - exp3 and exp5 do not match. The paper says n was chosen close to H1. For the means as printed in the text, H1 is
   6137 for exp3 (n = 2000) and 1329 for exp5 (n = 4000), so our exp3 is much harder and our exp5 much easier than the
   paper's runs. Most likely the printed formulas (0.5 - 0.37^i and 0.5 - 0.025i) are not the ones that were run. We
-  did not resolve this.
+  did not resolve this. One reading fits exp5: with gaps 0.025 (i - 1), i = 2..15 (mu = 0.475, 0.45, ..., 0.15),
+  H1 = 4122 at n = 4000, and our rates become uniform 0.346 and SR 0.182 (2000 runs, SE <= 0.011), against about
+  0.33 and 0.205 in the figure. `AUDIBERT_BUBECK_2010["exp5"]` keeps the printed formula. We found no reading of the
+  exp3 formula with H1 near 2000.
+- exp1 SR (0.187 against about 0.155) is not an implementation slip as far as we can tell: an independent
+  per-replication SR with binomial phase sums gave 0.184 over 20000 runs, and the module 0.187 over 20000 runs
+  (SE 0.003 each).
 - SR, LUCB1 and Thompson-Beta beat uniform by a wide margin wherever there are many bad arms (exp1, exp2, exp7).
   UCB1 and TS-Gauss with their default exploration constants do worse there. UCB1's bonus is tuned for regret, not
   identification, which may explain this. We did not try a smaller `scale`.
 
 **Cumulative pseudo-regret** (sum of pulls x gap, mean over 2000 runs), on the same runs. exp4 at n = 600: uniform 58.0,
-SR 49.9, UCB1 48.1, LUCB 43.1, TS Gauss 44.6, TS Beta 33.9. exp5 at n = 4000: uniform 793, SR 505, UCB1 426, LUCB 356,
+SR 49.9, UCB1 48.1, LUCB 42.8, TS Gauss 44.6, TS Beta 33.9. exp5 at n = 4000: uniform 793, SR 505, UCB1 426, LUCB 357,
 TS Gauss 326, TS Beta 152. Thompson-Beta had the lowest regret on exp3, exp4, exp5, exp6 and exp7 at n = 12000.
 LUCB1 had the lowest on exp1, exp2 and exp7 at n = 6000, for example 147 against 155 on exp1.
 
@@ -126,8 +133,8 @@ LUCB1 had the lowest on exp1, exp2 and exp7 at n = 6000, for example 147 against
 
 | means | delta | error | stopped confident | mean pulls |
 |---|---|---|---|---|
-| 0.9, 0.5, 0.4 | 0.10 / 0.05 / 0.01 | 0 / 0 / 0 | 100% / 100% / 100% | 844 / 869 / 929 |
-| 0.7, 0.5, 0.5, 0.3 | 0.10 / 0.05 / 0.01 | 0 / 0 / 0 | 3.1% / 2.6% / 0.65% | 3990 / 3993 / 3998 |
+| 0.9, 0.5, 0.4 | 0.10 / 0.05 / 0.01 | 0 / 0 / 0 | 100% / 100% / 100% | 848 / 873 / 929 |
+| 0.7, 0.5, 0.5, 0.3 | 0.10 / 0.05 / 0.01 | 0 / 0 / 0 | 3.1% / 2.6% / 0.75% | 3990 / 3993 / 3998 |
 
 The Hoeffding radius with t^4 is conservative. The error stays far below delta, and on the second problem almost
 every run reaches the 4000-pull cap before it can certify the answer.
@@ -139,8 +146,8 @@ x = 0.75.
 
 | noise sd | uniform | SR | LUCB1 (scale 4 sd) | UCB1 (scale 4 sd) | TS Gauss sigma=sd, prior 1 | TS Gauss sigma=sd, warmup 1 | TS Gauss paper defaults |
 |---|---|---|---|---|---|---|---|
-| 0.1 | 0.912 | 0.954 | 0.970 | 0.970 | 0.260 | 0.976 | 0.936 |
-| 0.3 | 0.586 | 0.662 | 0.718 | 0.680 | 0.536 | 0.700 | 0.650 |
+| 0.1 | 0.912 | 0.954 | 0.972 | 0.970 | 0.260 | 0.976 | 0.936 |
+| 0.3 | 0.586 | 0.662 | 0.682 | 0.680 | 0.536 | 0.700 | 0.650 |
 
 With a confident prior far from the rewards (sigma = noise sd, prior mean 1 against losses of about 0.15 to 0.7),
 Gaussian Thompson sampling barely explores: the prior has the same variance as one reward. `warmup=1` fixes this.
