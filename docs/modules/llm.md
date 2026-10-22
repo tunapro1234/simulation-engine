@@ -7,7 +7,7 @@ The module has three backends that implement the `simengine.types.LLM` protocol
 |---|---|---|
 | `Claude` | `claude.py` | Claude API through the official `anthropic` SDK, imported lazily (`pip install simengine[llm]`). |
 | `ClaudeCode` | `claude_code.py` | `claude -p` subprocess. Runs on the subscription with no API bill. Meant for long-lived or low-volume agents. |
-| `FakeLLM` | `fake.py` | Deterministic and offline, for tests and dry runs. Same `stats` / `spent_usd` readers as the real backends (cost 0). |
+| `FakeLLM` | `fake.py` | Deterministic and offline, for tests and dry runs. Same `stats` / `spent_usd` readers as the real backends (cost 0). With no responder it returns the first 16 hex characters of sha256(system + user): stable, but no JSON, so every simengine runner reads it as unparsed. For simengine prompts pass `FakeLLM(simengine.sim.schema_responder())` (schema-true values for every runner's prompt) or use `FakeLLM.survey()`; when a test needs a known ground truth, pass your own `responder(system, prompt) -> str`. |
 | `DiskCache`, `cache_key` | `cache.py` | One JSON file per sha256(model + system + user + params). Writes are atomic, so threads and processes can share one cache. |
 | `CostLedger` | `ledger.py` | JSONL ledger with one line per real call, written under flock. `total()` reads incrementally. Optional shared TSV spend log (`tsv_path=`, `agent=`; `TSV_COLUMNS`). |
 | `looks_like_refusal` | `refusal.py` | Conservative regex detector for soft refusals in plain text (English and Turkish). |
