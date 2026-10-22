@@ -6,17 +6,20 @@ groups on Pew ATP questions) and of countries (GlobalOpinionQA, Pew GAS + WVS), 
     data = task.load("<catalogue>")                # or $SIMENGINE_DATA; holds subpop-opinionqa/ (globalopinionqa/)
     frame = task.run(data=data)                    # uniform, overall, nearest_group (+ methods={...})
     task.score_all(frame)                          # wd / tvd (SubPOP); tvd / js_sim (GlobalOpinionQA)
-    task.others(data, item, group)                 # rows a setting-B prediction for (item, group) may read
+    task.others(data, item, group, attribute)      # rows a setting-B prediction for (item, group) may read
 
 Split: questions are hashed into test (default 50%) and train; `split="dev"` hashes train again, so dev never reads a
 test question. Setting A: only train questions are known (uniform is SubPOP's "upper bound" baseline). Setting B
-(group held out): for target (q, g) the other groups' distributions on q and q's population marginal are also known
-(`overall` column: Pew's weighted Overall row for SubPOP; the unweighted mean of the other countries for
-GlobalOpinionQA), never g's own row.
+(group held out): for target (q, g) q's population marginal and the distributions on q of the groups outside g's
+block are also known, never g's own row. Block (`block` column): the attribute for SubPOP (Overall = weighted sum of
+an attribute's groups, so with g's block mates known g would follow by subtraction), the country without its
+"(Non-national sample)" suffix for GlobalOpinionQA. `overall`: Pew's weighted Overall row for SubPOP; the unweighted
+mean of the other blocks' rows for GlobalOpinionQA. `peers="all"` opens every other group (leaks through that identity).
 
 Metrics. SubPOP (Suh et al. 2025, arXiv:2502.16761, `subpop.utils.survey_utils.ordinal_emd`): Wasserstein-1 on the
 hand-made OpinionQA ordinal values divided by their range, options with a negative ordinal dropped, NaN when every
-ordinal is equal; averaged over all (question, group) rows (Table 1). GlobalOpinionQA (Durmus et al. 2023,
+ordinal is equal; averaged over all (question, group) rows (Table 1). A prediction with no mass on the ordered options
+(or a NaN) counts as uniform here; SubPOP's code returns NaN, which would drop the row. GlobalOpinionQA (Durmus et al. 2023,
 arXiv:2306.16388, sec. 2.3): similarity 1 - Jensen-Shannon distance over all options incl. DK/Refused (log base 2 here;
 the paper does not state the base). Total variation distance is reported for both. CIs: question-cluster bootstrap.
 For `opinionqa_groups` (wave-out, knn/position baselines on the larger OpinionQA pool) see `opinionqa.py`.
@@ -26,6 +29,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -36,7 +40,9 @@ from ..stats import cluster_bootstrap
 
 TEST_SHARE = 0.5
 SALT = "opinion_dist-v1"
-COLUMNS = ["item", "qkey", "source", "attribute", "group", "question", "options", "ordinal", "dist", "overall"]
+COLUMNS = ["item", "qkey", "source", "attribute", "group", "question", "options", "ordinal", "dist", "overall",
+           "block"]
+PEERS = ("blocks", "all")
 
 
 # ---------------------------------------------------------------------- distances
@@ -131,7 +137,7 @@ def load_subpop_opinionqa(root: str, groups: str = "22") -> pd.DataFrame:
             seen.add(key)
             rows.append({"item": it, "qkey": x.qkey, "source": str(x.qkey).rsplit("_", 1)[-1], "attribute": x.attribute,
                          "group": x.group, "question": x.question, "options": opts, "ordinal": ordn, "dist": _norm(p),
-                         "overall": ov})
+                         "overall": ov, "block": x.attribute})
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
@@ -144,9 +150,9 @@ def _selections(s: str) -> dict:
 
 def load_global_opinionqa(root: str) -> pd.DataFrame:
     """Long table (COLUMNS) from GlobalOpinionQA `global_opinions.csv`; group = country, attribute = 'country',
-    item = '<GAS|WVS>:<sha256(question)[:12]>'. Rows whose shares sum to 0 are dropped (Durmus: n_c|q > 0);
-    the others are renormalised. No ordinal (options are treated as categories); `overall` is filled per row in
-    setting B."""
+    item = '<GAS|WVS>:<sha256(question)[:12]>', block = country without '(Non-national sample)'. Rows whose shares
+    sum to 0 are dropped (Durmus: n_c|q > 0); the others are renormalised. No ordinal (options are treated as
+    categories); `overall` is filled per row in setting B."""
     d = pd.read_csv(need(os.path.join(root, "data", "global_opinions.csv")))
     rows = []
     for x in d.itertuples():
@@ -157,7 +163,8 @@ def load_global_opinionqa(root: str) -> pd.DataFrame:
             if len(p) != len(opts) or not np.isfinite(p).all() or p.sum() <= 0:
                 continue
             rows.append({"item": it, "qkey": it, "source": x.source, "attribute": "country", "group": c,
-                         "question": x.question, "options": opts, "ordinal": None, "dist": _norm(p), "overall": None})
+                         "question": x.question, "options": opts, "ordinal": None, "dist": _norm(p), "overall": None,
+                         "block": re.sub(r"\s*\(Non-national sample\)$", "", c)})
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
@@ -192,30 +199,35 @@ def group_distances(train: pd.DataFrame, ordinal: bool = True) -> tuple[pd.DataF
     return pd.DataFrame(M, keys, keys), pd.DataFrame(N, keys, keys).astype(int)
 
 
-def loo_marginal(test: pd.DataFrame) -> list:
-    """Unweighted mean of the other groups' distributions on the same item (uniform if the row is alone)."""
+def loo_marginal(test: pd.DataFrame, by_block: bool = True) -> list:
+    """Unweighted mean of the other rows' distributions on the same item, rows of the target's block left out if
+    `by_block` (else only the row itself); uniform if nothing is left."""
     out = [None] * len(test)
-    for _, g in test.reset_index(drop=True).groupby("item", sort=False):
-        P = np.stack(g["dist"].to_numpy())
-        n = len(P)
-        L = (P.sum(0) - P) / max(n - 1, 1) if n > 1 else np.full_like(P, 1 / P.shape[1])
+    t = test.reset_index(drop=True)
+    blk = t["block"].to_numpy() if by_block else np.arange(len(t))
+    for _, g in t.groupby("item", sort=False):
+        P, b = np.stack(g["dist"].to_numpy()), blk[g.index]
         for i, r in enumerate(g.index):
-            out[r] = _norm(L[i])
+            m = b != b[i]
+            out[r] = _norm(P[m].mean(0)) if m.any() else np.full(P.shape[1], 1 / P.shape[1])
     return out
 
 
-def nearest_group(data: TaskData, ordinal: bool = True, min_shared: int = 5) -> tuple[list, int]:
-    """Setting B: predict (q, g) with the distribution on q of the group h != g closest to g on train questions
-    (>= min_shared shared questions; ties -> alphabetical). Falls back to the `overall` column. Returns (preds,
-    n_fallback)."""
+def nearest_group(data: TaskData, ordinal: bool = True, min_shared: int = 5, peers: str = "blocks"
+                  ) -> tuple[list, int]:
+    """Setting B: predict (q, g) with the distribution on q of the group h closest to g on train questions
+    (>= min_shared shared questions; ties -> alphabetical), h outside g's block (peers='blocks') or any h != g
+    (peers='all'). Falls back to the `overall` column. Returns (preds, n_fallback)."""
     D, N = group_distances(data.train, ordinal)
     D = D.where(N >= min_shared)
     t = data.test.reset_index(drop=True).assign(_k=lambda d: _gkey(d))
     out, nfb = [None] * len(t), 0
     for _, g in t.groupby("item", sort=False):
         have = dict(zip(g["_k"], g["dist"]))
+        blk = dict(zip(g["_k"], g["block"])) if peers == "blocks" else {k: k for k in have}
         for r, k, ov in zip(g.index, g["_k"], g["overall"]):
-            cand = [h for h in have if h != k and k in D.index and h in D.columns and np.isfinite(D.at[k, h])]
+            cand = [h for h in have if blk[h] != blk[k] and k in D.index and h in D.columns
+                    and np.isfinite(D.at[k, h])]
             if cand:
                 out[r] = have[min(cand, key=lambda h: (D.at[k, h], h))]
             else:
@@ -226,6 +238,11 @@ def nearest_group(data: TaskData, ordinal: bool = True, min_shared: int = 5) -> 
 
 # ---------------------------------------------------------------------- metrics
 def _rows(frame, col, fn) -> np.ndarray:
+    bad = [i for i, (t, p) in enumerate(zip(frame["truth"], frame[col])) if np.size(p) != len(t)]
+    if bad:  # tvd / js would broadcast a short vector silently
+        i = bad[0]
+        raise ValueError(f"{col}: row {i} has {np.size(frame[col].iloc[i])} probabilities, the question has "
+                         f"{len(frame['truth'].iloc[i])} options ({len(bad)} such rows)")
     if "ordinal" in frame.columns and fn is ordinal_wd:
         return np.array([fn(t, p, o) for t, p, o in zip(frame["truth"], frame[col], frame["ordinal"])], float)
     return np.array([fn(t, p) for t, p in zip(frame["truth"], frame[col])], float)
@@ -260,6 +277,8 @@ class OpinionDistTask(BenchTask):
         "setting": '"A" (only train questions known) | "B" (other groups on the question known) (default "B")',
         "test_share": "float in (0, 1), share of questions hashed to test (default 0.5)",
         "min_shared": "int, shared train questions needed to call a group nearest (default 5)",
+        "peers": '"blocks" (setting B reads groups outside the target\'s block) | "all" (every other group; leaky) '
+                 '(default "blocks")',
     }
 
     def _read(self, root: str) -> pd.DataFrame:  # pragma: no cover - abstract
@@ -270,6 +289,9 @@ class OpinionDistTask(BenchTask):
         split = self.options.get("split", "test")
         setting = self.options.get("setting", "B")
         share = float(self.options.get("test_share", TEST_SHARE))
+        peers = self.options.get("peers", "blocks")
+        if peers not in PEERS:
+            raise ValueError("peers must be 'blocks' or 'all'")
         if split not in ("test", "dev"):
             raise ValueError("split must be 'test' or 'dev'")
         if setting not in ("A", "B"):
@@ -289,27 +311,38 @@ class OpinionDistTask(BenchTask):
         test = df[df["item"].isin(te)].reset_index(drop=True)
         if setting == "A":
             test = test.assign(overall=None)
-        else:  # the file's population row if it has one (SubPOP), else the other groups' mean
-            loo = loo_marginal(test)
+        else:  # the file's population row if it has one (SubPOP), else the mean of the readable rows
+            loo = loo_marginal(test, peers == "blocks")
             test = test.assign(overall=[o if o is not None else m for o, m in zip(test["overall"], loo)])
         meta = {"split": f"{split}: sha256 question hash ({SALT}{':dev' if split == 'dev' else ''}), "
                          f"test_share={share}; all groups of a question on one side",
-                "setting": setting, "groups": sorted(set(zip(df["attribute"], df["group"]))),
+                "setting": setting, "peers": peers, "groups": sorted(set(zip(df["attribute"], df["group"]))),
                 "n_items": int(test["item"].nunique()), "n_train_items": int(train["item"].nunique())}
         return TaskData(train=train, test=test, meta=meta)
 
     @staticmethod
-    def others(data: TaskData, item: str, group: str) -> pd.DataFrame:
-        """Test rows a setting-B prediction for (item, group) may read: same item, other groups."""
-        t = data.test
-        return t[(t["item"] == item) & (t["group"] != group)]
+    def others(data: TaskData, item: str, group: str, attribute: str | None = None) -> pd.DataFrame:
+        """Test rows a setting-B prediction for (item, group) may read: same item, outside the target's block
+        (peers='blocks') or every other row (peers='all'). `attribute` is needed when a group label occurs under
+        two attributes (SubPOP 61: 'Other' in RACE and RELIG). Empty in setting A."""
+        t = data.test[data.test["item"] == item]
+        me = (t["group"] == group) & ((t["attribute"] == attribute) if attribute is not None else True)
+        if me.sum() != 1:
+            raise ValueError(f"{item!r}: {int(me.sum())} rows match group {group!r}"
+                             + ("" if attribute is not None else "; pass attribute="))
+        if data.meta.get("setting") != "B":
+            return t.iloc[:0]
+        if data.meta.get("peers", "blocks") == "all":
+            return t[~me]
+        return t[t["block"] != t.loc[me, "block"].iloc[0]]
 
     def baselines(self, data: TaskData) -> dict:
         m = [len(o) for o in data.test["options"]]
         out = {"uniform": [np.full(k, 1 / k) for k in m]}
         if data.meta.get("setting") == "B":
             out["overall"] = [np.asarray(o, float) for o in data.test["overall"]]
-            out["nearest_group"], nfb = nearest_group(data, self.ordinal, int(self.options.get("min_shared", 5)))
+            out["nearest_group"], nfb = nearest_group(data, self.ordinal, int(self.options.get("min_shared", 5)),
+                                                      data.meta.get("peers", "blocks"))
             data.meta["nearest_group_fallbacks"] = nfb
         return out
 
@@ -350,7 +383,8 @@ class SubPOPOpinionQA(OpinionDistTask):
 @register()
 class GlobalOpinionQA(OpinionDistTask):
     """GlobalOpinionQA: 2,556 Pew GAS / WVS questions x countries (138 country labels). Setting B's `overall` is the
-    unweighted mean of the other countries on the question."""
+    unweighted mean of the other countries on the question (a country's '(Non-national sample)' row is its block mate,
+    so neither is read for the other)."""
 
     name = "global_opinionqa"
     data_subdir = "globalopinionqa"
