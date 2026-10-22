@@ -109,7 +109,8 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
     Returns {"dist": {segment: {question_id: [p...]}}, "cells": [...], "invalid": n, "calls": n, "usage",
     "filled": {segment: {question_id: share of the cell's answers replaced by a uniform vector}}, "filled_share",
     "repeats", "sample_dist": [one dist per sample, framings averaged], "samples": long rows (unit = segment,
-    item, sample, p) for `retest_stats(..., kind="distribution")`}. Each cell row carries `sample` and `filled`.
+    item, sample, p, filled = share of that sample's framing answers that are uniform filler) for
+    `retest_stats(..., kind="distribution")`}. Each cell row carries `sample` and `filled`.
     Calls go through `sim.panel.ask_many`: a soft refusal is not cached and is re-asked once with a
     research-forecast note; an empty reply (EmptyResponseError) is re-asked once with a larger max_tokens; a cell
     still without a reply counts as invalid (usage refused_calls / empty_calls / error_calls). `ask_kw` passes
@@ -125,6 +126,7 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
     kw = dict(ask_kw or {})
     s0 = int(kw.pop("sample", 0))
     cells, acc, per, fill, invalid = [], {}, [{} for _ in range(repeats)], {}, 0
+    per_fill = [{} for _ in range(repeats)]          # (segment, item) -> [filled, answers] within one sample
     for i in range(repeats):
         skw = {**kw, "sample": s0 + i} if (repeats > 1 or s0) else kw    # plain call unchanged when k = 1
         resp = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="distribution",
@@ -139,6 +141,8 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
                           "p": None if p is None else p.tolist(), "filled": filled})
             f = fill.setdefault(s, {}).setdefault(q["id"], [0, 0])
             f[0], f[1] = f[0] + int(filled), f[1] + 1
+            g = per_fill[i].setdefault((s, q["id"]), [0, 0])
+            g[0], g[1] = g[0] + int(filled), g[1] + 1
             if filled:
                 p = np.full(k, 1.0 / k)
             if p is not None:
@@ -146,7 +150,8 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
                 per[i].setdefault(s, {}).setdefault(q["id"], []).append(p)
     dist = {s: {qid: np.mean(v, axis=0).tolist() for qid, v in d.items()} for s, d in acc.items()}
     sample_dist = [{s: {qid: np.mean(v, axis=0).tolist() for qid, v in d.items()} for s, d in a.items()} for a in per]
-    samples = [{"unit": s, "segment": s, "item": qid, "sample": i, "p": p}
+    samples = [{"unit": s, "segment": s, "item": qid, "sample": i, "p": p,
+                "filled": per_fill[i][(s, qid)][0] / per_fill[i][(s, qid)][1]}
                for i, sd in enumerate(sample_dist) for s, d in sd.items() for qid, p in d.items()]
     n_fill = sum(f[0] for d in fill.values() for f in d.values())
     return to_jsonable({"method": "segment_distribution", "dist": dist, "cells": cells, "invalid": invalid,
@@ -232,6 +237,9 @@ def persona_distribution(llm, personas, questions, *, setting: str = "a survey o
            "usage": usage.as_dict()}
     if segments:
         from .survey import persona_value
+        clash = sorted(set(segments) & _FRAME_COLS)
+        if clash:
+            raise ValueError(f"segments scheme names {clash} clash with person_distribution_frame columns")
         by = {name: {p.pid: _label(how(p.source if p.source is not None else p) if callable(how)
                                    else persona_value(p, str(how))) for p in ps}
               for name, how in segments.items()}
@@ -248,6 +256,9 @@ def persona_distribution(llm, personas, questions, *, setting: str = "a survey o
                 "refusal_rate": round(usage.refused_calls / first, 4) if first else 0.0, "status": status,
                 "filled_share": (len(refused_ids) + len(unparsed_ids)) / len(pids) if pids else 0.0})
     return to_jsonable(out)
+
+
+_FRAME_COLS = {"pid", "item", "p", "status", "segment", "E_pos"}     # person_distribution_frame base columns
 
 
 def _label(v) -> str:

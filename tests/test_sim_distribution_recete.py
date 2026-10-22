@@ -95,6 +95,19 @@ class TestFilled(unittest.TestCase):
         self.assertAlmostEqual(f.loc[f.unit == "young|q1", "filled_c3"].item(), 1 / 3)
         self.assertAlmostEqual(f.loc[f.unit == "old|q1", "filled_c3"].item(), 0.0)
 
+    def test_sample_rows_flag_filler(self):
+        r = segment_distribution(FakeLLM(self.responder), SEGS, QS, repeats=2)
+        row = [x for x in r["samples"] if x["unit"] == "young" and x["item"] == "q1" and x["sample"] == 1][0]
+        self.assertAlmostEqual(row["filled"], 1 / 3)
+        self.assertEqual([x["filled"] for x in r["samples"] if x["unit"] == "old"], [0.0] * 4)
+        st = retest_stats(r, kind="distribution")
+        self.assertAlmostEqual(st["filled_share"], (2 * 2 / 3) / 8)
+
+    def test_retest_without_kind_says_so(self):
+        r = segment_distribution(FakeLLM(self.responder), SEGS, QS, repeats=2)
+        with self.assertRaisesRegex(ValueError, "kind='distribution'"):
+            retest_stats(r)
+
     def test_skip_fills_nothing(self):
         r = segment_distribution(FakeLLM(self.responder), SEGS, QS, fallback="skip")
         self.assertEqual(r["invalid"], 2)
@@ -145,6 +158,8 @@ class TestPersonaAccounting(unittest.TestCase):
         self.assertIn("filled_pd", f.columns)
         with self.assertRaises(KeyError):
             distribution_frame(r, scheme="income")
+        with self.assertRaisesRegex(ValueError, "clash"):
+            persona_distribution(llm, self.PS, QS, segments={"segment": "age_band"})
         pf = person_distribution_frame(r)
         self.assertEqual(len(pf), 5 * 2)
         self.assertEqual({"pid", "item", "p", "status", "segment", "age", "hh", "E_pos"} - set(pf.columns), set())

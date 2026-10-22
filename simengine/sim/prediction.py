@@ -438,7 +438,8 @@ def retest_stats(samples, *, unit: str = "unit", item: str = "item", sample: str
     result, whose "samples" rows use unit = segment). Each vector is reduced to E[position] (pos: None -> option
     index 0..K-1, a sequence of positions, or {item: positions}) before the statistics above, and the result
     adds `within_cell_w1` (mean pairwise W1 between the samples of a cell, divided by the position range; the
-    `w1_ordinal` scale for equally spaced options) and `within_cell_w1_max`."""
+    `w1_ordinal` scale for equally spaced options) and `within_cell_w1_max`; rows with a `filled` column add
+    `filled_share` (uniform filler counts as an answer here: drop rows with filled > 0 to retest real replies)."""
     if kind not in ("probability", "distribution"):
         raise ValueError(f"kind must be 'probability' or 'distribution', got {kind!r}")
     if isinstance(samples, dict):
@@ -449,8 +450,13 @@ def retest_stats(samples, *, unit: str = "unit", item: str = "item", sample: str
     d = d.drop_duplicates([unit, sample, item])
     extra: dict = {}
     if kind == "distribution":
+        filled = d["filled"] if "filled" in d.columns else None
         d, extra = _reduce_distribution(d, unit, item, sample, p, pos)
         extra["reduced_to"] = "E[position]"
+        if filled is not None:                   # segment_distribution rows: share of the vectors that is filler
+            extra["filled_share"] = float(pd.to_numeric(filled, errors="coerce").mean())
+    elif d[p].map(lambda v: isinstance(v, (list, tuple, np.ndarray))).any():
+        raise ValueError(f"column {p!r} holds probability vectors; pass kind='distribution'")
     w = d.pivot_table(index=[unit, item], columns=sample, values=p)
     K = w.shape[1]
     out = {"n_units": int(w.index.get_level_values(0).nunique()), "n_cells": int(len(w)), "k": int(K),
