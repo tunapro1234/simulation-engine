@@ -193,6 +193,13 @@ Measured at n = 100 [kanit RAPOR §1a]:
 - *Does not work* for LLM personas answering surveys (about 1.0×). The LLM adds nothing on top of the stated
   intent: 1.69× for the statement alone vs 1.70× with the LLM [kanit RECETE 9]. Always put a "X alone" arm
   next to every "LLM + X" arm.
+- *Ours next to the strongest baseline:* `bedel.worth_vs_baseline(frame, "ours", "T2", n=100)` (or a list of
+  `(y, f_ours, f_base)` triples) measures both multipliers on the same labelled draws and the same bootstrap
+  resamples. It returns `multiplier_ours`, `multiplier_baseline`, their CIs and "≈ humans", the paired
+  `difference` with `difference_ci`, and `same_as_baseline` (True when that CI includes 0). `bedel.section(r)`
+  turns it into an extras section ("worth ~X humans; strongest baseline alone ~Y; difference ..."), rendered
+  with `section_markdown` / `section_html`. In rehearsal G2 the card's 1.51× came from the LLM-free stated-intent
+  arm, so the same multiplier held for that arm alone. `olc` and the card's default row are unchanged for now.
 - *Circular priors* are excluded with `circular=`: models trained on the same population's target labels
   would inflate the multiplier (for example "OE GBDT 5×"). A prior that uses input collected after the
   target also leaks. A version using a later survey statement showed 5.02× and was withdrawn [kanit RECETE 4].
@@ -564,10 +571,7 @@ ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipp
   person-weighted (the reported value) and block-equal-weighted. With `aggregate_by=` each group value becomes the
   equal-weighted mean of its per-block means (not computed for `aggregate="sum"`); `balance_col` may vary within the
   aggregate groups (unlike `block_col`). Without `aggregate_by`, per-row metrics (MAE, Brier, 1-TVD, ...) use row
-  weights 1 / n_block and whole-sample metrics (Pearson, Spearman, AUC, ...) the mean of per-block values. The
-  latter is a within-block value: it leaves out what the method gets right between blocks (an arm that tracks the
-  country gap loses, one that ignores it gains), so read a gap there as "how much rides on between-block signal",
-  not as a reweighting of the same number. An
+  weights 1 / n_block and whole-sample metrics (Pearson, Spearman, AUC, ...) the mean of per-block values. An
   explicit `balance_col` writes an "ok" row when no block dominates; the implicit `block_col` check stays silent then.
   ```python
   rep = ev.evaluate(persons, ours="L1_blind", aggregate_by="condName", balance_col="country", split="test")
