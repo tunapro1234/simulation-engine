@@ -277,24 +277,26 @@ interview_frame(res, truth={pid: label})                    # one row per person
 
 - **Buckets.** In each arm every asked persona ends in exactly one bucket. *answered*: a non-blank answer, cut to
   `max_chars` (the cuts are counted in `truncated` and reported in a warning). *refused*: its batch stayed refused
-  after the research-forecast re-ask. *error*: its batch got no reply (an empty reply after the larger-max_tokens
-  re-ask, or another LLM error). *empty*: the batch replied, but this persona's answer is missing, blank or not
-  text. A refusal written inside the answer field ("I'd rather not say") is the persona's answer, not a refusal.
-  When the main arm has no answer and every failure is an error, the first LLM error is raised.
+  after the research-forecast re-ask, or its answer reads like the model declining ("As an AI I can't answer for
+  this person", `looks_like_refusal`; counted in `refused_in_answer`, text kept in
+  `arm_stats[arm]["refused_answers"]`, `answer_refusal=False` keeps it as an answer). *error*: its batch got no
+  reply (an empty reply after the larger-max_tokens re-ask, or another LLM error). *empty*: the batch replied, but
+  this persona's answer is missing, blank or not text. A persona declining in its own voice ("I'd rather not say")
+  is an answer. When the main arm has no answer and every failure is an error, the first LLM error is raised.
 - **Control arms.** `arms` takes any of `persona`, `no_persona`, `persona_swap` (aliases as in `survey`). The
-  control arms follow `control_plan`, so `persona_swap` may be a subsample (`res["controls"]["plan"]`). With one
-  persona the swap arm is skipped with a warning. The defaults roughly double the calls.
-- **Ledger tags.** Calls are tagged `<tag>:<arm>`: `interview:persona`, `interview:no_persona`,
-  `interview:persona_swap` by default. `tag` is the whole stem, so `tag="dev:interview"` gives
-  `dev:interview:persona` (survey's `tag="dev"` gives `dev:survey:persona`). The backend tag is joined in front as
-  for `survey`.
+  control arms follow `control_plan`, so `persona_swap` may run with a larger batch or as a subsample
+  (`res["controls"]["plan"]`; check it before reading the persona - swap gap). With one persona the swap arm is
+  skipped with a warning. The defaults roughly double the calls.
+- **Ledger tags.** As in `survey`: `interview:persona`, `interview:no_persona`, `interview:persona_swap` by
+  default; `tag="dev"` gives `dev:interview:persona` (survey: `dev:survey:persona`). The backend tag is joined in
+  front as for `survey`.
 - **Frame.** `interview_frame` columns: `unit` (`<pid>|<arm>`), `truth`, `pred_text`, `status` (answered | refused
   | empty | error | not_asked; not_asked = outside a subsampled or skipped swap arm), `chars`, `arm`, `segment`,
   `item` (= arm), `group` (= pid), and `stimulus` when the run had per-person stimuli. Scoring free text against a
   truth label (coding, embedding similarity) is left to the caller.
 - `simengine.persona.inject.interview` is a different module (interview-transcript persona injectors).
 - Tests: `tests/test_sim_interview.py` (arms and aliases, control prompts, ledger tags, the four buckets, refusal
-  recovery, truncation, stimuli, events, the frame).
+  recovery, refusals inside the answer, truncation, stimuli, events, the frame).
 
 ## When it works and when it does not (measured)
 
