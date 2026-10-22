@@ -248,6 +248,24 @@ order among persona methods is not significant; several human references are app
 splits. Source: edsl-test: `benchmark/beebench/b01/results.csv`; computation `docs/modules/bench.md`
 ("Economic-game tasks").
 
+## 9. Blind rehearsals of this library (22 Oct 2026)
+
+A fresh agent got a task it had not seen, a 2-hour clock, and hidden test answers. D1 used the earlier team kit; D2-D4
+used only this library (the version named in the row). It sealed its predictions before the truth was opened, and the
+lead agent scored them with its own script (cluster bootstrap, B = 1,000). One run each; the gaps each team logged
+were fixed in the next library version. Source: prova `d<N>/SONUC-MAIN.md`.
+
+| run | task | time used | primary metric, team | vs hidden baseline | LLM role, cost |
+|---|---|---|---|---|---|
+| D1 (kit) | person policy support from survey answers, unseen countries | 63 min | Spearman 0.306 [0.250, 0.342] | B1 0.242; +0.066 [0.026, 0.101] | country prior; $0.15 |
+| D2 (simengine dc2021c) | same task | 37 min | Spearman 0.283 [0.232, 0.320] | +0.042 [0.006, 0.084]; dev CV 0.311 was optimistic | country prior; persona at chance, dropped; $0.32 |
+| D3 (simengine 018b1a2) | new-film cold start, film residual | 19 min | Spearman 0.897 [0.871, 0.917] (ceiling 0.956) | B1 0.567; +0.330 [0.255, 0.411] | the LLM gain was title recognition: ours − LLM-free arm +0.050 on dev, +0.017 [−0.001, 0.035] on test; $0.74 |
+| D4 (simengine 000c581) | weekly demand, 30,490 series × 4 weeks | 20 min | WMAPE 0.347 [0.334, 0.360] (oracle-level 0.253) | hidden LightGBM 0.357; −0.0097 [−0.0120, −0.0076] | event prior, named + blind; failed its pre-registered drop condition, not submitted; $0.0015 |
+
+What carried over: every team built its LLM-free ladder first and sealed before the truth; the D3 and D4 cards say
+"passed on dev", not "passed". What did not: the LLM arm never beat the strongest LLM-free arm on test by a clear
+margin, and D4's bias expectation (< 3%) failed (−4.0%).
+
 ## Measurement facts that shape the defaults
 
 - Haiku/Sonnet 5.5 reject a non-default `temperature` with HTTP 400; the Claude backend never sends one
