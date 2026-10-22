@@ -452,8 +452,9 @@ def _locate(root: str, names: Sequence[str]) -> str:
 class Choices13k(_RiskyChoice):
     """Options: subset='peterson' (default; feedback, unambiguous: 9,831 problems) | 'all' (14,568 rows);
     seed=0, test_size=0.1 (Peterson et al.: random 90/10, 983 test problems), train_frac=1.0 (subsample of train);
-    beast='sd' (default) | 'original' | 'both' | 'none'; beast_sims=5000; beast_protocol='cpc_block' (default; 25-trial
-    CPC simulation, the row's Block, as the CENTaUR choices13k adaptation) | 'five' (5 trials, feedback after each)."""
+    beast='sd' (default) | 'original' | 'both' | 'none'; beast_sims=5000; beast_protocol='five' (default; the
+    choices13k design: 5 trials, feedback after each on Feedback rows) | 'cpc_block' (25-trial CPC simulation, the
+    row's Block, as the CENTaUR choices13k BEAST.sd script)."""
 
     name = "choices13k"
     accepted_options = {
@@ -463,7 +464,7 @@ class Choices13k(_RiskyChoice):
         "train_frac": "float in (0, 1] (default 1.0)",
         "beast": '"sd" | "original" | "both" | "none" (default "sd")',
         "beast_sims": "int (default 5000)",
-        "beast_protocol": '"cpc_block" | "five" (default "cpc_block")',
+        "beast_protocol": '"five" | "cpc_block" (default "five")',
     }
     data_subdir = "choices13k"
     layout = """
@@ -512,7 +513,7 @@ class Choices13k(_RiskyChoice):
     def _beast(self, data: TaskData, version: str) -> np.ndarray:
         t = data.test
         sims = int(self.options.get("beast_sims", 5000))
-        proto = self.options.get("beast_protocol", "cpc_block")
+        proto = self.options.get("beast_protocol", "five")
         da, db, amb, corr = list(t.dist_a), list(t.dist_b), t.Amb.to_numpy(), t.Corr.to_numpy()
         if proto == "cpc_block":
             pr = beast_predict(da, db, amb, corr, version=version, n_sims=sims)
