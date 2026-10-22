@@ -34,6 +34,7 @@ signal.
 | `strategy`, `strategy_frame` | `strategy.py` | Two or more scenarios × segments. Each persona gives a 0-100 intent and a reason per scenario. Output: ranking, win probability, sign test on the top two, and the segment whose profile diverges most. |
 | `segment_distribution`, `distribution_prompt`, `FRAMINGS_NAMED`, `FRAMINGS_HIDDEN` | `distribution.py` | No personas. Makes one call per segment × question × framing ("estimate the percentage of these respondents who would choose each option"), then averages the 3 framings. An invalid reply becomes a uniform vector (or is skipped with `fallback="skip"`); the filled share is recorded per cell. `repeats=k` passes `sample=0..k-1` (independent draws, per-sample dists kept). See "Distribution runners" below. |
 | `effect_forecast`, `effect_frame`, `memorisation_check`, `EffectForecast` | `effect.py` | No personas. Asks for every condition's effect against control in one JSON object per arm × framing × sample (independent draws via `sample=k`), averages per condition, and returns a condition × arm table: hidden arm always, named arm (study named) with `named=`, plus named − hidden as a memorisation probe and refused / unparsed / failed / invalid counts. Import from `simengine.sim.effect`. See "Direct effect forecasts" below. |
+| `experiment`, `experiment_frame`, `exaggeration_ratio`, `correct_effects`, `human_equivalent_n`, `effect_section` | `experiment.py` | Simulated randomized experiment on a persona panel: each persona is assigned one condition (balanced, seeded; `between=False` = every condition, paired) and answers through `survey`. Per condition mean / sd / n / refused / unparsed, per effect Hedges g with SE and CI and the no_persona arm's g. Calibration against human effects: median \|sim\|/\|human\|, sim ~ human slope with a family-clustered CI, leave-one-family-out ratio / affine correction, "worth ~N humans" and a card section. See "Experiments and effect calibration" below. |
 | `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means, one set per `segments=` scheme, and `survey`-style refused / unparsed accounting with ids. `person_distribution_frame` gives persona × question rows. |
 | `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`, numeric `filled_llm_dist`; `scheme=` picks a `persona_distribution` segment scheme), and the normalised ordinal W1 used for the makro numbers. |
 | `robustness`, `robustness_frame` | `robustness.py` | Retest / framing / option-order robustness of `segment_distribution`, scaled by the group signal (W1 between each group and the population). Per condition: mean W1 against the base run, signed order shift, ratio to the signal with question-clustered CIs; summary ratio = worst condition; a card row (`tur="robustness"`). Import from `simengine.sim.robustness`. See "Robustness" below. |
@@ -430,6 +431,60 @@ memorisation_check(res, truth)      # Spearman per arm vs measured effects, name
 - Simulated respondents instead of a direct question: `simengine.research.hypotheses.forecast_experiment` (Hewitt
   et al. 2024 protocol: profiles × prompt bank per condition, effect = condition mean − control mean).
 
+## Experiments and effect calibration (`experiment.py`)
+
+A two-condition (or k-condition) between-subject experiment on a persona panel, and the step that makes its
+effect sizes usable: how much larger they are than human effects, a correction, and how many human respondents
+the corrected simulation is worth (G9 rehearsal; it was hand-written there as one `survey` per condition, Cohen d
+by hand and a separate ratio script). `effect_forecast` asks the model for the effect directly; this measures it
+from simulated respondents.
+
+```python
+from simengine import sim
+
+conds = {"control": "No message.", "norms": "Most people in your country support ...", "fear": "..."}
+res = sim.experiment(llm, personas, conds, "How much do you support the policy?", scale=(0, 100), seed=1)
+res["conditions"]["norms"]       # mean, sd, n, assigned, refused, unparsed, no_persona {mean, sd, n}
+res["effects"]["norms"]          # diff, g, d, se, ci, n_treat, n_control, no_persona_g, no_persona_diff
+frame = sim.experiment_frame({"study1": res, "study2": res2},
+                             human={"study1": {"norms": {"g": 0.21, "se": 0.06}, "fear": -0.05}})
+fit = sim.exaggeration_ratio(frame.pred_g, frame.truth, family=frame.group)
+corrected = sim.correct_effects(frame.pred_g, human_g=frame.truth, family=frame.group)   # LOO
+sim.human_equivalent_n(corrected, frame.truth, frame.truth_se, family=frame.group)
+section = sim.effect_section(frame.pred_g, frame.truth, frame.truth_se, family=frame.group)
+# simengine.evidence.section_markdown(section) -> the card's "exaggeration / worth ~N humans" block
+```
+
+- Assignment: a seeded permutation dealt round-robin (`assign_conditions`), so arm sizes differ by at most one.
+  Each persona's prompt shows only its own condition text (as its `survey` stimulus); `control=` defaults to
+  the first condition. The question is numeric with `scale=(lo, hi)`, else a 1-5 Likert (SSR mean when
+  `ask_kw={"ssr": ..., "free_text": True}`; `free_text` defaults to False here). `ask_kw` passes any other
+  `survey` option (batch, parallel, tag, refusal_retry, ...).
+- `samples=k` re-asks with the personas reshuffled, so batches (prompts, cache keys) differ, and averages each
+  persona's answers. With `batch=1` the prompts repeat and the backend's cache returns the same answer.
+- The no_persona arm sees the same condition texts. Its g is what a generic respondent gives; a warning fires
+  when it is at least the persona arm's.
+- Refused and unparsed personas are counted per condition and left out of the means, never imputed.
+- `exaggeration_ratio`: median \|sim\|/\|human\| (exact-zero human effects left out of the ratio) with a
+  family-clustered percentile CI, `ratio_sum`, OLS slope sim ~ human (1 = right size) and the through-origin
+  slope with clustered CIs, Pearson r, sign agreement, verdict `exaggerates` / `understates` / `about right` /
+  `too few` (< 3 effects), and the LOO block: the leave-one-family-out ratio scale and MAE raw vs ratio- vs
+  affine-corrected. With a single family the LOO leaves out single effects.
+- `correct_effects(sim, human_g=..., family=...)` corrects every effect with a fit from the other families
+  only, so an effect is never corrected with its own human value. `correct_effects(new_sim, fit)` applies a
+  measured ratio (`method="ratio"`, sim / ratio) or affine fit (`method="affine"`, human ~ a + b sim) to new
+  effects.
+- `human_equivalent_n`: err = mean((sim − human)²) − mean(human_se²), then N = (4 + mean(human²)/2) / err, the
+  total two-arm human sample with the same sampling variance (var d ≈ 4/N). It uses a cluster-bootstrap CI.
+  When err ≤ 0 (the simulation is within the human noise) it returns `n: None` with a note, not infinity. An
+  open upper CI end is `None`.
+- `effect_section` puts the raw and LOO-corrected N next to a baseline that predicts every effect as the mean
+  of the other human effects. When the simulation is not worth more humans than that baseline, a note says the
+  N reflects small effects, not information from the model (the G2 lesson: show the multiplier next to the
+  strongest baseline).
+- Measured on FakeLLM only (tests: a panel whose effects are 2× the truth gives ratio ≈ 1.9, slope ≈ 2.0, and
+  LOO MAE 0.39 → 0.08). No real-model number yet.
+
 ## Schema-constrained answers (`constrained.py`)
 
 Ported from replicant's oTree bot (`src/replicant/otree/bot.py`, pyreplicant 0.3.0, MIT; credit to the replicant
@@ -578,7 +633,7 @@ robustness_frame(rb)                           # segment x question x condition,
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
 profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
 `test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
-`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers) (123 tests, offline, FakeLLM, under 1 s):
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers), `test_sim_experiment.py` (Hedges / paired g, balanced assignment, between / within runs, the 2× panel: ratio recovered, LOO correction lowers MAE, LOO never uses the own value, human-equivalent N and its noise floor, card section) (offline, FakeLLM, a few seconds):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
