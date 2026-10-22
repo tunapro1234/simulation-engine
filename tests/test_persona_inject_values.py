@@ -1,6 +1,8 @@
 import json
 import unittest
 
+import numpy as np
+
 import simengine.persona.inject as pi
 from simengine.llm.fake import FakeLLM
 from simengine.persona.inject import values as V
@@ -42,26 +44,41 @@ class TestRegistry(unittest.TestCase):
     def test_bad_params(self):
         for name, kw in [("schwartz_scores", {"order": "alpha"}), ("schwartz_scores", {"scale": (6, 1)}),
                          ("schwartz_anchor", {"k": 0}), ("moral_foundations", {"style": "vibes"}),
-                         ("cultural_prompting", {"variant": 10})]:
+                         ("cultural_prompting", {"variant": 10}), ("cultural_prompting", {"variant": True})]:
             with self.assertRaises(ValueError, msg=(name, kw)):
                 pi.get_injector(name, **kw)
 
 
 class TestRender(unittest.TestCase):
     def test_schwartz_scores_template(self):
-        p = pi.get_injector("schwartz_scores")(person(), Q)
-        self.assertTrue(p.system.startswith("Let's roleplay."))
-        self.assertIn("between 1 and 6", p.system)
-        self.assertIn("- Self-Direction: 4.5", p.system)
-        self.assertIn("values independent thought", p.system)
-        self.assertIn("Please choose only one option", p.system)
+        # Kang et al. Table 23 (Long), verbatim; paper order (alphabetical) by default
+        p = pi.get_injector("schwartz_scores")({"id": "a", "schwartz": {"power": 2, "benevolence": 5}}, Q)
+        self.assertEqual(p.system, (
+            "Let's roleplay.\n\n"
+            "I will describe a person who have values between 1 and 6 for each value.\n"
+            "1 means the value is not important to him at all and 6 means the value is very much important to him."
+            "\n\nValue Definition:\n"
+            "- Benevolence: values preserving and enhancing the welfare of those with whom one is in frequent "
+            "personal contact (the 'in-group')\n"
+            "- Power: values social status and prestige, control or dominance over people and resources\n\n"
+            "Value Score:\n- Benevolence: 5\n- Power: 2\n"
+            "As this person, please answer the following question.\n"
+            "You just have to choose the answer, you don't have to explain it.\n"
+            "Please choose only one option, even if you're not sure."))
+        self.assertTrue(p.user.startswith(Q["text"]))
         self.assertIn('"answer"', p.user)
-        # paper order (alphabetical) by default, rank on request
-        self.assertLess(p.system.index("- Benevolence: 5"), p.system.index("- Power: 2"))
+        long = pi.get_injector("schwartz_scores")(person(), Q).system
+        self.assertIn("- Self-direction: values independent thought and action - choosing", long)
+        self.assertIn("- Self-Direction: 4.5", long)
+        # Table 22 (Short): no scale sentence, no definitions; rank order on request; numeric question
         short = pi.get_injector("schwartz_scores", definitions=False, order="rank")(person(1), QN)
-        self.assertNotIn("definitions", short.system)
-        self.assertNotIn("choose only one option", short.system)       # numeric question
+        self.assertEqual(short.system, (
+            "Let's roleplay.\n\nValue Score:\n- Power: 5.5\n- Benevolence: 5\n- Self-Direction: 4.5\n"
+            "As this person, please answer the following question.\n"
+            "You just have to choose the answer, you don't have to explain it."))
         self.assertEqual(list(short.meta["values"]), ["power", "benevolence", "self-direction"])
+        wide = pi.get_injector("schwartz_scores", scale=(-3, 3))({"id": "a", "schwartz": {"power": 0}}, Q)
+        self.assertIn("between -3 and 3 for each value.\n-3 means", wide.system)
 
     def test_schwartz_anchor(self):
         p = pi.get_injector("schwartz_anchor")(person(), Q)
@@ -74,6 +91,8 @@ class TestRender(unittest.TestCase):
         self.assertIn(" and following cultural family or religious practices.", two.system)   # paper text wins
         with self.assertRaises(ValueError):
             pi.get_injector("schwartz_anchor")({"id": "a", "schwartz": "kindness"}, Q)
+        rep = pi.get_injector("schwartz_anchor", k=2)({"id": "a", "schwartz": ["hedonism", "Hedonism"]}, Q)
+        self.assertEqual(rep.meta["anchors"], ["hedonism"])             # a repeated code is shown once
 
     def test_moral_foundations(self):
         p = pi.get_injector("moral_foundations")(person(), Q)
@@ -133,8 +152,28 @@ class TestEdgeCases(unittest.TestCase):
                 inj({"id": "a", "schwartz": bad}, Q)
         with self.assertRaises(ValueError):
             inj({"id": "a", "schwartz": [1, 2]}, Q)
+        for bad in ({"power": float("inf")}, {"power": 3, "POWER": 4}):
+            with self.assertRaises(ValueError, msg=bad):
+                inj({"id": "a", "schwartz": bad}, Q)
+        with self.assertRaises(ValueError):                              # alias and canonical key both given
+            pi.get_injector("moral_foundations")({"id": "a", "mfq": {"purity": 2, "sanctity": 3}}, Q)
+        with self.assertRaises(ValueError):
+            pi.get_injector("cultural_prompting", map=True)({"id": "a", "country": "X",
+                                                            "ivs_map": {"x": float("-inf")}}, Q)
         ok = pi.get_injector("schwartz_scores", scale=(-3, 3))({"id": "a", "schwartz": {"power": -1.25}}, Q)
         self.assertIn("- Power: -1.25", ok.system)
+
+    def test_numpy_scores_and_rounding(self):
+        # scores loaded with numpy/pandas are numbers too
+        p = pi.get_injector("schwartz_scores")({"id": "a", "schwartz": {"power": np.int64(3),
+                                                                          "hedonism": np.float32(2.5)}}, Q)
+        self.assertIn("- Power: 3", p.system)
+        self.assertIn("- Hedonism: 2.5", p.system)
+        self.assertEqual([V._fmt(x) for x in (4.999, 0.001, -0.001, 60.0, 1.25, -1.25, 0.5)],
+                         ["5", "0", "0", "60", "1.25", "-1.25", "0.5"])
+        r = pi.get_injector("hofstede_country", scores=True)({"id": "a", "country": "X",
+                                                              "hofstede": {"pdi": 59.999}}, Q)
+        self.assertIn("- Power distance: 60 (low:", r.system)
 
     def test_deterministic_and_seeded(self):
         for name, kw in ALL:
