@@ -93,6 +93,67 @@ not match theirs draw for draw; each agent draws `kappa` (max) mental samples an
 - Tests (`tests/test_bench_risky_choice.py`) use synthetic files only; one real-data test (BEAST.sd on the CPC18
   competition set within 0.001 of the published 0.00708) runs when `$SIMENGINE_DATA` is set.
 
+## Measured numbers
+
+Command (from the repository root; one run each, 22 Oct 2026, 5,000 BEAST agents per problem):
+
+```bash
+SIMENGINE_DATA=<catalogue> PYTHONPATH=. python -W ignore -c "
+from simengine.bench.tasks import risky_choice as R
+t = R.CPC18()                      # or R.CPC18(split='cpc15'), R.CPC18(subset='risk_nofb'), R.Choices13k(seed=0, ...)
+print(t.score_all(t.run(), B=1000).pivot_table(index='method', columns='metric', values='value'))"
+```
+
+CPC18 track I, 60 competition tasks x 5 blocks (wall 11 s, 0.6 GB):
+
+| method | MSE | 95% CI | completeness | pref_acc | published (100 x MSE, Plonsky et al. arXiv:1904.06866) |
+|---|---|---|---|---|---|
+| beast_sd | 0.00703 | [0.00539, 0.00900] | 0.903 | 0.888 | BEAST.sd 0.708, P(agree) 0.883 (Table S1) |
+| beast | 0.00790 | [0.00539, 0.01108] | 0.889 | 0.908 | BEAST 0.79 ("test MSE 0.0079", SI), completeness 88.9% (main text) |
+| pt | 0.02334 | [0.01721, 0.03061] | 0.643 | 0.768 | |
+| cpt | 0.02414 | [0.01768, 0.03179] | 0.630 | 0.752 | |
+| ev_logit | 0.03137 | [0.02237, 0.04157] | 0.515 | 0.707 | |
+| gbdt_objective | 0.05025 | [0.03108, 0.07060] | 0.215 | 0.652 | |
+| train_mean | 0.06340 | | 0.005 | 0.668 | |
+| half | 0.06373 | | 0 | 0.5 | |
+| ev_max | 0.16142 | | -1.556 | 0.707 | |
+
+For scale (literature, not run here): CPC18 winner BEAST-GB 0.569 (submitted; 0.556 in the organisers' replication),
+Psychological Forest baseline 0.681 (Table S1); Bourgin et al. 2019 (ICML, Table 1) list BEAST18 0.70.
+
+CPC15 split (`split="cpc15"`, 60 CPC15 competition tasks): beast 0.00988 [0.00619, 0.01427] (published: BEAST15
+100 x MSE 0.99, CPC15 winner 0.88; Bourgin et al. 2019 Table 1), beast_sd 0.00676, pt 0.02673, cpt 0.02806, ev_logit
+0.03014, gbdt_objective 0.06860, half 0.07618.
+
+CPC18 risk without feedback (`subset="risk_nofb"`, 48 test tasks, block 1): beast 0.01008, beast_sd 0.01008, pt
+0.01894, cpt 0.01955, gbdt_objective 0.03057, ev_logit 0.03227, half 0.05095. Published (CPC18 SI, same subset):
+untrained BEAST 0.0100, stochastic CPT 0.0198 (fitted alpha 0.91, gamma 0.84, delta 0.83, lambda 1.14, mu 0.25;
+ours: 0.92, 0.84, 0.81, 1.15, 0.24).
+
+choices13k, seed 0, 8,848 train / 983 test problems (default options: wall 43 s, 0.28 GB):
+
+| method | MSE | 95% CI | completeness | pref_acc |
+|---|---|---|---|---|
+| gbdt_objective | 0.01224 | [0.01102, 0.01354] | 0.871 | 0.824 |
+| cpt | 0.01968 | [0.01807, 0.02142] | 0.695 | 0.829 |
+| pt | 0.02005 | [0.01842, 0.02188] | 0.686 | 0.818 |
+| beast_sd (`five`, default) | 0.02130 | [0.01950, 0.02320] | 0.656 | 0.801 |
+| beast (`five`) | 0.02113 | [0.01932, 0.02312] | 0.661 | 0.814 |
+| beast_sd (`cpc_block`) | 0.02259 | [0.02068, 0.02457] | 0.626 | 0.788 |
+| beast (`cpc_block`) | 0.02334 | [0.02124, 0.02537] | 0.608 | 0.803 |
+| ev_logit | 0.02517 | [0.02322, 0.02720] | 0.565 | 0.764 |
+| half | 0.04905 | [0.04570, 0.05275] | 0 | 0.5 |
+| train_mean | 0.04907 | | -0.000 | 0.509 |
+| ev_max | 0.15227 | | -2.442 | 0.765 |
+
+Seeds 1-4 (`beast="none"`): gbdt_objective 0.01235 / 0.01222 / 0.01280 / 0.01291, cpt 0.02046 / 0.02127 / 0.02098 /
+0.02115, pt 0.02034 / 0.02211 / 0.02144 / 0.02151; over seeds 0-4 the mean is 0.0125 (gbdt_objective) and 0.0207
+(cpt). Literature for scale (90/10 splits averaged over 50 runs, not run here): Peterson et al. Fig. 2B classic PT
+models about 0.021-0.022 at full data (read off the figure); context-dependent network 0.0113 and BEAST-GB 0.00843
+(Plonsky et al.); original BEAST on choices13k 0.0216 (Plonsky et al. SI) and 65.7% completeness (main text), protocol and evaluation
+set not stated; Bourgin et al. 2019 Table 2
+(80/20 splits): random forest 0.0141, MLP 0.0103, sparse MLP 0.0091.
+
 ## Limitations
 
 - choices13k has 5 trials per problem with feedback after each, not the CPC 25-trial design. `five` (default)
