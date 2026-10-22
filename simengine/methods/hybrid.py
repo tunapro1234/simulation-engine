@@ -9,6 +9,7 @@ shrinkage/stack tuned on dev is what keeps it from hurting. See docs/modules/met
 """
 from __future__ import annotations
 
+import warnings
 from typing import Callable, Sequence
 
 import numpy as np
@@ -45,6 +46,15 @@ class ShrunkDeviation:
     i.e. it is shrinkage, not LLM knowledge (uretim/makro/llmabm/RAPOR.md 2a'). OpinionQA groups: transferring
     neighbour deviations at alpha=1 was significantly worse than copying Overall (+0.0014 [+0.0006, +0.0021] WD;
     uretim/dongu/GUNLUK.md). Tune alpha on dev; expect alpha near 0 unless the LLM has item-specific signal.
+
+    Distribution recipe "population + beta * (LLM segment - LLM population)" (calibrate the LLM's segment deviation on
+    history): ``base`` = the known overall answer distribution (K,), ``llm`` = the LLM's per-segment distributions
+    (n, K), ``ref`` = the LLM's own overall distribution (K,), ``y`` = the true segment distributions of the train
+    cells; ``alpha_`` is beta. One call each for fit and predict::
+
+        sd = ShrunkDeviation(distribution=True, alphas=np.linspace(0, 1.5, 16))   # beta > 1 allowed if wanted
+        sd.fit(base=pop, llm=llm_seg[train], y=true_seg[train], ref=llm_pop)
+        pred = sd.predict(base=pop, llm=llm_seg[test], ref=llm_pop)                # (n_test, K), rows sum to 1
     """
 
     def __init__(self, alphas: Sequence[float] = ALPHAS, loss: Callable | None = None, distribution: bool = False):
@@ -181,19 +191,59 @@ class DevStack:
         return _fit_apply(self.kind, "stack", self.Z_, self.y_, _z(self.kind, test_preds), self.classes_)
 
 
-class BinaryCalibrator:
-    """Platt scaling, or isotonic when the dev set has >= 1000 rows (intent kit `kalibre`)."""
+RATIO_MIN_DEV = 200     # below this a Platt slope is noisy enough to invert the ranking (G4 rehearsal: 6.6% at n=50)
 
-    def __init__(self, method: str = "auto"):
-        self.method = method
+
+class BinaryCalibrator:
+    """Recalibrate binary probabilities on dev (intent kit `kalibre`).
+
+    ``method``: ``"platt"`` (logistic on the logit), ``"isotonic"``, ``"ratio"`` (multiply by base_rate / mean(p),
+    clipped to [0, 1]: fixes the level only, ranking unchanged) or ``"auto"`` (isotonic from 1000 dev rows, else
+    Platt). With ``monotone=True`` (default) a fitted Platt slope <= 0, which would invert the ranking, falls back to
+    the ratio method with a warning (``fallback_`` says why). Platt on fewer than 200 dev rows warns either way.
+
+    Usage::
+
+        cal = BinaryCalibrator().fit(p_dev, y_dev)          # or method="ratio" for a funnel/rate question
+        p_test = cal.predict(p_test_raw)
+
+    Measured: G4 rehearsal, n=50 Platt calibrations: 6.6% of 500 draws had slope <= 0 and turned test AUC 0.624
+    into 0.376; the monotone guard and the ratio method remove that failure."""
+
+    METHODS = ("auto", "platt", "isotonic", "ratio")
+
+    def __init__(self, method: str = "auto", monotone: bool = True):
+        if method not in self.METHODS:
+            raise ValueError(f"method must be one of {self.METHODS}, got {method!r}")
+        self.method, self.monotone = method, monotone
 
     def fit(self, p_dev, y_dev):
-        y = np.asarray(y_dev).astype(int)
+        y, p = np.asarray(y_dev).astype(int), np.asarray(p_dev, float)
         self.method_ = ("isotonic" if len(y) >= 1000 else "platt") if self.method == "auto" else self.method
-        self.Z_ = np.asarray(p_dev, float)[:, None] if self.method_ == "isotonic" else _z("binary", [p_dev])
+        self.fallback_ = None
+        self.base_rate_ = float(y.mean()) if len(y) else float("nan")
+        m = float(p.mean()) if len(p) else 0.0
+        self.scale_ = self.base_rate_ / m if m > 0 else 1.0
+        self.Z_ = p[:, None] if self.method_ in ("isotonic", "ratio") else _z("binary", [p])
         self.y_ = y
+        if self.method_ == "platt":
+            if len(y) < RATIO_MIN_DEV:
+                warnings.warn(f"BinaryCalibrator: Platt on n_dev={len(y)} < {RATIO_MIN_DEV}; the slope is noisy and "
+                              "can invert the ranking (consider method='ratio')", stacklevel=2)
+            self.model_ = _new("binary", "stack").fit(self.Z_, y)
+            self.slope_, self.intercept_ = float(self.model_.coef_[0, 0]), float(self.model_.intercept_[0])
+            if self.monotone and self.slope_ <= 0:
+                self.fallback_ = f"platt slope {self.slope_:.3g} <= 0"
+                warnings.warn(f"BinaryCalibrator: {self.fallback_} would invert the ranking; using method='ratio'",
+                              stacklevel=2)
+                self.method_ = "ratio"
         return self
 
     def predict(self, p):
-        Zb = np.asarray(p, float)[:, None] if self.method_ == "isotonic" else _z("binary", [p])
-        return _fit_apply("binary", "isotonic" if self.method_ == "isotonic" else "stack", self.Z_, self.y_, Zb)
+        p = np.asarray(p, float)
+        if self.method_ == "ratio":
+            return np.clip(p * self.scale_, 0.0, 1.0)
+        if self.method_ == "isotonic":
+            return _fit_apply("binary", "isotonic", self.Z_, self.y_, p[:, None])
+        P = self.model_.predict_proba(_z("binary", [p]))
+        return P[:, list(self.model_.classes_).index(1)]
