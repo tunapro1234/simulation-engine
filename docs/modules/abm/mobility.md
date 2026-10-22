@@ -112,7 +112,80 @@ an unrounded mean. Measured 22 Oct 2026 on the local Zenodo copy (uid < 10,000, 
 
 ## Measured numbers
 
-Pending: run of the baselines on a 2,000-user subsample.
+These are 2,000 users drawn with `default_rng(0)`, history d 0-59, test d 60-74. The pool `all` has 1,766,172
+history and 464,032 test rows; `humob_test` has 1,674,256 and 436,511. Values are the mean over users with a 95%
+user-bootstrap CI (B = 1000). GEO-BLEU is higher-better and DTW (km) lower-better. All are from one run on 22 Oct 2026.
+Loading took 74-100 s and all baselines about 30 s. Scoring both variants took about 50 s. Peak RSS was 6.2 GB
+(the full CSV is read before sampling).
+
+Command (from the repo root, data copy under `<data-root>/yjmob100k/`):
+
+```python
+from simengine.bench.tasks.yjmob import YJMob
+import simengine.abm.mobility as M
+task = YJMob(users=2000, seed=0)                      # pool="humob_test" for the second table
+data = task.load("<data-root>"); preds = task.baselines(data)
+q = data.test[["uid", "d", "t"]]
+preds["slot_mode_w2"] = M.slot_mode(data.train, q, window=2, fallback=data.meta["global_slot_table"])
+preds["epr_powerlaw"] = M.EPRMobility(seed=0, waiting="powerlaw").fit(data.train).predict(q)
+frame = task.frame(data, preds)
+for v in ("humob23", "humob25"):
+    task.options["variant"] = v; print(task.score_all(frame))
+```
+
+### Pool `all`
+
+| method | GEO-BLEU humob23 | DTW humob23 | GEO-BLEU humob25 | DTW humob25 | exact cell |
+|---|---|---|---|---|---|
+| slot_mode | **0.298** [0.290, 0.305] | 51.6 [48.8, 54.7] | **0.187** [0.180, 0.194] | 77.1 [73.7, 80.6] | 0.260 |
+| slot_mode, window 2 | 0.279 [0.272, 0.286] | **39.6** [37.2, 42.2] | 0.176 [0.170, 0.182] | **76.7** [73.4, 80.0] | **0.268** |
+| markov_argmax | 0.208 [0.201, 0.216] | 44.0 [41.1, 46.8] | 0.133 [0.127, 0.139] | 115.7 [110.6, 120.6] | 0.203 |
+| markov_sample | 0.225 [0.218, 0.232] | 69.1 [66.2, 71.9] | 0.128 [0.122, 0.134] | 107.3 [103.3, 111.4] | 0.124 |
+| epr (empirical waiting) | 0.136 [0.131, 0.141] | 97.9 [94.6, 101.2] | 0.055 [0.052, 0.059] | 119.7 [115.8, 123.4] | 0.075 |
+| epr (power-law waiting) | 0.137 [0.132, 0.142] | 86.7 [83.8, 89.6] | 0.066 [0.063, 0.069] | 121.4 [117.7, 125.1] | 0.075 |
+| global_slot_mode | 0.004 [0.003, 0.005] | 346.0 [333.8, 358.3] | 0.002 | 406.4 | 0.003 |
+
+EPR seeds 0 / 1 / 2 (empirical waiting): GEO-BLEU 0.1361 / 0.1358 / 0.1362 and DTW 97.9 / 97.8 / 97.8 (humob23).
+The spread across seeds is far smaller than the gap to any baseline.
+
+### Pool `humob_test` (uid >= 80,000), humob23
+
+| method | GEO-BLEU | DTW | exact cell |
+|---|---|---|---|
+| slot_mode | **0.316** [0.307, 0.323] | 45.9 [43.4, 48.6] | 0.271 |
+| slot_mode, window 2 | 0.298 [0.290, 0.305] | **34.5** [32.5, 36.8] | **0.280** |
+| markov_argmax | 0.228 [0.221, 0.236] | 38.3 [35.8, 41.1] | 0.218 |
+| markov_sample | 0.242 [0.234, 0.249] | 60.4 [58.0, 63.1] | 0.136 |
+| epr (empirical) | 0.147 [0.141, 0.152] | 87.1 [84.4, 89.8] | 0.081 |
+| epr (power-law) | 0.149 [0.144, 0.154] | 77.6 [75.1, 80.1] | 0.083 |
+| global_slot_mode | 0.005 | 327.7 | 0.004 |
+
+### Published HuMob 2023 task 1 numbers (not measured here)
+
+| source | GEO-BLEU | DTW |
+|---|---|---|
+| GeoFormer, final assessment (Solatorio 2023, arXiv:2311.05092, Table 1; a top-3 team) | 0.3160 | 26.22 |
+| GeoFormer, validation / test splits (same table) | 0.3047 / 0.3114 | 29.70 / 29.80 |
+| Midterm leaderboard #1, MOBB (connection.mit.edu/humob-challenge-2023, "Midterm Evaluation Results") | 0.3212 | 40.74 |
+| Organiser centre-point baseline (geobleu README, commit cdaa364) | 0.04195 | 62.67 |
+
+The final 2023 ranking is published only as an image, so no final winner score is quoted.
+
+### Reading
+
+- The per-user slot mode is the bar to clear. On the HuMob test pool it scores 0.316 GEO-BLEU, level with the
+  0.316 that a top-3 transformer (GeoFormer) reported for its final submission. Its DTW is much worse (45.9 vs
+  26.2). A window of 2 slots trades GEO-BLEU (-0.02) for DTW (-11 km).
+- The comparison is not like for like. We score 2,000 sampled users and the challenge scored all 20,000. The
+  challenge also allowed training on the other 80,000 users' days 61-75, which a model like GeoFormer can use and
+  our baselines do not. Read it as "the simple baseline is in the same range", not as a ranking.
+- First-order Markov loses GEO-BLEU to the slot mode. Our reading, not measured separately: the chain has no time of
+  day, and greedy decoding tends to settle on a self-loop, which keeps DTW low and GEO-BLEU lower.
+- EPR as a trajectory predictor is far behind every per-user baseline (about half the slot-mode GEO-BLEU, twice
+  the DTW). By construction (Song et al.) it targets the statistics of mobility, such as S(t) growth and Zipf
+  visit frequencies, not the time of day; those statistics were not checked here. It is here as
+  a simulator for scenario and synthetic-population work and as an honest comparison, not as a forecaster.
+  Power-law waiting helps its DTW (-11 km) and leaves GEO-BLEU unchanged.
 
 ## Limitations
 
