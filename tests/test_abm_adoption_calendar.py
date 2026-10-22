@@ -177,6 +177,35 @@ class TestCalendarBacktest(unittest.TestCase):
         self.assertEqual(ev.attrs["n_ineligible"], 1)
 
 
+class TestBankWindow(unittest.TestCase):
+    """Calendar origins reach cutoffs decades after the crossing; past R_MAX the grid index used to clip silently
+    (flat forecast at the grid-end value, below the last observation)."""
+
+    def test_old_series_past_window_is_ineligible(self):
+        t = np.arange(1940, 2002, dtype=float)
+        rows = []
+        for i, start in enumerate((1945, 1984, 1985, 1986)):
+            y = A.bass_curve(t, 90, 0.005, 0.15 if i == 0 else 0.4, start)
+            rows += [dict(series=f"s{i}", t=a, y=float(b)) for a, b in zip(t, y)]
+        df = pd.DataFrame(rows)
+        hist = df[df.t <= 1996]
+        m = A.AdoptionABC(**SMALL)
+        self.assertFalse(m.eligible(hist, "s0", 1996))
+        with self.assertRaises(AD.IneligibleSeries) as cm:
+            m.fit(hist, "s0", 1996)
+        self.assertIn("bank covers", str(cm.exception))
+        self.assertTrue(m.eligible(hist, "s1", 1996))
+        fit = m.fit(df[df.t <= 1990], "s1", 1990)                        # fit fine, forecast past the window
+        with self.assertRaises(AD.IneligibleSeries):
+            m.predict(fit, [40])
+        a = A.AdoptionABCAnalogy(**SMALL)                                # old donor truncated, not clipped
+        self.assertTrue(np.isfinite(a.predict(a.fit(hist, "s1", 1996), [1, 5])["y_pred"]).all())
+        ev = A.adoption_backtest(df, {"abm": m, "naive": A.CurveBaseline("naive")}, calendar_origins=(1996,),
+                                 horizon=5, on_ineligible="skip")
+        self.assertEqual(ev.attrs["ineligible_series"], ["s0"])
+        self.assertNotIn("s0", set(ev.series))
+
+
 class TestFitMany(unittest.TestCase):
     def test_skip_and_raise(self):
         df = panel()

@@ -16,8 +16,9 @@ Alignment: each simulation's crossing time tau1 of the alignment level (`thresho
 is found. In the data, t0 = first observed year with y >= that level; the true crossing lies in (t0 - d, t0],
 d = gap to the previous observation (at most 10 years). Calendar year t maps to simulation time tau1 + (t - t0) +
 delta, with delta on a 0.25-year grid in [0, d). A series that has not reached the level by the cutoff cannot be
-aligned: `fit` raises :class:`IneligibleSeries` (a ValueError). `threshold=0.001` keeps more early series in, but
-only the 1% default was measured.
+aligned: `fit` raises :class:`IneligibleSeries` (a ValueError). So does a cutoff or forecast more than R_MAX = 32
+years after the crossing (bank window; calendar origins on old series). `threshold=0.001` keeps more early series
+in, but only the 1% default was measured.
 
 Backtests: `adoption_backtest` cuts at t0(s) + k (relative, research task M1) or at fixed calendar years
 (`calendar_origins=[1991, ..., 1996]`, one origin for every series). `on_ineligible="skip"` drops the
@@ -62,10 +63,19 @@ ON_INELIGIBLE = ("raise", "skip", "nan")
 class IneligibleSeries(ValueError):
     """The series has not reached the alignment level by the cutoff (ABC methods cannot align it)."""
 
-    def __init__(self, series, cutoff, threshold):
+    def __init__(self, series, cutoff, threshold, reason=None):
         self.series, self.cutoff, self.threshold = series, cutoff, threshold
-        super().__init__(f"series {series!r} has not reached {100 * threshold:g}% by cutoff {cutoff}; cannot align "
-                         f"(lower threshold=, or on_ineligible='skip' in adoption_backtest / fit_many)")
+        super().__init__(reason or (f"series {series!r} has not reached {100 * threshold:g}% by cutoff {cutoff}; "
+                                    f"cannot align (lower threshold=, or on_ineligible='skip' in adoption_backtest / "
+                                    f"fit_many)"))
+
+
+def _past_window(series, cutoff, threshold, last_rel):
+    """Bank curves end R_MAX years after the alignment crossing; past that _grid_idx would clip silently (a flat
+    forecast at the grid-end value). Reachable with calendar origins on series that crossed decades earlier."""
+    return IneligibleSeries(series, cutoff, threshold,
+                            f"series {series!r} at cutoff {cutoff}: needs the curve {last_rel:g} years after its "
+                            f"{100 * threshold:g}% crossing, the bank covers {R_MAX:g}; cannot align")
 
 
 def _norm(df: pd.DataFrame) -> pd.DataFrame:
@@ -248,10 +258,13 @@ class AdoptionABC:
                                cache_dir=self.cache_dir, align=self.level)
 
     def eligible(self, history, series, cutoff) -> bool:
-        """True if the series reached the alignment level by the cutoff (fit will not raise IneligibleSeries)."""
-        history = _norm(history)
-        g = history[(history["series"] == series) & (history["t"] <= cutoff)]
-        return _first_cross(g, self.level) is not None
+        """True if fit will not raise IneligibleSeries: the series reached the alignment level by the cutoff, and the
+        cutoff is within the bank window (R_MAX years after that crossing). predict also raises past the window."""
+        try:
+            self._target(history, series, cutoff)
+        except IneligibleSeries:
+            return False
+        return True
 
     def _target(self, history, series, cutoff):
         history = _norm(history)
@@ -260,6 +273,8 @@ class AdoptionABC:
         if t0 is None:
             raise IneligibleSeries(series, cutoff, self.threshold)
         rel, y, deltas = _series_info(g, t0, cutoff)
+        if rel.max() + deltas.max() > R_MAX:
+            raise _past_window(series, cutoff, self.threshold, rel.max() + deltas.max())
         return history, t0, rel, y, deltas
 
     def _model(self, B, series, cutoff, t0, rel, y, b_idx, d_val, w):
@@ -281,6 +296,9 @@ class AdoptionABC:
         B = self.bank()
         h = np.asarray(horizons, float)
         target_rel = model["cutoff"] + h - model["t0"]
+        if target_rel.max() + model["delta"].max() > R_MAX:
+            raise _past_window(model["series"], model["cutoff"], self.threshold,
+                               target_rel.max() + model["delta"].max())
         idx = _grid_idx(target_rel[None, :] + model["delta"][:, None])          # (K, H)
         V = B["C"][model["b"][:, None], idx]
         q = _wquantile(V, model["w"], [0.1, 0.5, 0.9])
@@ -393,6 +411,8 @@ class AdoptionABCAnalogy(AdoptionABC):
             if t0 is None:
                 continue
             rel, y, deltas = _series_info(g, t0, cutoff)
+            keep = rel + deltas.max() <= R_MAX                  # donor: only the part the bank window covers
+            rel, y = rel[keep], y[keep]
             if len(rel) < 3:
                 continue
             D = abc_distance(B["C"], rel, y, deltas, _recent_weights(rel, self.recent_weight)).min(1)
