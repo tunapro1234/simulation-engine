@@ -100,6 +100,23 @@ class TestMetrics(unittest.TestCase):
         # 2023 rule: first DP row is 0, the prediction may start at any truth step
         self.assertLessEqual(M.dtw(a, b, 1.0, free_start=True), M.dtw(a, b, 1.0, free_start=False))
         self.assertAlmostEqual(M.dtw(a, b, 2.0, free_start=False), 2.0)
+        # a prediction that only matches the end of the truth: free start skips the first truth step at no cost
+        self.assertAlmostEqual(M.dtw([[0, 4]], [[0, 0], [0, 4]], 1.0, free_start=True), 0.0)
+        self.assertAlmostEqual(M.dtw([[0, 4]], [[0, 0], [0, 4]], 1.0, free_start=False), 4.0)
+
+    def test_unequal_lengths_literal(self):
+        # 2025 normalisation (matched sum / predicted n-grams) and the brevity penalty for a short prediction
+        rng = np.random.default_rng(11)
+        for _ in range(40):
+            a = rng.integers(0, 5, (int(rng.integers(1, 8)), 2))
+            b = rng.integers(0, 5, (int(rng.integers(1, 8)), 2))
+            nmax = min(3, len(a), len(b))
+            pn = [_ref_pn([tuple(x) for x in a], [tuple(x) for x in b], n, 0.5) for n in range(1, nmax + 1)]
+            bp = 1.0 if len(a) > len(b) else np.exp(1.0 - len(b) / len(a))
+            want = 0.0 if min(pn) <= 0 else bp * float(np.exp(np.mean(np.log(pn))))
+            self.assertAlmostEqual(M.geobleu(a, b), want, places=12)
+        with self.assertRaises(ValueError):
+            M.geobleu(np.zeros((0, 2)), [[1, 1]])
 
     def test_cells_roundtrip(self):
         xy = np.array([[1, 1], [200, 200], [37, 150]])
@@ -163,6 +180,29 @@ class TestBaselines(unittest.TestCase):
                   M.MarkovMobility().fit(self.train).predict(q)):
             np.testing.assert_array_equal(p, tab[[3, 20]])
 
+    def test_markov_follows_chain(self):
+        # every day 1 -> 2 -> 3 at slots 10, 20, 30; a query at slots 5, 25, 40 starts at the slot mode and follows
+        tr = pd.DataFrame({"uid": 1, "d": np.repeat(np.arange(5), 3), "t": np.tile([10, 20, 30], 5),
+                           "x": np.tile([1, 1, 1], 5), "y": np.tile([2, 3, 4], 5)})
+        q = pd.DataFrame({"uid": 1, "d": [6, 6, 6, 7], "t": [10, 25, 40, 30]})
+        p = M.MarkovMobility().fit(tr).predict(q)
+        self.assertEqual(M.from_cell(p)[:, 1].tolist(), [2, 3, 4, 4])     # day 7 restarts at slot 30's mode
+        self.assertEqual(M.MarkovMobility("sample", seed=3).fit(tr).predict(q).tolist(), p.tolist())
+
+    def test_empty_query(self):
+        q = self.q.iloc[:0]
+        for p in (M.slot_mode(self.train, q), M.global_slot_mode(self.train, q),
+                  M.MarkovMobility().fit(self.train).predict(q), M.EPRMobility().fit(self.train).predict(q)):
+            self.assertEqual(len(p), 0)
+
+    def test_epr_day_starts_at_first_of_day_cell(self):
+        tr = self.train.sort_values(["uid", "d", "t"])
+        firsts = set(zip(tr.groupby(["uid", "d"]).uid.first(), M.to_cell(tr.groupby(["uid", "d"]).x.first(),
+                                                                          tr.groupby(["uid", "d"]).y.first())))
+        p = M.EPRMobility(seed=5).fit(self.train).predict(self.q)
+        first_row = ~self.q.duplicated(["uid", "d"]).to_numpy()            # the test rows are (uid, d, t)-sorted
+        self.assertTrue(all((u, c) in firsts for u, c in zip(self.q.uid[first_row], p[first_row])))
+
     def test_clean(self):
         df = pd.DataFrame({"uid": [1, 1, 1, 2], "d": [0, 0, 0, 0], "t": [1, 1, 2, 1], "x": [5, 6, 7, 999],
                            "y": [5, 6, 7, 999]})
@@ -190,6 +230,9 @@ class TestBenchTask(unittest.TestCase):
                                               "epr"})
             g = sc[(sc.metric == "geobleu")].set_index("method").value
             self.assertGreater(g["slot_mode"], g["global_slot_mode"])
+            bad = np.full(len(data.test), -1)                               # not a cell code
+            with self.assertRaises(ValueError):
+                task.score(task.frame(data, {"bad": bad}), "bad")
             dev = YJMob(users="all", split="dev", markov=False, epr=False).load(tmp)
             self.assertEqual(int(dev.test.d.max()), 59)
             with self.assertRaises(ValueError):
