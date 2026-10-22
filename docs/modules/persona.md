@@ -98,7 +98,9 @@ Ported from the TALP prep branches (read-only research code):
     can get 0 rows, with random rows inside each stratum.
   - `"kmeans"`: K clusters on z-scored `features`, with k-means++ starts and the best of `n_init=4`. Text
     columns are one-hot and NaN is the mean. It picks the row nearest each centroid, and every row picked is
-    distinct. `features` is required, so keep ids and targets out of it.
+    distinct. `features` is required, so keep ids and targets out of it. Each member stands for a cluster of a
+    different size, so an unweighted k-means pool over-represents sparse regions (the tails) and is not a sample
+    of the table: use it to cover the range for narration, and take distributions from the table.
 
   K >= len(df) returns every row. `pool_curve(df, sizes, score_fn, method="random" | [...], draws=20)` scores
   `draws` pools per size with `score_fn(pool_frame) -> float`. It returns `method, size, draws, mean, lo, hi`,

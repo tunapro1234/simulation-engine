@@ -83,6 +83,13 @@ class TestValueLabels(unittest.TestCase):
         self.assertEqual(ps[0].facets["Education"], "01")
         self.assertFalse([m for m in user_warnings(w) if "value_labels" in m])
 
+    def test_codebook_gender_wordings_reach_the_enum(self):
+        # survey codebooks spell the labels their own way; auto_mapping's gender_value must still read them
+        labels = {"Gender": {1: "Male", 2: "Female", 3: "Non-binary / third gender", 4: "Prefer not to say"}}
+        df = pd.DataFrame({"rid": [1, 2, 3, 4], "Gender": [1, 2, 3, 4], "target": [0, 1, 0, 1]})
+        ps = from_table(df, id_col="rid", forbidden=["target"], value_labels=labels)
+        self.assertEqual([p.identity.gender for p in ps], ["male", "female", "other", None])
+
     def test_conflicting_codes_raise(self):
         with self.assertRaises(ValueError):
             from_table(survey(), id_col="rid", value_labels={"Gender": {1: "male", "1": "female"}})
