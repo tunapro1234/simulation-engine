@@ -1,6 +1,8 @@
 import json
+import math
 import tempfile
 import unittest
+from unittest import mock
 
 import simengine.persona.inject as pi
 from simengine.llm.fake import FakeLLM
@@ -108,6 +110,19 @@ class TestGuards(unittest.TestCase):
         with self.assertRaises(ValueError):
             inj.fit(FakeLLM(oracle), people(), FIT, {})            # no cell has truth
 
+    def test_duplicate_person_ids(self):
+        ppl = people()
+        ppl[1] = {**ppl[1], "id": ppl[0]["id"]}
+        with self.assertRaises(ValueError):
+            pi.get_injector("fitted_topk").fit(None, ppl, FIT, "answers")
+
+    def test_topk_explicit_val_questions_stay_refused(self):
+        inj = pi.get_injector("fitted_topk", **FAST["fitted_topk"])
+        res = inj.fit(None, people(), FIT, "answers", val_questions=["q1"])
+        self.assertEqual(res.val_questions, ["q1"])
+        with self.assertRaises(F.HeldOutViolation):
+            inj(people()[0], FIT[1])
+
     def test_topk_needs_variation(self):
         flat = [{**p, "answers": {q["id"]: "yes" for q in FIT}} for p in people()]
         with self.assertRaises(ValueError):
@@ -161,6 +176,51 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(llm.calls, [])                      # no LLM in topk
         self.assertEqual(res.val_questions, [])
 
+    def test_grips_patience_as_algorithm_1(self):
+        # nothing ever beats the base: P=2 failed iterations are allowed, the third stops (Prasad et al. Alg. 1)
+        flat = FakeLLM(lambda s, u: json.dumps({"answer": "no"}))
+        for patience, iters in ((2, 3), (0, 1)):
+            inj = pi.get_injector("fitted_grips", n_iter=10, m=2, patience=patience)
+            res = inj.fit(flat, people(), FIT, "answers")
+            self.assertEqual(res.meta["iterations"], iters, patience)
+            self.assertEqual(res.meta["accepted"], 0)
+
+    def test_grips_score(self):
+        units = [{"question": {"id": "a"}, "truth": t} for t in ("yes", "yes", "no", "no")]
+        h = -(0.25 * math.log(0.25) + 0.75 * math.log(0.75))
+        self.assertAlmostEqual(F.grips_score(units, ["yes", "no", "no", "no"]), 75 + 10 * h)
+        # unparsed counts in the denominator, not as a label; collapsed answers get no entropy bonus
+        self.assertAlmostEqual(F.grips_score(units, ["no"] * 4), 50.0)
+        self.assertAlmostEqual(F.grips_score(units, [pi.UNPARSED, "no", "no", "no"], 0.0), 50.0)
+        both = units + [{"question": {"id": "b"}, "truth": "x"}]
+        self.assertAlmostEqual(F.grips_score(both, ["no"] * 4 + ["x"]), (50.0 + 100.0) / 2)
+
+    def test_grips_objectives(self):
+        with self.assertRaises(ValueError):
+            pi.get_injector("fitted_grips", objective="f1")
+        for obj in ("grips", "accuracy"):
+            inj = pi.get_injector("fitted_grips", objective=obj, **FAST["fitted_grips"])
+            res = inj.fit(FakeLLM(oracle), people(), FIT, "answers")
+            self.assertEqual(res.meta["objective"], obj)
+            self.assertIn("likes_cars", res.config["keys"], obj)
+
+    def test_stepwise_units_are_people(self):
+        from simengine.research import loop as L
+        seen = []
+
+        class Spy(L.Loop):
+            def __init__(self, runner, *a, **kw):
+                def wrapped(cfg):
+                    out = runner(cfg)
+                    seen.append(sorted(out["per_unit"]))
+                    return out
+                super().__init__(wrapped, *a, **kw)
+        with mock.patch.object(L, "Loop", Spy):
+            fit("fitted_stepwise")
+        self.assertTrue(seen)
+        for keys in seen:
+            self.assertEqual(keys, sorted(p["id"] for p in people()))
+
     def test_grips_edit(self):
         import random
         rng = random.Random(0)
@@ -209,6 +269,32 @@ class TestLeakage(unittest.TestCase):
                 # system = instruction + the chosen attribute lines only
                 body = pr.system.splitlines()[1:-1]
                 self.assertEqual(len(body), len([k for k in res.config["keys"] if k in p["fields"]]), name)
+
+    def test_field_named_like_the_question_is_hidden(self):
+        # survey data: other items as fields. A field named like the asked question (or its exclude ids) is its answer.
+        ppl = [{**p, "fields": {**p["fields"], **{q["id"]: p["answers"][q["id"]] for q in QS}}} for p in people()]
+        for name in FITTED:
+            inj = pi.get_injector(name, **{**FAST[name], **({"k": 12} if name == "fitted_topk" else {})})
+            llm = FakeLLM(oracle)
+            inj.fit(llm, ppl, FIT, "answers")
+            for system, user in llm.calls:
+                blocks = user.split("\ninput:\n")[1:] if "<INS>" in user else [system + "\n" + user]
+                for b in blocks:                    # a scorer prompt, or one OPRO exemplar
+                    for q in FIT:
+                        if q["text"] in b:
+                            self.assertNotIn(f"- {q['id']}:", b, name)
+            p = ppl[3]
+            self.assertNotIn("- q4:", inj(p, HELD[0]).system, name)
+            pr = inj(p, {**HELD[1], "exclude": ["q4", "q6"]})
+            for qid in ("q5", "q4", "q6"):
+                self.assertNotIn(f"- {qid}:", pr.system, name)
+
+    def test_forest_target_is_not_its_own_predictor(self):
+        ppl = [{**p, "fields": {**p["fields"], "q0": p["answers"]["q0"]}} for p in people()]
+        cells = [{"person": p, "question": FIT[0], "truth": p["answers"]["q0"]} for p in ppl]
+        w = F.forest_importance(cells, ["q0", "likes_cars", "age", "colour"], lambda p: p["fields"], n_estimators=20)
+        self.assertEqual(w["q0"], 0.0)
+        self.assertGreater(w["likes_cars"], 0.0)
 
     def test_fit_never_sees_held_out_questions(self):
         for name in FITTED:
