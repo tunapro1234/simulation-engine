@@ -17,6 +17,7 @@ statistical summary, or as an LLM summary made beforehand.
 Event dicts in person["history"] (all keys optional): t | time | date | timestamp (ISO string, date or number),
 action (purchase, view, click, cart, rate, ...; missing = "rate" when rating is set, else "purchase"), item,
 title, category (str, "A|B" or list), brand, price (unit), qty, discount (bool or fraction), rating, text, qid.
+None / NaN / NaT / pd.NA values count as absent (rows from DataFrame.to_dict("records") work as they are).
 
 Question extensions read here: `item` / `items` (target item ids: their events are hidden) and `cutoff`
 (events at or after it are hidden; events without a time are hidden too once a cutoff is set).
@@ -27,12 +28,14 @@ Summaries are made by `summarize_logs` before the run, so render() stays pure an
 from __future__ import annotations
 
 import math
+import numbers
 import random
 import re
 from collections import Counter
 from datetime import date, datetime
 from typing import Any, Iterable, Sequence
 
+import numpy as np
 import pandas as pd
 
 from ..history import purchase_history_text, summarize_purchases
@@ -49,16 +52,27 @@ PAARS_PROFILE = ("gender", "age range", "relationship status", "education", "ind
 
 
 # ---------------------------------------------------------------- events
+def _missing(v: Any) -> bool:
+    """None, NaN, NaT or pd.NA (lists and strings are never missing)."""
+    if v is None:
+        return True
+    try:
+        return pd.api.types.is_scalar(v) and bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
+
+
 def _ts(v: Any) -> Any:
-    """Sortable time: numbers stay numbers, strings/dates become pandas Timestamps, None stays None."""
-    if v is None or (isinstance(v, float) and math.isnan(v)):
+    """Sortable time: numbers stay numbers, strings/dates become pandas Timestamps, missing (None/NaN/NaT) is None."""
+    if _missing(v):
         return None
-    if isinstance(v, bool):
+    if isinstance(v, (bool, np.bool_)):
         raise ValueError(f"event time must be a date, string or number, not {v!r}")
-    if isinstance(v, (int, float)):
+    if isinstance(v, numbers.Real):                 # numpy ints/floats too
         return float(v)
-    if isinstance(v, (str, date, datetime, pd.Timestamp)):
-        return pd.Timestamp(v)
+    if isinstance(v, (str, date, datetime, pd.Timestamp, np.datetime64)):
+        t = pd.Timestamp(v)
+        return None if pd.isna(t) else t            # "" / "NaT" strings parse to NaT
     raise ValueError(f"event time must be a date, string or number, not {type(v).__name__}")
 
 
@@ -86,13 +100,14 @@ def categories(e: dict) -> list[str]:
 
 
 def events(person: dict) -> list[dict]:
-    """person['history'] as event dicts; (role, text) chat turns are refused with a clear error."""
+    """person['history'] as event dicts without missing values (a NaT time must not slip past a cutoff, a NaN
+    rating must not turn a purchase into a rating); (role, text) chat turns are refused with a clear error."""
     h = person.get("history") or []
     bad = [x for x in h if not isinstance(x, dict)]
     if bad:
         raise ValueError(f"from_logs injectors read person['history'] as event dicts (person {person.get('id')!r} "
                          f"has {type(bad[0]).__name__} entries, e.g. chat turns)")
-    return list(h)
+    return [{k: v for k, v in e.items() if not _missing(v)} for e in h]
 
 
 def _target_items(question: dict) -> set[str]:
@@ -158,6 +173,13 @@ def _when(e: dict) -> str:
     return f"t={_num(t)}"
 
 
+def _frac(d: Any) -> float | None:
+    try:
+        return float(d)
+    except (TypeError, ValueError):
+        return None
+
+
 def event_line(e: dict) -> str:
     """One event as text: '2024-03-02 purchase "Oat milk 1L" (dairy; brand B) 2 x 2.1, on discount, rated 4'."""
     parts = [p for p in (_when(e), action(e)) if p]
@@ -180,7 +202,8 @@ def event_line(e: dict) -> str:
         extra.append(f"qty {_num(e['qty'])}")
     d = e.get("discount")
     if d:
-        extra.append("on discount" if d is True else f"{_num(float(d) * 100)}% off")
+        f = _frac(d)                                  # True / 1 / np.True_ -> flag; 0 < f < 1 -> "x% off"
+        extra.append(f"{_num(f * 100)}% off" if f is not None and 0 < f < 1 else "on discount")
     if e.get("rating") is not None:
         extra.append(f"rated {_num(e['rating'])}")
     if extra:
