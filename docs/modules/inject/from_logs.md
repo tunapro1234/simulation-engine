@@ -31,6 +31,10 @@ All keys are optional:
 - `price` (per unit), `qty`, `discount` (a bool or a fraction), `rating`, `text`.
 - `qid`: tags an event as the answer to a question.
 
+`None`, NaN, NaT and `pd.NA` values count as absent, so rows from `DataFrame.to_dict("records")` work as they are:
+an event whose time is NaT is undated (hidden once a cutoff is set), and a NaN `rating` does not turn a purchase
+into a rating. Numpy scalars are accepted for times and cutoffs.
+
 Chat turns `(role, text)` in `history` are refused with a clear error.
 
 ## Leakage
@@ -40,10 +44,11 @@ Chat turns `(role, text)` in `history` are refused with a clear error.
   `exclude` qid are hidden.
 - **Injector cutoff:** a `cutoff=` param on the injector also applies. The earlier of the two cutoffs wins.
   `hide_target_item=False` turns off item hiding, for tasks where seeing the item is legitimate.
-- **LLM summaries:** `summarize_logs` writes `person["log_summary"][style]` together with the `cutoff` and the
-  item ids it was built from. An injector refuses to use a summary in two cases: the summary was built without a
-  cutoff or with a later cutoff than the question's, or it contains the target item. In both cases rebuild it with
-  `cutoff=` or `hide_items=`.
+- **LLM summaries:** `summarize_logs` writes `person["log_summary"][style]` together with the `cutoff`, the
+  item ids and the qids of the events it was built from. An injector refuses to use a summary in three cases: the
+  summary was built without a cutoff or with a later cutoff than the question's; it contains the target item; or
+  one of its events is tagged with the question's `id` or an `exclude` qid. Rebuild it with `cutoff=`,
+  `hide_items=` or `hide_qids=`.
 - **Pure rendering:** summaries are made before the run, so `render()` stays pure and a dry run spends nothing.
   `summarize_logs(..., dry_run=True)` returns the call count and a token estimate.
 
@@ -95,7 +100,8 @@ et al. 2024 (arXiv:2305.08845).**
   | Transformer+MLP (supervised) | 0.885 | 0.798 |
   | fine-tuned Flan-T5-XXL | 0.898 | 0.804 |
 
-  Raw history zero-shot trails supervised recommenders. Fine-tuning closes the gap.
+  Raw history zero-shot trails supervised recommenders. Fine-tuning closes the gap. Zero-shot LLMs are only
+  comparable to trivial heuristics: the candidate item's average rating scores RMSE 0.975 and AUC 0.740.
 - *Hou et al. results:* on ML-1M, NDCG@10 was 42.85% for the sequential history prompt and 44.23% with the
   recency-focused sentence ("Note that my most recently watched movie is ..."), +1.4 points.
 
@@ -117,8 +123,11 @@ et al. 2024 (arXiv:2305.08845).**
 - *Method:* RFM (recency, frequency, monetary; Hughes 1994, a marketing classic with no arXiv id), extended with
   category affinity, price sensitivity and brand loyalty. It is the non-LLM counterpart of LLM-inferred
   purchase-history personas such as Shi et al. 2025, *You Are What You Bought* (arXiv:2504.17304).
-- *Shi et al. result:* LLM personas improved a graph recommender by up to 12% in NDCG@K and F1@K. Shi et al. do not
-  compare against an RFM text summary.
+- *Shi et al. results:* LLM personas improved a graph recommender (LightGCN) by up to 12% in NDCG@K and F1@K. In
+  customer segmentation on OnlineRetail they did compare against RFM: 18% of customers kept the same persona
+  representation across two six-month halves against 1.3% for RFM (10 quantile bins per dimension), and k-means
+  silhouette was 0.451 to 0.788 against 0.366 to 0.445. That is a comparison of representations for clustering,
+  not of an RFM text summary in a prompt.
 - *Published effect:* none found for this exact prompt. This arm answers the question "does an LLM summary beat
   plain statistics?"
 
@@ -127,7 +136,8 @@ et al. 2024 (arXiv:2305.08845).**
   - Activity is the number of items the user interacted with.
   - Conformity is the mean squared gap between the user's rating and the item's average rating.
   - Diversity is the number of distinct genres.
-- *Tiers and taste:* each trait is split into three uneven tiers from MovieLens statistics. The taste is
+- *Tiers and taste:* each trait is split into three uneven tiers from MovieLens statistics (cut points not
+  published; `trait_cuts` uses even tertiles instead). The taste is
   summarised by ChatGPT from 25 random items of the viewing history, where a rating of 3 or more counts as
   "liked".
 - *Published effect:* there is no numeric ablation of the profile. With MovieLens taste discrimination at a 1:1
@@ -148,16 +158,18 @@ et al. 2024 (arXiv:2305.08845).**
 
 **`log_task_summary`: Richardson et al. 2023, *Integrating Summarization and Retrieval for Enhanced
 Personalization via LLMs* (arXiv:2310.20081).**
-- *Method:* the LLM writes a task-aware summary of the user's profile offline, and it is combined with a smaller
-  BM25 retrieval at run time.
-- *Results:* summary + k = 1 matched or beat k = 4 with 75% less retrieved data.
+- *Method:* an LLM (Vicuna-13B or GPT-3.5) writes a task-aware summary of the user's profile offline, and it is
+  combined with a smaller BM25 retrieval at run time. The downstream model is a fine-tuned FlanT5-base, not a
+  zero-shot LLM.
+- *Results:* summary + k = 1 matched or beat k = 4 on most tasks with 75% less retrieved data.
 
-  | task | k = 4 | summary + k = 1 |
-  |---|---|---|
-  | LaMP-1 accuracy | 0.709 | 0.743 |
-  | LaMP-2 F1 | 0.574 | 0.601 |
+  | task | k = 4 | summary + k = 1 | summariser |
+  |---|---|---|---|
+  | LaMP-1 accuracy | 0.709 | 0.743 | GPT-3.5 |
+  | LaMP-2 (news categorisation) F1 | 0.574 | 0.601 | Vicuna (GPT-3.5 not run) |
 
-  On LaMP-4 the summary trailed.
+  On LaMP-1 the GPT-3.5 summary alone (k = 0) reached 0.738, above k = 4. On LaMP-4 the summary trailed
+  (ROUGE-1 0.181 against 0.188).
 
 ## Measured in simengine
 
