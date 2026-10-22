@@ -21,8 +21,9 @@ None / NaN / NaT / pd.NA values count as absent (rows from DataFrame.to_dict("re
 
 Question extensions read here: `item` / `items` (target item ids: their events are hidden) and `cutoff`
 (events at or after it are hidden; events without a time are hidden too once a cutoff is set).
-LEAKAGE RULE: every injector reads events through `visible_events`; LLM summaries carry the cutoff and item ids
-they were built from, and rendering refuses a question whose cutoff is earlier or whose target item was summarised.
+LEAKAGE RULE: every injector reads events through `visible_events`; LLM summaries carry the cutoff, item ids and
+qids they were built from, and rendering refuses a question whose cutoff is earlier, whose target item was
+summarised, or whose id / `exclude` qids tag a summarised event.
 Summaries are made by `summarize_logs` before the run, so render() stays pure and dry runs spend nothing.
 """
 from __future__ import annotations
@@ -564,8 +565,16 @@ class _SummaryInjector(_LogInjector):
                 f"from_logs.summarize_logs(llm, people, style={self.style!r}) first")
 
     def summary(self, person: dict, question: dict) -> dict:
-        """The stored summary, after checking it was built without the target item and not past the cutoff."""
+        """The stored summary, after checking it was built without the target item, without events tagged with
+        the target or an `exclude` qid, and not past the cutoff."""
         s = person[SUMMARY_FIELD][self.style]
+        qids = {str(x) for x in (question.get("exclude") or ())}
+        if question.get("id") is not None:
+            qids.add(str(question["id"]))
+        tagged = qids & {str(x) for x in (s.get("qids") or ())}
+        if tagged:
+            raise ValueError(f"leakage: {self.style} summary of person {person.get('id')!r} was built from events "
+                             f"tagged with qid(s) {sorted(tagged)}; rebuild it with summarize_logs(..., hide_qids=...)")
         hit = _target_items(question) & set(s.get("items") or ())
         if hit and self.hide_target_item:
             raise ValueError(f"leakage: {self.style} summary of person {person.get('id')!r} was built from target "
@@ -719,21 +728,21 @@ def _task_prompt(hist: str, task: str) -> str:
 
 
 def summarize_logs(llm, people: Sequence[dict], style: str = "paars", *, cutoff: Any = None,
-                   hide_items: Iterable = (), n: int = 50, n_items: int = 25, seed: int = 0, like_at: float = 3,
+                   hide_items: Iterable = (), hide_qids: Iterable = (), n: int = 50, n_items: int = 25, seed: int = 0, like_at: float = 3,
                    task: str | None = None, max_tokens: int = 400, parallel: int = 4, dry_run: bool = False,
                    **llm_kw: Any) -> list[dict] | dict:
-    """Copies of `people` with person['log_summary'][style] = {text, ..., cutoff, items, n_events, model}.
+    """Copies of `people` with person['log_summary'][style] = {text, ..., cutoff, items, qids, n_events, model}.
 
     style 'paars': two calls per person (consumer profile JSON, then how much each of the seven factors matters) over
     the last `n` events in daily sessions. 'agent4rec': one call over `n_items` seeded-sampled rated events
     (like = rating >= like_at). 'task': one call over the last `n` events, steered by `task` (e.g. "predict which
-    product categories the user buys next month"). Only events before `cutoff` and not on `hide_items` are used;
-    the summary records both so injectors can refuse leaky use. dry_run: {"calls", "input_tokens_est"}, no call."""
+    product categories the user buys next month"). Only events before `cutoff`, not on `hide_items` and not tagged
+    with a `hide_qids` qid are used; the summary records what it used so injectors can refuse leaky use. dry_run: {"calls", "input_tokens_est"}, no call."""
     if style not in STYLES:
         raise ValueError(f"style must be one of {STYLES}")
     if style == "task" and not task:
         raise ValueError("style 'task' needs task='<what the summary will be used for>'")
-    window = {"cutoff": cutoff, "items": list(hide_items)}
+    window = {"cutoff": cutoff, "items": list(hide_items), "exclude": list(hide_qids)}
     plans = []
     for p in people:
         evs = visible_events(p, window)
@@ -760,8 +769,9 @@ def summarize_logs(llm, people: Sequence[dict], style: str = "paars", *, cutoff:
         if style == "task":
             out["task"] = task
         items = sorted({str(e["item"]) for e in used if e.get("item") is not None})
-        cut = cutoff if cutoff is None or isinstance(cutoff, (int, float)) else str(cutoff)   # numbers stay numbers
-        out.update(cutoff=cut, items=items, n_events=len(used),
+        qids = sorted({str(e["qid"]) for e in used if e.get("qid") is not None})
+        cut = cutoff if cutoff is None or isinstance(cutoff, numbers.Real) else str(cutoff)   # numbers stay numbers
+        out.update(cutoff=cut, items=items, qids=qids, n_events=len(used),
                    model=getattr(llm, "model", None))
         return {**p, SUMMARY_FIELD: {**(p.get(SUMMARY_FIELD) or {}), style: out}}
 
