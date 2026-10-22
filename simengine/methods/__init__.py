@@ -5,6 +5,7 @@ each one does, where it worked and where it did not (numbers + provenance). Ligh
 lazily; LLM calls go through the ``simengine.llm`` protocol (use ``FakeLLM`` offline).
 """
 from .ab import ABStack, LengthAB, LLMDirectAB, LogitAverageAB, TfidfAB, TfidfWordAB
+from .binary import TfidfBinary, target_encode
 from .baselines import (ConstantBaseline, ItemMarginal, KNNBaseline, LightGBMBaseline, LogisticBaseline,
                         MajorityBaseline, PersistenceBaseline, SegmentRate, TextKNNRegressor, basket_tensor,
                         decayed_frequency, infer_kind, overall_copy, persistence, personal_frequency, popularity,
@@ -23,6 +24,7 @@ from .next_action import (Markov2Baseline, NextActionRanker, add_history, attach
 from .twin import (TwinStack, base_predict, binned_median, column_correlation, donor_sample,
                    pooled_logistic_oof)
 from .transfer import GroupTransfer, oof_predict
+from .rct import rct_effects, rct_transfer
 from .forecast import (DirectForecaster, backtest, llm_prior_feature, make_features, mask_future, moving_mean,
                        persistence_forecast, point_for_metric, seasonal_naive, seasonal_ratio, ses, ses_level, summarize_backtest)
 from ._util import lightgbm_available
@@ -52,8 +54,12 @@ __all__ = [
     "fit_mixture_weights", "MixtureFit", "UnidentifiedWarning", "identifiability", "mixture", "probe_types",
     "ProbeGame", "choice_game", "numeric_game", "dictator_game", "charness_rabin_games",
     "CR_GAMES", "CR_HUMAN_LEFT", "ENGEL_DICTATOR", "THEORY_TYPES", "HUMANIZING_PREFIX", "HORTON_GPT4O_WEIGHTS",
+    # single-text binary baseline + target encoding
+    "TfidfBinary", "target_encode",
     # group transfer + out-of-fold helper
     "GroupTransfer", "oof_predict",
+    # RCT condition effects + transfer baseline
+    "rct_effects", "rct_transfer",
     # item cold start
     "item_holdout_features", "ItemHoldout", "MFBaseline", "procrustes_align",
     # multi-series demand forecasting (D4)
