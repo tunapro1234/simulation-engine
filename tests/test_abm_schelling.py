@@ -225,6 +225,12 @@ class TestLLMMover(unittest.TestCase):
         for t in (0, 1, G.EMPTY):
             self.assertEqual((r.lattice == t).sum(), (r.initial == t).sum())
 
+    def test_options_still_round_does_not_stop(self):
+        llm = FakeLLM(lambda s, u: '{"choice": "stay"}')
+        r = S.Schelling(self.g, threshold=0.7, mover=S.LLMMover(llm, n_options=2)).run(4, seed=0)
+        self.assertEqual(r.steps, 4)
+        self.assertFalse(r.converged)
+
     def test_invalid_replies_stay_and_are_counted(self):
         mover = S.LLMMover(FakeLLM(lambda s, u: "I cannot decide."))
         r = S.Schelling(self.g, threshold=0.5, mover=mover).run(5, seed=0)

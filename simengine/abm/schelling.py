@@ -270,11 +270,19 @@ class Schelling:
         rec.update(extra)
         return rec
 
+    def _still(self, ex: dict) -> bool:
+        if ex["moved"]:
+            return False
+        if self.mover is None:
+            return self.movers == "unhappy"
+        return ex.get("asked", 0) == 0 or (not self.mover.n_options and ex.get("wanted", 0) == 0)
+
     def run(self, n_steps: int = 100, seed: G.SeedLike = None, lattice: np.ndarray | None = None,
             stop_when_still: bool = True, metrics: bool = True) -> SchellingRun:
-        """n_steps sweeps (LLM rounds with a mover). Stops early after a step in which nobody moved (classic
-        threshold rule with movers='unhappy', or an LLM round where nobody chose to move). metrics=True adds the
-        final segregation coefficient and dissimilarity."""
+        """n_steps sweeps (LLM rounds with a mover). Stops early (converged=True) after a still step: nobody moved
+        under the classic rule with movers='unhappy'; with an LLM mover, nobody was asked, or (no vacancy options)
+        nobody chose to move. With options a still round does not stop the run, since the offered vacancies are
+        re-drawn each round. metrics=True adds the final segregation coefficient and dissimilarity."""
         rng = G.make_rng(seed)
         if lattice is None:
             lattice = G.random_lattice(self.grid, self.fractions, seed=rng)
@@ -293,7 +301,7 @@ class Schelling:
                     hist.append(self._record(st, t, ex))
                     break
             hist.append(self._record(st, t, ex))
-            if stop_when_still and ex["moved"] == 0 and (self.mover is not None or self.movers == "unhappy"):
+            if stop_when_still and self._still(ex):
                 converged = True
                 break
         final = st.lattice()
@@ -564,7 +572,7 @@ class LLMMover:
         happy = model.happy_mask(st)
         who = np.flatnonzero(~happy) if self.ask == "unhappy" else np.arange(n)
         if len(who) == 0:
-            return dict(moved=0, failed=0, asked=0, calls=0, invalid=0, blocked=0)
+            return dict(moved=0, failed=0, asked=0, calls=0, invalid=0, wanted=0, blocked=0)
         cells = st.agent_cell[who]
         counts = st.cnt[:, cells].T                                  # (m, K) neighbours by type
         deg = (st.nbr >= 0).sum(1)                                   # in-grid neighbours (k on a torus)
@@ -587,7 +595,7 @@ class LLMMover:
                             self.user_prompt(t, list(map(int, counts[j])), int(deg[cells[j]]), oc, ok)))
         uniq = list(dict.fromkeys(prompts)) if self.dedupe else prompts
         if self.max_calls is not None and self.calls + len(uniq) > self.max_calls:
-            return dict(moved=0, failed=0, asked=0, calls=0, invalid=0, blocked=0, stopped=True)
+            return dict(moved=0, failed=0, asked=0, calls=0, invalid=0, wanted=0, blocked=0, stopped=True)
         res = self.llm.map(uniq, max_tokens=self.max_tokens, parallel=self.parallel, **self.llm_kwargs)
         self.calls += len(uniq)
         self.cost += float(sum(getattr(r, "cost_usd", 0.0) or 0.0 for r in res))
@@ -600,6 +608,7 @@ class LLMMover:
         self.asked += len(who)
         self.invalid += inv
         moved = failed = blocked = 0
+        wanted = sum(d.move for d in dec)
         for j in rng.permutation(len(who)):
             d, a = dec[j], int(who[j])
             if not d.move:
@@ -617,8 +626,10 @@ class LLMMover:
             st.move(a, dst)
             moved += 1
         self.blocked += blocked
-        self.log.append(dict(asked=len(who), calls=len(uniq), invalid=inv, moved=moved, blocked=blocked))
-        return dict(moved=moved, failed=failed, asked=len(who), calls=len(uniq), invalid=inv, blocked=blocked)
+        self.log.append(dict(asked=len(who), calls=len(uniq), invalid=inv, wanted=wanted, moved=moved,
+                             blocked=blocked))
+        return dict(moved=moved, failed=failed, asked=len(who), calls=len(uniq), invalid=inv, wanted=wanted,
+                    blocked=blocked)
 
 
 _COUNT = re.compile(r"(\d+) (?:is|are) (.+?) households( \(your group\))?")
