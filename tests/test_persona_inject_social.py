@@ -115,11 +115,12 @@ class TestRender(unittest.TestCase):
 
     def test_peer_messages(self):
         p = pi.get_injector("peer_messages", k=2, bias="strong")(person(state={"q0": "undecided"}), Q)
-        self.assertTrue(p.system.startswith("You are a person with these attributes:"))
-        self.assertIn("Role play this person.", p.system)
+        # Chuang et al. persona prompt order: "Role play this person." first, then the persona
+        self.assertTrue(p.system.startswith("Role play this person.\n\nYou are a person with these attributes:"))
+        self.assertLess(p.system.index("north"), p.system.index("change or maintain your belief"))
         self.assertIn(BIAS["strong"], p.system)
         self.assertIn(CLOSED_WORLD, p.system)
-        self.assertIn("Your view before reading these posts: undecided", p.system)
+        self.assertIn("Your initial belief: undecided", p.system)
         self.assertIn('- Contact 3: "msg 3"', p.user)
         self.assertNotIn("msg 1", p.user)                      # recent: only the last 2
         self.assertEqual(p.meta["shown"], ["n2", "n3"])
@@ -145,14 +146,23 @@ class TestRender(unittest.TestCase):
 
     def test_asch_tones_and_distill(self):
         ppl = person(neighbors=[nb(0), nb(1), nb(2, "no")])
-        for tone, tmpl in TONES.items():
+        for tone, say in TONES.items():
             p = pi.get_injector("asch_majority", tone=tone)(ppl, Q)
-            self.assertIn("There are in total 4 participants.", p.user)
-            self.assertIn("Organiser: Would you adopt the new app?", p.user)
-            self.assertIn("Participant 3: " + tmpl.format(a="yes" if p.meta["confederates"][2] == "yes" else "no"),
-                          p.user)
-            self.assertIn("Now, as Participant 4, it's your turn.", p.user)
+            self.assertTrue(p.user.startswith(
+                "You are one of the participants in an experiment. There are in total 4 participants. Answer the "
+                "questions based on your knowledge. The conversation of the whole experiment is as follows:\n\n"
+                "Organiser: Answer the following multiple choice question by giving the most appropriate response. "
+                "Answer should be chosen among [yes, no].\n\nQuestion: Would you adopt the new app?\n\n"), tone)
+            for i, a in enumerate(p.meta["confederates"]):     # the paper's phrasings in turn
+                self.assertIn(f"Participant {i + 1}: {say[i % len(say)].format(a=a)}\n", p.user, tone)
+            self.assertIn("Now, as Participant 4, it's your turn:\n", p.user)
             self.assertEqual(p.system, "")                     # persona off by default, as in the paper
+        five = pi.get_injector("asch_majority", tone="neutral", answer="no", n=5)({"id": "x"}, Q).user
+        self.assertIn("Participant 2: My answer is no\nParticipant 3: no, in my opinion\nParticipant 4: It's no\n"
+                      "Participant 5: I think it is no\n", five)
+        num = pi.get_injector("asch_majority")(ppl, QN).user
+        self.assertIn("Organiser: Answer the following question by giving the most appropriate response.\n\n"
+                      "Question: How many days", num)
         d = pi.get_injector("asch_majority", distill=True)(ppl, Q)
         self.assertIn('Organiser: Of the 3 participants before you, 2 chose "yes", 1 chose "no".', d.user)
         self.assertNotIn("Participant 1:", d.user)
@@ -297,7 +307,7 @@ def follower(system, user):
     m = re.search(r'(\d+)% chose "(yes|no)"', system)
     if m and int(m.group(1)) > 50:
         return json.dumps({"answer": m.group(2)})
-    conf = re.findall(r"Participant \d+: (?:I think it is )?(yes|no)", user)
+    conf = re.findall(r"Participant \d+: .*?\b(yes|no)\b", user)
     if conf:
         return json.dumps({"answer": max(set(conf), key=conf.count)})
     return '{"answer": "no"}'
