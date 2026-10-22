@@ -29,14 +29,17 @@ class TestAdABRecipe(unittest.TestCase):
             p = run("--out", d, "--B", "100")
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             self.assertLess(time.monotonic() - t0, 60)
-            for s in ("LLM calls: 25 (5 no-persona)", "'yes' bias", "observed lift [95% CI]", "stack lift [95% CI]",
-                      "ranking: stack", "auc (person level, test)", "llm_nopersona", "cell_rate", "badge:"):
+            for s in ("LLM calls: 25 (5 no-persona, 0 unparsed", "'yes' bias", "observed lift [95% CI]",
+                      "stack lift [95% CI]", "ranking: stack", "cell_rate alone", "auc (person level, test)",
+                      "llm_nopersona", "shuffled_stack", "baseline_random", "baseline_segment_mean", "badge:"):
                 self.assertIn(s, p.stdout)
+            self.assertNotIn("selection bias", p.stdout.split("badge:")[1])   # "ours" is named in prereg.md
             for ad in ("family", "green", "price", "speed"):
                 self.assertRegex(p.stdout, rf"\n{ad} +[+-]\d\.\d{{3}} \[[+-]\d\.\d{{3}}, [+-]\d\.\d{{3}}\]")
             self.assertNotRegex(p.stdout, r"\ncontrol +[+-]")          # the control is the reference, not a row
             card = (Path(d) / "card.md").read_text()
             self.assertIn("Sealed predictions", card)
+            self.assertRegex(card, r"\| selection bias \| ok \|")
             self.assertTrue((Path(d) / "dashboard.html").exists())
 
     def test_user_csv_without_dates_renamed_control_and_audience(self):
@@ -55,7 +58,7 @@ class TestAdABRecipe(unittest.TestCase):
                     "--B", "50")
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             self.assertIn("audience: a, b", p.stdout)
-            self.assertIn("LLM calls: 20 (5 no-persona)", p.stdout)
+            self.assertIn("LLM calls: 20 (5 no-persona, 0 unparsed", p.stdout)
             for ad in ("x1", "x2", "x3", "x4"):
                 self.assertRegex(p.stdout, rf"\n{ad} +[+-]\d\.\d{{3}} \[")
             self.assertTrue((Path(d) / "run" / "card.md").exists())
