@@ -167,6 +167,25 @@ class GroupStatTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             GroupStat(["o"], "mode")
 
+    def test_weighted_median_skips_zero_weight_rows(self):
+        X = pd.DataFrame({"o": ["a"] * 3, "w": [1.0, 0.0, 1.0]})
+        self.assertEqual(GroupStat(["o"], "median", weight="w").fit(X, [1.0, 2.0, 3.0]).predict(X[:1])[0], 2.0)
+
+    def test_float_and_int_codes_are_one_category(self):
+        # a year column read as float (it had a NaN) at fit and as int at predict is still the same cell
+        tr = pd.DataFrame({"yr": [2018.0, 2020.0, np.nan, 2020.0], "x": [0.0, 1.0, 2.0, 3.0]})
+        te = pd.DataFrame({"yr": [2018, 2020], "x": [0.0, 1.0]})
+        y = [0.0, 10.0, 5.0, 20.0]
+        g = GroupStat(["yr"], "mean").fit(tr, y)
+        self.assertEqual(list(g.level(te)), [1, 1])
+        self.assertEqual(list(g.predict(te)), [0.0, 15.0])
+        r = TabularRidge(cat=["yr"], num=(), alphas=[1e-6]).fit(tr, y)
+        np.testing.assert_allclose(r.predict(te), r.predict(tr.iloc[[0, 1]]))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            b = TabularGBDT(cat=["yr"], num=(), backend="sklearn").fit(tr, y)
+        self.assertEqual(b.categories_["yr"], ["2018", "2020"])
+
     def test_two_level_fallback(self):
         X = pd.DataFrame({"o": ["a", "a", "a", "b"], "yr": [1, 1, 2, 1]})
         m = GroupStat(["o", "yr"], "mean", min_n=2).fit(X, [1.0, 3.0, 8.0, 0.0])

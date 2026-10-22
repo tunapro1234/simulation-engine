@@ -72,8 +72,16 @@ def _split_columns(X: pd.DataFrame, cat, num) -> tuple[list[str], list[str]]:
     return cat_l, num_l
 
 
+def _key(v) -> str:
+    """Category label of one value; integral floats print as ints, so a year read as 2020.0 (float column, e.g. one
+    with a NaN) and as 2020 (int column) is the same category in fit and predict frames."""
+    if isinstance(v, (float, np.floating)) and np.isfinite(v) and float(v).is_integer():
+        return str(int(v))
+    return str(v)
+
+
 def _cat_str(s: pd.Series) -> pd.Series:
-    return s.astype(object).where(s.notna(), "__nan__").astype(str)
+    return s.astype(object).where(s.notna(), "__nan__").map(_key)
 
 
 # ------------------------------------------------------------------------------------------------ regressions
@@ -160,7 +168,7 @@ class TabularGBDT:
             out[c] = pd.to_numeric(X[c], errors="coerce").astype(float)
         for c in self.cat_:
             s = X[c].astype(object).where(X[c].notna(), None)
-            s = s.map(lambda v: v if v is None else str(v))
+            s = s.map(lambda v: v if v is None else _key(v))
             cat = pd.Categorical(s, categories=self.categories_[c])
             out[c] = cat if self.backend_ == "lightgbm" else np.where(cat.codes >= 0, cat.codes, np.nan)
         return out[self.num_ + self.cat_]
@@ -170,7 +178,7 @@ class TabularGBDT:
         y = np.asarray(y, float)
         w = _weights(sample_weight, len(X))
         self.cat_, self.num_ = _split_columns(X, self.cat, self.num)
-        self.categories_ = {c: sorted(X[c].dropna().astype(str).unique()) for c in self.cat_}
+        self.categories_ = {c: sorted(X[c].dropna().map(_key).unique()) for c in self.cat_}
         b = self.backend
         if b not in ("auto", "lightgbm", "sklearn"):
             raise ValueError(f"backend must be 'auto', 'lightgbm' or 'sklearn', got {b!r}")
@@ -226,6 +234,7 @@ def dersimonian_laird(y, se) -> tuple[float, float, float]:
 
 
 def _wmedian(y: np.ndarray, w: np.ndarray) -> float:
+    y, w = y[w > 0], w[w > 0]                           # a zero-weight row must not be a midpoint neighbour
     o = np.argsort(y)
     y, cw = y[o], np.cumsum(w[o])
     half = cw[-1] / 2.0
