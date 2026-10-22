@@ -28,6 +28,7 @@ import json
 import math
 import random
 import re
+import unicodedata
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
@@ -48,7 +49,7 @@ SYSTEM_RAG = ("Below are this person's answers to the earlier survey questions m
               "these answers.")
 NONE_KNOWN = "(no earlier answers of this person are available)"
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+_TOKEN = re.compile(r"[^\W_]+")
 _STOP = frozenset("a an and are as at be by do does for from how i if in is it of on or that the this to was "
                   "what when which who will with would you your".split())
 
@@ -76,22 +77,30 @@ def _qa_text(q: dict, answer: Any, include_options: bool) -> str:
     return "\n".join(lines)
 
 
+def _fold(text: Any) -> str:
+    """Lowercase, accents folded (NFKD minus combining marks), so "Araç"/"arac" and "İstanbul"/"istanbul" match."""
+    t = unicodedata.normalize("NFKD", str(text).lower())
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
 def tokens(text: str) -> list[str]:
-    """Lowercase word tokens minus a small English stopword list, plural "s" stripped (retrieval only)."""
+    """Lowercase, accent-folded word tokens (any script) minus a small English stopword list, plural "s" stripped
+    (retrieval only)."""
     return [t[:-1] if len(t) > 3 and t.endswith("s") and not t.endswith("ss") else t
-            for t in _TOKEN.findall(str(text).lower()) if t not in _STOP]
+            for t in _TOKEN.findall(_fold(text)) if t not in _STOP]
 
 
 # ---------------------------------------------------------------- embedding-free scorers
 def score_tfidf(query: str, docs: Sequence[str]) -> list[float]:
-    """Cosine of l2-normalised TF-IDF vectors; idf = ln((1+n)/(1+df)) + 1 over docs (sklearn's smooth idf)."""
+    """Cosine of l2-normalised TF-IDF vectors; idf = ln((1+n)/(1+df)) + 1 over docs (sklearn's smooth idf). As with
+    a vectorizer fit on `docs`, query terms that occur in no doc are ignored."""
     toks = [Counter(tokens(d)) for d in docs]
     n = len(docs)
     df = Counter(t for c in toks for t in c)
     idf = {t: math.log((1 + n) / (1 + df[t])) + 1 for t in df}
 
     def vec(c: Counter) -> dict:
-        v = {t: tf * idf.get(t, math.log(1 + n) + 1) for t, tf in c.items()}
+        v = {t: tf * idf[t] for t, tf in c.items() if t in idf}
         norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
         return {t: x / norm for t, x in v.items()}
     qv = vec(Counter(tokens(query)))
