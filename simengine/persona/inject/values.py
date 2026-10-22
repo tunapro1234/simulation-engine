@@ -33,18 +33,18 @@ from ._base import Injector, MissingPersonField, Prompt, register
 
 # ---------------------------------------------------------------- vocabularies
 
-# Schwartz (1992, 2012) ten basic values, in the order of Kang et al. 2023 (alphabetical); definitions as in
-# their Table 23 ("values" + Schwartz's definition).
+# Schwartz (1992, 2012) ten basic values, in the order of Kang et al. 2023 (alphabetical); definitions verbatim
+# from their Table 23 (quotes and dash in ASCII).
 SCHWARTZ_10: dict[str, str] = {
     "achievement": "values personal success through demonstrating competence according to social standards",
     "benevolence": "values preserving and enhancing the welfare of those with whom one is in frequent personal "
-                   "contact (the in-group)",
-    "conformity": "values restraint of actions, inclinations and impulses likely to upset or harm others and "
+                   "contact (the 'in-group')",
+    "conformity": "values restraint of actions, inclinations, and impulses likely to upset or harm others and "
                   "violate social expectations or norms",
     "hedonism": "values pleasure or sensuous gratification for oneself",
     "power": "values social status and prestige, control or dominance over people and resources",
     "security": "values safety, harmony, and stability of society, of relationships, and of self",
-    "self-direction": "values independent thought and action: choosing, creating, exploring",
+    "self-direction": "values independent thought and action - choosing, creating, exploring.",
     "stimulation": "values excitement, novelty, and challenge in life",
     "tradition": "values respect, commitment, and acceptance of the customs and ideas that one's culture or "
                  "religion provides",
@@ -201,14 +201,16 @@ def _check_scale(scale: Sequence[float]) -> tuple[float, float]:
 
 @register
 class SchwartzScores(Injector):
-    """Kang et al. 2023 prompt baseline (LLaMA/ChatGPT_Long; Short with definitions=False): a roleplay system
-    prompt that lists the ten Schwartz values with the person's score on each."""
+    """Kang et al. 2023 prompt baselines, verbatim: Long (Table 23: scale sentence + value definitions + scores)
+    or, with definitions=False, Short (Table 22: scores only). Only the scale bounds are filled from `scale`;
+    the paper's own wording ("who have", "him") is kept."""
     name = "schwartz_scores"
     family = "values"
     paper = "Kang et al. 2023, From Values to Opinions (arXiv:2310.17857), Tables 22-23 prompt baselines"
     needs = ("schwartz",)
-    description = ("System: 'Let's roleplay' + optional Schwartz value definitions + '- Value: score' lines "
-                   "(PVQ 1-6 by default) + 'As this person, please answer'.")
+    description = ("System: Kang et al.'s 'Let's roleplay.' prompt: scale sentence + Schwartz value definitions "
+                   "(Long; definitions=False gives Short, scores only) + 'Value Score:' lines (PVQ 1-6 by default) "
+                   "+ 'As this person, please answer the following question.'")
 
     def __init__(self, definitions: bool = True, scale: Sequence[float] = (1, 6), order: str = "paper",
                  seed: int = 0, **params: Any):
@@ -220,14 +222,18 @@ class SchwartzScores(Injector):
     def render(self, person: dict, question: dict) -> Prompt:
         s = _scores(self, person, "schwartz", list(SCHWARTZ_10), scale=self.scale)
         lo, hi = (_fmt(x) for x in self.scale)
-        parts = [f"Let's roleplay. I will describe a person who has values between {lo} and {hi} for each value. "
-                 f"{lo} means that the value is not important to the person and {hi} means that the value is very "
-                 f"important to the person."]
-        if self.definitions:
-            parts.append("Value definitions:\n" + "\n".join(f"- {c.title()}: {SCHWARTZ_10[c]}" for c in s))
+        parts = ["Let's roleplay."]
+        if self.definitions:                                             # Long (Table 23)
+            parts.append(f"I will describe a person who have values between {lo} and {hi} for each value.\n"
+                         f"{lo} means the value is not important to him at all and {hi} means the value is very "
+                         "much important to him.")
+            parts.append("Value Definition:\n" + "\n".join(f"- {c.capitalize()}: {SCHWARTZ_10[c]}" for c in s))
         codes = _ordered(s, self.order, self.seed, person.get("id"))
-        parts.append("The person's values:\n" + "\n".join(f"- {c.title()}: {_fmt(s[c])}" for c in codes))
-        parts.append("As this person, please answer the following question." + _choice_tail(question))
+        tail = ["As this person, please answer the following question.",
+                "You just have to choose the answer, you don't have to explain it."]
+        if question.get("options"):
+            tail.append("Please choose only one option, even if you're not sure.")
+        parts.append("\n".join(["Value Score:"] + [f"- {c.title()}: {_fmt(s[c])}" for c in codes] + tail))
         return Prompt(system="\n\n".join(parts), user=self.question_block(question),
                       meta={"values": {c: s[c] for c in codes}})
 
