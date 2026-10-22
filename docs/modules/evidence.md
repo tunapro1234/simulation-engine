@@ -339,8 +339,8 @@ open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, fact
     Data", Political Analysis) as 48 % of coefficients differing from ANES and 32 % flipping sign, with compressed
     variance. These figures come from an AI-assembled note; check the paper before citing them.
 
-- **`extras.say_do(frame, say_col, do_col, preds=None, *, cluster="person", on="level", B=1000, seed=0,
-  alpha=0.05)`**: two anchors per person, what they *said* (stated answer, intention) and what they *did*
+- **`extras.say_do(frame, say_col, do_col, preds=None, *, cluster="person", item="item", on="level", B=1000,
+  seed=0, alpha=0.05)`**: two anchors per person, what they *said* (stated answer, intention) and what they *did*
   (observed behaviour). For each prediction column (`"llm"` → `pred_llm`; None = every `pred_*`) it gives the
   distance of the panel mean to each anchor mean, the person-level MAE to each anchor, and the paired difference
   `say − do` (negative = closer to say) for both, with a percentile CI from a cluster bootstrap over `cluster`
@@ -353,6 +353,16 @@ open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, fact
   Coverage (simulated, 40 persons × 3 rows, 300 runs): level and MAE CIs 0.93-0.95, a midpoint prediction gets a
   wrong verdict 5-6 % of the time; when the panel mean sits exactly on an anchor the level CI's far bound is too
   tight (0.84; the difference is pinned at ∓gap there), the bound near 0 and the verdict are unaffected.
+  *Several behaviours per person* (an `item` column, `madde` accepted, with 2+ values, e.g. a person × behaviour
+  frame): the level is taken per item and averaged with equal item weight, and the anchor gap is given per item
+  (one anchor row each, CI at `alpha / k`, Bonferroni); the anchors are apart when any item's gap is. Pooling would
+  hide the gap whenever people over-report one behaviour and under-report another (+1 and −1 cancel: a prediction
+  that tracks `say` exactly read *undecided*, "anchors not apart"). The `mean` / `mean say` / `mean do` columns
+  stay pooled for reference; MAE pools the rows. Put the items on one scale first (z-score each item, as a zMAE
+  run does): both the item average and the MAE mix them. `item=None` pools every row; a named item column that is
+  missing raises. Simulated (60 persons × 3 items with gaps +1/−1/+0.5, person-shared errors, 400 runs, B = 1000):
+  level CI coverage 0.94-0.95, a per-item midpoint prediction gets a wrong verdict 5.8 % of the time; with no gap
+  on any of 5 items the anchors read apart 6 % of the time (1 item: 5 %).
   Each prediction carries a `card_line` for the evidence card. Missing values are dropped per prediction and
   counted. Gap G2 #2 (rehearsal: the person bootstrap and the "which anchor" scene were hand-written).
   *Export:* import from `simengine.evidence.extras` for now; the package-level `ev.say_do` lands with the
@@ -364,11 +374,12 @@ open("card.md", "a").write("\n" + ev.section_markdown([spread, done, paper, fact
   print(extras.section_markdown(sd)); [r["card_line"] for r in sd["predictions"]]
   ```
 
-Tests: `tests/test_evidence_say_do.py` (8 tests, synthetic, < 1 s): a prediction equal to `say` plus noise reads
+Tests: `tests/test_evidence_say_do.py` (9 tests, synthetic, < 1 s): a prediction equal to `say` plus noise reads
 closer to say, `do` plus noise closer to do, the midpoint undecided; exact point values; anchors not apart →
 undecided; person-cluster CI wider than the row CI when errors are tied within person; `group` (and
-`grup`) used as the cluster when there is no `person` column, a missing named cluster raises; Turkish `tahmin_`
-alias, missing rows, no cluster column, errors and rendering.
+`grup`) used as the cluster when there is no `person` column, a missing named cluster raises; items with
+opposite say−do gaps read per item (pooled they cancel to "not apart"), one item equals no item column; Turkish
+`tahmin_` alias, missing rows, no cluster column, errors and rendering.
 
 Tests: `tests/test_evidence_extras.py` (21 tests, synthetic data, < 1 s): variance ratio 1 on identical data and
 0.5 on halved spread (point and CI), unpaired input, missing and degenerate items, Turkish aliases; completion
