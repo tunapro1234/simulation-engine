@@ -115,9 +115,13 @@ desc = df.groupby("series").description.first().to_dict()
 if a.live:
     if a.max_usd is None:
         sys.exit("--live needs --max-usd (e.g. --max-usd 0.5); the ledger stops new calls at that total")
-    key = Path(a.key_file).expanduser().read_text().strip() if a.key_file else None   # never printed
-    llm = se.llm.Claude(model=a.model, effort="low", thinking="off", max_tokens=200, cache_dir=out / ".cache",
-                        budget_usd=a.max_usd, api_key=key, tag="adoption")
+    try:
+        key = Path(a.key_file).expanduser().read_text().strip() if a.key_file else None   # never printed
+        llm = se.llm.Claude(model=a.model, effort="low", thinking="off", max_tokens=200, cache_dir=out / ".cache",
+                            budget_usd=a.max_usd, api_key=key, tag="adoption")
+        llm.build_request("s", "u")                                   # fails early: unpriced model, thinking on
+    except (OSError, KeyError, ValueError) as e:
+        sys.exit(f"--live setup failed: {type(e).__name__}: {e}")
 else:
     llm = se.FakeLLM(fake_analyst)
 
@@ -125,19 +129,27 @@ else:
 ask = lambda market: (SYSTEM, f"Product: {PRODUCT}\nMarket: {market}")
 names = sorted(desc)
 try:
-    replies = llm.map([ask(desc[s]) for s in names] + [ask("a typical market in this country")], max_tokens=200)
-except (se.llm.BudgetExceeded, se.llm.AuthError) as e:          # budget hit / no key: no further calls
+    replies = llm.map([ask(desc[s]) for s in names] + [ask("a typical market in this country")], max_tokens=200,
+                      return_exceptions=True)                         # a refusal / empty reply -> default prior
+except se.llm.StopError as e:                                         # budget hit / no key / spend limit
     sys.exit(f"stopped before the LLM step finished: {e}")
 
 def bass_of(r):
-    j = se.sim.parse_json(r.text)
+    j = None if isinstance(r, Exception) else se.sim.parse_json(r.text)
     j = j if isinstance(j, dict) else {}                              # unparsed -> mid-prior defaults
-    num = lambda k, d, lo, hi: float(np.clip(pd.to_numeric(j.get(k, d), errors="coerce") or d, lo, hi))
-    return dict(p=num("p", 0.005, 1e-4, 0.2), q=num("q", 0.3, 0.01, 2.0), m=num("m", 50, 1, 100))
 
-guess = [bass_of(r) for r in replies]
+    def num(k, d, lo, hi):
+        try:
+            v = float(j.get(k, d))
+        except (TypeError, ValueError):
+            v = d
+        return float(np.clip(v if np.isfinite(v) else d, lo, hi))
+    return dict(p=num("p", 0.005, 1e-4, 0.2), q=num("q", 0.3, 0.01, 2.0), m=num("m", 50, 1, 100)), bool(j)
+
+guess, parsed = zip(*(bass_of(r) for r in replies))
 priors, generic = dict(zip(names, guess)), {s: guess[-1] for s in names}
-print(f"LLM calls: {len(replies)} ({len(names)} markets + 1 generic control)")
+print(f"LLM calls: {len(replies)} ({len(names)} markets + 1 generic control); "
+      f"unusable replies (default prior used): {len(parsed) - sum(parsed)}")
 
 # 4. Backtest: every method sees only t <= cutoff (all series), forecasts the next HORIZON periods.
 small = dict(n_sim=a.bank, n_agents=a.bank, seed=0)
