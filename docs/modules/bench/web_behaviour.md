@@ -111,6 +111,80 @@ Default `split="batch"`: the collection batches are dated in the file names. Ses
 so the test set is a later, slightly changed site: a temporal shift, not an i.i.d. holdout. `split="random"` holds out 30%
 of sessions with `default_rng(seed)`.
 
+## Measured numbers
+
+One run each on the local catalogue copy on 2026-10-22 (B = 1000; cells `value [95% CI]`). Command, from the
+repository root with the catalogue under `$SIMENGINE_DATA`:
+
+```python
+from simengine import bench
+from simengine.bench.tasks import web_behaviour as wb
+for opts in ({}, {"split": "random", "seed": 0}):
+    for T in (wb.WebShopNextAction, wb.WebShopBuy):
+        t = T(**opts); fr = t.run(data=t.load(None))
+        print(bench.to_markdown(t.score_all(fr, B=1000).assign(status="ok", is_baseline=True), primary_only=False))
+```
+
+Data as loaded: 1,643 trajectories, 1,642 ending in `buy`; mean final reward 0.744 and reward = 1 in 47.3% of the
+1,643 (train batches 0.728 / 43.1%, test batches 0.755 / 50.0%). Close to the paper's human-evaluation average
+(75.5 / 50.0%, Yao et al. 2022 appendix A.6), which is a different set of sessions.
+
+### webshop_next_action, split="batch" (train 5,536 rows / 645 sessions; test 9,623 rows / 998 sessions)
+
+| method | loglik | accuracy | share_tvd |
+|---|---|---|---|
+| logistic | -0.934 [-0.953, -0.916] | 0.641 [0.630, 0.652] | 0.061 [0.054, 0.068] |
+| markov2 | -1.004 [-1.022, -0.986] | 0.616 [0.606, 0.626] | 0.068 [0.058, 0.079] |
+| markov | -1.182 [-1.198, -1.166] | 0.530 [0.520, 0.540] | 0.079 [0.066, 0.091] |
+| uxagent_markov | -1.965 [-2.001, -1.926] | 0.289 [0.277, 0.301] | 0.218 [0.206, 0.233] |
+| frequency | -2.051 [-2.068, -2.035] | 0.243 [0.234, 0.252] | 0.106 [0.090, 0.125] |
+| uniform | -2.303 | 0.100 | 0.315 [0.296, 0.335] |
+
+### webshop_buy, split="batch" (train 2,485 rows, buy rate 0.258; test 4,689 rows / 998 sessions, buy rate 0.212)
+
+| method | auc | logloss | brier |
+|---|---|---|---|
+| logistic | 0.808 [0.793, 0.824] | 0.414 [0.397, 0.432] | 0.132 [0.126, 0.139] |
+| markov | 0.719 [0.704, 0.735] | 0.465 [0.451, 0.481] | 0.150 [0.144, 0.157] |
+| uxagent_markov | 0.620 [0.598, 0.641] | 0.524 [0.499, 0.552] | 0.165 [0.156, 0.175] |
+| constant | 0.500 | 0.522 [0.510, 0.537] | 0.169 [0.164, 0.176] |
+
+### split="random", seed=0 (test 493 sessions)
+
+| method | next: loglik | next: accuracy | next: share_tvd | buy: auc | buy: logloss |
+|---|---|---|---|---|---|
+| logistic | -0.968 [-1.013, -0.928] | 0.613 [0.597, 0.629] | 0.024 [0.015, 0.040] | 0.799 [0.772, 0.823] | 0.435 [0.409, 0.467] |
+| markov2 | -1.025 [-1.060, -0.993] | 0.589 [0.575, 0.604] | 0.019 [0.013, 0.040] | | |
+| markov | -1.183 [-1.215, -1.154] | 0.528 [0.513, 0.544] | 0.023 [0.015, 0.047] | 0.711 [0.686, 0.734] | 0.482 [0.459, 0.507] |
+| uxagent_markov | -2.026 [-2.087, -1.967] | 0.267 [0.248, 0.285] | 0.231 [0.215, 0.251] | 0.609 [0.579, 0.642] | 0.562 [0.527, 0.598] |
+| frequency / constant | -2.082 [-2.126, -2.043] | 0.228 [0.213, 0.241] | 0.035 [0.020, 0.072] | 0.500 | 0.539 [0.518, 0.561] |
+| uniform | -2.303 | 0.100 | 0.271 [0.249, 0.306] | | |
+
+(random split: next-action test 4,631 rows, buy test 2,130 rows, buy rate 0.230.)
+
+### Humans vs UXAgent LLM agents (`compare_agents`, batch split)
+
+| per session / share of actions | human train | human test | UXAgent |
+|---|---|---|---|
+| sessions | 645 | 998 | 60 |
+| actions | 9.58 | 10.64 | 12.58 |
+| searches | 1.50 | 1.42 | 2.08 |
+| products opened | 1.90 | 2.35 | 2.62 |
+| detail tabs | 0.63 | 0.90 | 1.92 |
+| option clicks | 1.25 | 1.42 | 2.75 |
+| bought | 1.000 | 0.999 | 0.867 |
+| share search / click_item / select_option | 0.157 / 0.198 / 0.131 | 0.133 / 0.221 / 0.133 | 0.166 / 0.208 / 0.219 |
+| share view_detail / buy | 0.066 / 0.104 | 0.084 / 0.094 | 0.152 / 0.146 |
+| share next_page / prev_page | 0.093 / 0.034 | 0.055 / 0.026 | 0.009 / 0.001 |
+| share back / back_to_search / other | 0.141 / 0.053 / 0.023 | 0.200 / 0.040 / 0.014 | 0.041 / 0.000 / 0.058 |
+
+What the numbers say: the human's own last two clicks carry most of the signal (`markov2` takes loglik from -2.05 to
+-1.00); state counts add a little more (`logistic` -0.93). A chain learnt from LLM shopping agents scores barely above
+the human marginal on loglik (-1.97 vs -2.05) and is the worst on `share_tvd` after uniform: the agents read details
+and pick options about twice as often as people, and almost never page through results or go back. On a random split
+every chain-type baseline gets `share_tvd` near 0.02, so a simulated crowd has to come within a few points of the
+human action mix to be competitive on that metric.
+
 ## Provenance
 
 - New code, not ported from a research branch. Data reading follows the published file format (one JSON line per page:
