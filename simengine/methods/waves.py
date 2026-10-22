@@ -333,13 +333,19 @@ def subgroup_mixture(df: pd.DataFrame, wave: str, segment: str, item: str | None
     waves (population level, or segment x subgroup shrunk toward it with pseudo-count ``m``).
 
     weights: None = each segment's subgroup composition (valid answers, survey weights) in the last wave of the
-        window; "target" = its composition in the target wave (only when that is known before the answers, e.g.
-        the sample frame); {subgroup: w} for every segment; or {segment: {subgroup: w}}.
-    swap: ``role_swap`` mapping applied to the conditionals of ``swap_items`` (default: every item).
+        window; "target" = its composition in the target wave's rows of each item, answered or not (subgroup labels
+        with the answers missing, e.g. the sample frame; in a backtest it uses the target's subgroup labels, so only
+        when those are known before the answers); {subgroup: w} for every segment; or {segment: {subgroup: w}}.
+    swap: ``role_swap`` mapping applied to the conditionals of ``swap_items``, which must be given with it: swapping
+        a stable item (party ID itself, religion) hands each party the other's answers.
     """
     df, item, value, target = _prepare(df, wave, segment, item, value, target)
     if k < 1 or (m is not None and m < 0):
         raise ValueError("k must be >= 1 and m >= 0")
+    if isinstance(weights, str) and weights != "target":
+        raise ValueError("weights must be None, 'target', {subgroup: w} or {segment: {subgroup: w}}")
+    if swap and swap_items is None:
+        raise ValueError("swap= needs swap_items= (the regime-dependent items, e.g. presidential approval)")
     before = _waves_before(df, wave, target)
     if not before:
         raise ValueError(f"no wave before target {target!r}")
@@ -348,12 +354,19 @@ def subgroup_mixture(df: pd.DataFrame, wave: str, segment: str, item: str | None
     sub_c = _counts(train, [subgroup], item, value, categories, weight, items)
     seg_sub_c = _counts(train, [segment, subgroup], item, value, categories, weight, items) if m is not None \
         else None
-    if weights is None or (isinstance(weights, str) and weights == "target"):
-        comp_src = df[df[wave] == target] if isinstance(weights, str) else _window(df, wave, [before[-1]])
-        if not len(comp_src):
+    comp = {}   # {item: weight sum per (segment, subgroup)}
+    if weights is None:
+        last = _counts(_window(df, wave, [before[-1]]), [segment, subgroup], item, value, categories, weight, items)
+        comp = {it: last[it][0].sum(axis=1) for it in items}
+    elif isinstance(weights, str):
+        tg = df[df[wave] == target]
+        if not len(tg):
             raise ValueError("weights='target' needs the target wave's rows (subgroup labels) in df")
-        comp = _counts(comp_src, [segment, subgroup], item, value, categories, weight, items)
-    sw_items = set(items if swap_items is None else swap_items)
+        for it in items:   # every row of the item, answered or not: the answers are not used
+            di = tg[tg[item] == it]
+            w = di[weight].astype(float) if weight else pd.Series(1.0, index=di.index)
+            comp[it] = w.groupby([di[segment], di[subgroup]]).sum()
+    sw_items = set(swap_items or ())
     preds, ntrain = {}, {}
     for it in items:
         c, sub_n, _ = sub_c[it]
@@ -373,9 +386,7 @@ def subgroup_mixture(df: pd.DataFrame, wave: str, segment: str, item: str | None
             if swap and it in sw_items:
                 cs = role_swap(cs, swap)
             if weights is None or isinstance(weights, str):
-                cc = comp[it][0]
-                w = cc.sum(axis=1)
-                ws = {g: float(v) for (s2, g), v in w.items() if s2 == s}
+                ws = {g: float(v) for (s2, g), v in comp[it].items() if s2 == s}
                 if not ws:   # segment absent from the composition source: population subgroup shares
                     ws = {g: float(v) for g, v in c.sum(axis=1).items()}
             elif all(isinstance(v, Mapping) for v in weights.values()):

@@ -186,11 +186,26 @@ class Mixture(unittest.TestCase):
         np.testing.assert_allclose(_cell(per, "s3", "q2", "pred_mixture"), dem)
         tgt = subgroup_mixture(DF, **kw, weights="target")
         self.assertEqual(len(tgt), 8)
+        with self.assertRaises(ValueError):
+            subgroup_mixture(DF, **kw, weights="bogus")
+        with self.assertRaises(ValueError):    # swapping every item would swap stable items too
+            subgroup_mixture(DF, **kw, swap={"Dem": "Rep", "Rep": "Dem"})
         seg = subgroup_mixture(DF, **kw, m=10, k=4)
         # segment x subgroup cells shrunk toward the subgroup: q2 now depends on the segment again
         self.assertGreater(one_minus_tvd(_cell(seg, "s0", "q2", "pred_mixture"), Q2["s0"]),
                            one_minus_tvd(_cell(subgroup_mixture(DF, **kw, k=4), "s0", "q2", "pred_mixture"),
                                          Q2["s0"]))
+
+
+    def test_target_weights_from_labels_without_answers(self):
+        # future wave: subgroup labels known, answers missing; s0 is all Rep there
+        fut = DF[DF.year == 2012].assign(year=2013, ans=np.nan)
+        fut.loc[fut.seg == "s0", "pid"] = "Rep"
+        d = pd.concat([DF, fut], ignore_index=True)
+        fr = subgroup_mixture(d, **COLS, subgroup="pid", target=2013, weights="target")
+        rep = _emp(DF[(DF.year == 2012) & (DF.pid == "Rep")].assign(seg="x"), "x", "approve", CATS["approve"])
+        np.testing.assert_allclose(_cell(fr, "s0", "approve", "pred_mixture"), rep)
+        self.assertTrue(fr.truth.isna().all())
 
 
 class Backtest(unittest.TestCase):
