@@ -126,19 +126,22 @@ of questions. EvalFrame columns: `unit` (`item|attribute:group`), `item`, `group
 
 ## Measured numbers
 
-These are from runs on the local copies (22 Oct 2026, `nice -n 19`). The script ran all five configurations below in
-28.7 s wall time with 168 MB peak RSS. Every value is shown as `value [95% CI]`. Command, from the repository root:
+These are from runs on the local copies (22 Oct 2026, `nice -n 19`, after the review that made `peers="blocks"`
+the default). The script ran the five configurations below, each with the default `peers="blocks"` and with
+`peers="all"`, in 61.2 s wall time with 188 MB peak RSS. Every value is shown as `value [95% CI]`. Command, from the
+repository root:
 
 ```python
 from simengine.bench.tasks import subpop as sp
-for T, opts in ((sp.SubPOPOpinionQA, {}), (sp.SubPOPOpinionQA, {"groups": "61"}), (sp.SubPOPOpinionQA, {"split": "dev"}),
-                (sp.GlobalOpinionQA, {}), (sp.GlobalOpinionQA, {"split": "dev"})):
+cfg = [(sp.SubPOPOpinionQA, {}), (sp.SubPOPOpinionQA, {"groups": "61"}), (sp.SubPOPOpinionQA, {"split": "dev"}),
+       (sp.GlobalOpinionQA, {}), (sp.GlobalOpinionQA, {"split": "dev"})]
+for T, opts in cfg + [(T, {**o, "peers": "all"}) for T, o in cfg]:
     task = T(**opts); data = task.load("<catalogue>")
     print(task.score_all(task.run(data=data)))
 ```
 
 **subpop_opinionqa, test split, 22 groups, setting B** (237 test questions, 253 train questions, 5,211 rows,
-0 fallbacks):
+0 fallbacks; identical with `peers="all"`, no nearest group was a block mate):
 
 | baseline | wd | tvd | js_sim |
 |---|---|---|---|
@@ -147,23 +150,31 @@ for T, opts in ((sp.SubPOPOpinionQA, {}), (sp.SubPOPOpinionQA, {"groups": "61"})
 | nearest_group | **0.0506** [0.0480, 0.0531] | **0.0868** [0.0836, 0.0901] | **0.9064** [0.9033, 0.9097] |
 
 - **`groups="61"`** (56 of the listed groups occur in the file; 13,247 rows): uniform 0.1784, overall 0.0588
-  [0.0563, 0.0613], nearest_group 0.0484 [0.0462, 0.0507] (wd).
-- **`split="dev"`** (130 dev and 123 train questions): uniform 0.1823, overall 0.0634, nearest_group 0.0496
-  [0.0464, 0.0532] (wd).
+  [0.0563, 0.0613], nearest_group 0.0487 [0.0465, 0.0510] (wd); `peers="all"`: nearest_group 0.0484
+  [0.0462, 0.0507].
+- **`split="dev"`** (130 dev and 123 train questions): uniform 0.1823, overall 0.0634, nearest_group 0.0487
+  [0.0455, 0.0523] (wd); `peers="all"`: nearest_group 0.0496 [0.0464, 0.0532].
 - **Uniform check:** uniform `wd` over all 490 items × 22 groups (10,775 rows, no split) is 0.1775. SubPOP Table 1
   reports 0.178 for the uniform upper bound on OpinionQA. The `TestRealData` test checks this agreement when
   `$SIMENGINE_DATA` is set.
 
 **global_opinionqa, test split, setting B** (860 test questions, 847 train questions, 22,487 rows, 138 country labels,
-3 fallbacks):
+7 fallbacks):
 
 | baseline | tvd | js_sim |
 |---|---|---|
 | uniform | 0.4031 [0.3888, 0.4164] | 0.5819 [0.5669, 0.5975] |
-| overall | 0.1786 [0.1737, 0.1839] | 0.8081 [0.8024, 0.8136] |
-| nearest_group | **0.1591** [0.1553, 0.1627] | **0.8273** [0.8236, 0.8311] |
+| overall | 0.1787 [0.1738, 0.1840] | 0.8080 [0.8023, 0.8134] |
+| nearest_group | **0.1602** [0.1564, 0.1639] | **0.8262** [0.8224, 0.8301] |
 
-`split="dev"` (426 questions): uniform 0.3995, overall 0.1786, nearest_group 0.1610 [0.1555, 0.1661] (tvd).
+With `peers="all"` (a country may read its own non-national sample; 3 fallbacks): overall 0.1786 [0.1737, 0.1839],
+nearest_group 0.1591 [0.1553, 0.1627] tvd, 0.8273 js_sim.
+
+`split="dev"` (426 questions): uniform 0.3995, overall 0.1787, nearest_group 0.1621 [0.1566, 0.1673] (tvd);
+`peers="all"`: overall 0.1786, nearest_group 0.1610 [0.1555, 0.1661].
+
+The leak check under **Why blocks** (complement method, per-attribute wd on the test split) is a separate local run
+of the same date, not part of the script above.
 
 Literature numbers for comparison (not measured here). From SubPOP Table 1 on OpinionQA, 22 groups, setting A:
 - human sampling lower bound 0.031;
@@ -181,11 +192,18 @@ numbers. Under setting A, uniform (0.18) is the only baseline here; see `opinion
 - **Split:** the hashed 50/50 question split is this module's own choice. SubPOP uses all of OpinionQA for evaluation
   and trains on other ATP waves (SubPOP-Train), which is not available locally (gated). Numbers on half the questions
   are not the paper's full-set numbers.
+- **Sibling questions cross the split:** items of one Pew battery (e.g. `RACESURV47a`..`f`, same wave) are hashed
+  one by one, so a setting-A method can copy a train sibling. Measured (local run, 22 Oct): with batteries taken as
+  the qkey minus trailing lowercase letters, 85 of the 237 test questions have a train sibling; copying the group's
+  mean sibling distribution gives wd 0.130 on those 1,870 rows vs 0.172 for uniform. Uppercase-suffix batteries
+  (`REASONGUNA`..`E`) are not caught by that rule, so the true overlap is larger. `opinionqa_groups` holds out whole
+  waves if this matters.
 - **IDIMPORT_W43:** the five question texts share one Overall row in the file while their group rows differ.
   `opinionqa_groups` keys by qkey alone and keeps only the last text's group rows for this qkey; this module keeps
   all five as separate items.
 - **JS log base:** Durmus et al. do not state the base. Base e would give distances × sqrt(ln 2) ≈ 0.833 of these.
-- **GlobalOpinionQA marginal:** the country labels include "(Non-national sample)" variants, which are treated as
-  separate countries. The marginal is an unweighted country mean, not population-weighted.
+- **GlobalOpinionQA marginal:** the country labels include "(Non-national sample)" variants, which are scored as
+  separate rows but share their country's block. The marginal is an unweighted mean over the other blocks' rows (a
+  country with two samples counts twice), not population-weighted.
 - **Licences:** SubPOP data come from Pew ATP terms (research use, attribution, no re-identification). GlobalOpinionQA
   is CC-BY-NC-SA-4.0. No data rows are in the repository.
