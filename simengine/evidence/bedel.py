@@ -189,8 +189,14 @@ def worth_vs_baseline(data, ours: str | None = None, baseline: str | None = None
     units. Point: each column draws one (R, n) labelled index set shared by both priors (closed-form classical MSE, as
     in olc). CI: column bootstrap with >= SUTUN_BOOT_ESIK columns, otherwise unit bootstrap; each resample is shared
     by both priors, so the difference CI is paired. same_as_baseline is True when the difference CI includes 0: the
-    "worth N humans" figure is then the baseline's, not something ours adds. olc itself is unchanged.
+    "worth N humans" figure is then not evidence for what ours adds. olc itself is unchanged.
+    baseline: an LLM-free prior that never saw the target labels (e.g. stated intent). An OOF model fitted on the
+    same population's labels is circular: its multiplier is inflated and ours wrongly reads "below baseline".
+    Same seed and rows as the card (single item, the rows evaluate scored, e.g. split="test") reproduce the card's
+    bedel row for ours; multi-item cards use orneklem's pooled-λ estimator and can differ.
     hizli: as in olc (shared labelled draws across the unit bootstrap; default on from HIZLI_ESIK units).
+    Coverage (simulation, 200 populations each, N = 300-1000, n = 100, incl. skewed y; 25-item column bootstrap):
+    difference CI 0.95-0.98, slightly conservative.
     """
     if hasattr(data, "columns"):
         if ours is None or baseline is None:
@@ -272,8 +278,8 @@ def section(result: dict, *, title: str | None = None) -> dict:
              f"({r['multiplier_ours']:.2f}×); strongest baseline alone ~{r['humans_baseline']:.0f} "
              f"({r['multiplier_baseline']:.2f}×); difference {r['difference']:+.2f}× [{lo:+.2f}, {hi:+.2f}]."]
     if r["same_as_baseline"]:
-        notes.append(f"Same as baseline: the difference CI includes 0, so the multiplier comes from the information "
-                     f"in {b}, not from what {o} adds.")
+        notes.append(f"Same as baseline: the difference CI includes 0, so {o} is not shown to be worth more humans "
+                     f"than {b} alone; the multiplier is no evidence for what {o} adds.")
     elif r["difference"] < 0:
         notes.append(f"Below baseline: {b} alone is worth more humans than {o}.")
     notes.append(f"Paired on the same labelled draws and {r['B']} {_GA_EN.get(r['ga_turu'], r['ga_turu'])} resamples "

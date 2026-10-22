@@ -85,6 +85,12 @@ class TestWorthVsBaseline(unittest.TestCase):
         self.assertIn("unit-bootstrap", md)
         self.assertIn("<table>", extras.section_html(s))
 
+    def test_ours_point_equals_olc_same_seed(self):
+        # the card's single-item bedel row is olc at the same seed: the ours figure must reproduce it
+        _, y, base, ours = _veri(N=400)
+        r = bedel.worth_vs_baseline([(y, ours, base)], B=20, seed=3)
+        self.assertAlmostEqual(r["multiplier_ours"], bedel.olc([(y, ours)], B=20, tohum=3)["carpan"], places=12)
+
     def test_olc_unchanged(self):
         _, y, base, _ = _veri(N=400)
         a = bedel.olc([(y, base)], B=20)

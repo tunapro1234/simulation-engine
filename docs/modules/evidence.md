@@ -211,6 +211,9 @@ Measured at n = 100 [kanit RAPOR §1a]:
   turns it into an extras section ("worth ~X humans; strongest baseline alone ~Y; difference ..."), rendered
   with `section_markdown` / `section_html`. In rehearsal G2 the card's 1.51× came from the LLM-free stated-intent
   arm, so the same multiplier held for that arm alone. `olc` and the card's default row are unchanged for now.
+  Pass the rows the card scored (e.g. the test split): for a single item at the same seed the ours figure equals
+  the card's row. The baseline must not be fitted on the target labels (circular, see below), or ours reads
+  "below baseline" against an inflated multiplier. The paired difference CI covered 95-98 % in simulation.
 - *Circular priors* are excluded with `circular=`: models trained on the same population's target labels
   would inflate the multiplier (for example "OE GBDT 5×"). A prior that uses input collected after the
   target also leaks. A version using a later survey statement showed 5.02× and was withdrawn [kanit RECETE 4].
