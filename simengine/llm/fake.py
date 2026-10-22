@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import numbers
 import re
 from typing import Any, Callable, Sequence
 
@@ -79,7 +80,8 @@ def _field_specs(user: str) -> dict[str, str]:
 
 
 def _questions(user: str) -> dict[str, dict]:
-    """{"<field stem>": {"text", "options"}} from the '[<stem>] text' lines and their '   a) option' lines."""
+    """{"<field stem>": {"text", "options"}} from the '[<stem>] text' lines (a multi-line text keeps its other
+    lines) and their '   a) option' lines."""
     out: dict[str, dict] = {}
     cur = None
     sec = user.split("\nQuestions:\n", 1)[-1].split("\n\nPeople:\n", 1)[0]
@@ -88,11 +90,13 @@ def _questions(user: str) -> dict[str, dict]:
         if m:
             cur = out[m.group(1)] = {"text": m.group(2), "options": []}
             continue
-        m = re.match(r"^\s+[a-z]\) (.*)$", ln)
-        if m and cur is not None:
+        if cur is None:
+            continue
+        m = re.match(r"^   [a-z]\) (.*)$", ln)
+        if m:
             cur["options"].append(m.group(1))
-        elif ln.strip() and cur is not None and not ln.startswith(" "):
-            cur = None
+        elif not cur["options"]:
+            cur["text"] += "\n" + ln
     return out
 
 
@@ -136,17 +140,19 @@ def _coerce(v: Any, d: dict, h: float, strict: bool = False):
         if not letters:
             return v
         j = None
-        num = isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer()
+        num = (isinstance(v, numbers.Real) and not isinstance(v, bool) and math.isfinite(v)
+               and float(v).is_integer())            # numpy ints / floats from a table count too
         s = str(int(v)) if num else (v.strip() if isinstance(v, str) else None)
         if s is not None and s in opts:              # option text first: options [1..5] and value 3 mean "3"
             j = opts.index(s)
-        elif isinstance(v, str) and s.lower() in letters:
-            j = letters.index(s.lower())
-        elif num:
+        elif isinstance(v, str) and s.lower() in [x.lower() for x in letters]:
+            j = [x.lower() for x in letters].index(s.lower())
+        elif num and not all(_is_num(o) for o in opts):   # numeric option texts take no index: 0 is not "1"
             j = int(v)
         if j is None or not 0 <= j < len(letters):
             if strict:
-                raise ValueError(f"value_fn returned {v!r} for {d['field']}; give an option, its letter or index")
+                raise ValueError(f"value_fn returned {v!r} for {d['field']}; give an option, its letter or index "
+                                 f"(options that are all numbers take no index)")
             j = int(h * len(letters)) % len(letters)
         return letters[j]
     lo, hi = d["min"], d["max"]
@@ -164,6 +170,14 @@ def _coerce(v: Any, d: dict, h: float, strict: bool = False):
     return int(v) if v.is_integer() else round(v, 4)
 
 
+def _is_num(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
 def _unit(*parts) -> float:
     return int(hashlib.md5("|".join(map(str, parts)).encode()).hexdigest()[:8], 16) / 0x100000000
 
@@ -178,8 +192,9 @@ def survey_responder(value_fn: Callable[[str, str, dict], Any] | None = None, se
     spec: {"field", "stem", "kind" ("numeric", "likert5", "choice"), "text", "spec", "arm", "profile"; numeric /
     likert5: "min", "max", "integer"; choice: "options" (texts), "letters"}. A number is clamped into [min, max]
     (rounded for int fields); a choice may be the option text (tried first, so options [1, 2, 3] and 3 give "3"),
-    its letter or its index. None (or no value_fn) -> `sim.schema_responder(seed)`'s deterministic hashed value,
-    clamped the same way. Free text comes from schema_responder too, and so does every non-panel prompt.
+    its letter or its index (not when every option is a number: 0 for options [1..5] raises). numpy numbers from a
+    table work like Python ones; NaN raises. None (or no value_fn) -> `sim.schema_responder(seed)`'s deterministic
+    hashed value, clamped the same way. Free text comes from schema_responder too, and so does every non-panel prompt.
 
     Control arms keep the real persona ids. The no_persona arm (arm "no_persona": the prompt shows only a neutral
     adult) never calls value_fn and gets the hashed default, so a pid-keyed value_fn cannot leak the person into

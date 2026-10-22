@@ -96,6 +96,31 @@ class TestValueFn(unittest.TestCase):
         ch = survey_frame(res, kind="choice").set_index("group")["pred_choice"]
         self.assertEqual([ch[p] for p in ("p0", "p1", "p2")], ["1", "3", "5"])
 
+    def test_numpy_values_multiline_text_and_numeric_options_take_no_index(self):
+        import numpy as np
+        import pandas as pd
+        truth = pd.Series([1, 3, 5], index=["p0", "p1", "p2"])          # value_fn reading a table: np.int64
+        qs = [{"id": "kids", "text": "How many?", "options": [1, 2, 3, 4, 5]},
+              {"id": "pick", "text": "Read this first.\nThen pick one", "options": ["red", "blue"]},
+              {"id": "w", "text": "Pay?", "kind": "numeric", "min": 0, "max": 100}]
+        seen = {}
+
+        def fn(pid, qid, spec):
+            seen[qid] = spec
+            return {"kids": truth[pid], "pick": "blue", "w": np.float64(42.0)}[qid]
+
+        res = survey(panel(3), qs, llm=FakeLLM.survey(fn), controls=[], B=10)
+        self.assertEqual(res["unparsed"], 0)
+        self.assertEqual(seen["pick"]["options"], ["red", "blue"])
+        self.assertEqual(seen["pick"]["text"], "Read this first.\nThen pick one")
+        ch = survey_frame(res, kind="choice").set_index(["group", "item"])["pred_choice"]
+        self.assertEqual([ch[(p, "kids")] for p in ("p0", "p1", "p2")], ["1", "3", "5"])
+        self.assertTrue((survey_frame(res, kind="numeric")["pred_value"] == 42).all())
+        with self.assertRaises(ValueError):                              # 0 is not an option; no index -> "1"
+            survey(panel(2), qs[:1], llm=FakeLLM.survey(lambda pid, qid, spec: 0), controls=[], B=10)
+        with self.assertRaises(ValueError):
+            survey(panel(2), qs[2:], llm=FakeLLM.survey(lambda pid, qid, spec: float("nan")), controls=[], B=10)
+
     def test_questions_maps_field_stems_back_to_ids(self):
         qs = [{"id": "q-price long question id", "text": "Pay?", "kind": "numeric", "min": 0, "max": 100},
               {"id": "1", "text": "Pick", "options": ["x", "y"]}]
