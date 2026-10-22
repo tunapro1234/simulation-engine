@@ -16,6 +16,18 @@ Two tools:
    before it is locked, so the lock hash covers them. `compare_targets` later sets observed metrics against them;
    a metric that was not declared is reported as "undeclared", a missing one stays missing.
 
+4. **Dated addenda and deviations.** A locked prereg is never edited or re-locked. `add_addendum` writes
+   `ONKAYIT-EK<k>.md` next to it (reason, deviation, new falsification line), records the parent's SHA-256 and lock
+   time, and locks the addendum with its own lock chained to the parent lock (and to the previous addendum's lock);
+   `verify_addenda` checks the whole chain. `seal_deviation` seals the pre-deviation arm under its own name before
+   the post-deviation arm, in the same chain, and `grade_arms` grades every sealed arm with one scorer, side by side.
+
+        add_addendum("ONKAYIT.md", reason="referee found a stronger base", deviation="ours = H_joint",
+                     falsification="claim fails if H_joint - T4b CI contains 0")      # -> ONKAYIT-EK1.md + lock
+        seal_deviation(c5_df, h_df, "test forecast", ".prereg", reason="post-referee choice",
+                       addendum="ONKAYIT-EK1.md", pre_name="C5", post_name="H_joint")
+        grade_arms(".prereg", truth_df, keys=["segment", "item"], column="p")       # one row per arm
+
 A git commit time and a local clock are the author's own claim, not third-party evidence. For stronger proof, publish
 the SHA-256 somewhere external (an email, an issue comment) at lock time.
 """
@@ -27,6 +39,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import subprocess
 import warnings
 from dataclasses import asdict, dataclass, field
@@ -71,7 +84,8 @@ class Prereg:
                 return "\n".join(f"- **{k}**: {v}" for k, v in x.items())
             return str(x)
         L = [f"# Pre-registration: {self.title}", "",
-             "_Written and locked before any result was computed. Changes only as dated addenda below._", ""]
+             "_Written and locked before any result was computed. Never edited after the lock: changes go into "
+             "dated, separately locked addenda next to this file (`<name>-EK<k>`, research.add_addendum)._", ""]
         for baslik, deger in (("Question", self.question), ("Data", self.data), ("Split", self.split),
                               ("Metrics", self.metrics), ("Baselines", self.baselines),
                               ("Expected result", self.expected), ("Falsification", self.falsification),
@@ -155,11 +169,13 @@ def _git_commit(paths: list[Path], message: str) -> str | None:
         return None
 
 
-def lock_prereg(path, *, git_commit: bool = False, lock_path=None, overwrite: bool = False) -> dict:
+def lock_prereg(path, *, git_commit: bool = False, lock_path=None, overwrite: bool = False, parent=None) -> dict:
     """Lock a pre-registration file: SHA-256 + timestamp into `<path>.lock.json` (optionally git commit both).
 
     Refuses to re-lock an already locked file with different content unless overwrite=True (a changed prereg needs a
-    dated addendum and a new lock, not a silent replacement)."""
+    dated addendum, `add_addendum`, not a replacement: overwrite loses the old lock). `parent`: the locked prereg
+    this file is an addendum of; the lock then records the parent's sha256, lock time and lock hash, and the lock
+    hash of the parent's latest other addendum (`add_addendum` does this for you)."""
     p = Path(path)
     lp = _lock_path(p, lock_path)
     sha = file_sha256(p)
@@ -168,7 +184,12 @@ def lock_prereg(path, *, git_commit: bool = False, lock_path=None, overwrite: bo
         if old.get("sha256") == sha:
             return old
         raise ValueError(f"{p} is already locked with a different hash ({old.get('sha256', '')[:12]}); "
-                         "write an addendum and lock with overwrite=True")
+                         "restore it and write a dated addendum with add_addendum() (overwrite=True loses the "
+                         "old lock)")
+    return _write_lock(p, lp, sha, _addendum_link(parent, p) if parent is not None else None, git_commit)
+
+
+def _write_lock(p: Path, lp: Path, sha: str, link: dict | None, git_commit: bool) -> dict:
     now = datetime.now().astimezone()
     rec = {"file": p.name, "sha256": sha, "size": p.stat().st_size,
            "locked_at": now.isoformat(timespec="seconds"),
@@ -176,6 +197,8 @@ def lock_prereg(path, *, git_commit: bool = False, lock_path=None, overwrite: bo
     tg = _prereg_targets(p)
     if tg:
         rec["targets_sha256"], rec["n_targets"] = targets_sha256(tg), len(tg)
+    if link:
+        rec.update(link)
     lp.write_text(json.dumps(rec, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     if git_commit:
         rec = dict(rec, git_commit=_git_commit([p, lp], f"prereg: lock {p.name} {sha[:12]}"))
@@ -211,6 +234,156 @@ def verify_prereg(path, *, lock_path=None, check_git: bool = False) -> dict:
         if ok and not out["git"]["clean"]:
             out["reason"] = "lock matches but git copy is missing or differs"
     return out
+
+
+# ===================================================================== dated addenda (D6 #8, D8 #7)
+
+def _lock_sha(lock_path) -> str:
+    """SHA-256 of a lock record (canonical JSON, so re-indenting the lock file does not change it)."""
+    return _sha(_json(json.loads(Path(lock_path).read_text(encoding="utf-8"))).encode("utf-8"))
+
+
+def _addendum_files(parent) -> list[tuple[int, Path]]:
+    """[(k, path)] of `<stem>-EK<k><suffix>` files next to `parent`, by k."""
+    p = Path(parent)
+    pat = re.compile(rf"^{re.escape(p.stem)}-EK(\d+){re.escape(p.suffix)}$")
+    out = [(int(m.group(1)), f) for f in p.parent.glob(f"{p.stem}-EK*{p.suffix}") if (m := pat.match(f.name))]
+    return sorted(out)
+
+
+def _addendum_link(parent, child) -> dict:
+    """Lock fields that chain an addendum to its locked parent and to the parent's latest earlier addendum."""
+    pp, cp = Path(parent), Path(child)
+    v = verify_prereg(pp)
+    if not v["ok"]:
+        raise ValueError(f"parent {pp.name} does not verify ({v['reason']}); an addendum needs an intact, locked "
+                         "parent")
+    plr = json.loads(_lock_path(pp).read_text(encoding="utf-8"))
+    files = _addendum_files(pp)
+    k_child = next((k for k, f in files if f.resolve() == cp.resolve()), None)
+    prev = [(k, f) for k, f in files if f.resolve() != cp.resolve() and (k_child is None or k < k_child)]
+    link = {"parent": pp.name, "parent_sha256": plr["sha256"], "parent_locked_at": plr.get("locked_at"),
+            "parent_lock_sha256": _lock_sha(_lock_path(pp)), "addendum_index": k_child,
+            "prev_addendum": None, "prev_addendum_sha256": None, "prev_lock_sha256": _lock_sha(_lock_path(pp))}
+    if prev:
+        k, f = prev[-1]
+        vp = verify_prereg(f)
+        if not vp["ok"]:
+            raise ValueError(f"previous addendum {f.name} does not verify ({vp['reason']}); lock or restore it first")
+        link.update(prev_addendum=f.name, prev_addendum_sha256=vp["sha256"], prev_lock_sha256=_lock_sha(_lock_path(f)))
+    if k_child is None:
+        link["addendum_index"] = (prev[-1][0] + 1) if prev else 1
+    return link
+
+
+def _md_block(x) -> str:
+    if isinstance(x, (list, tuple)):
+        return "\n".join(f"- {v}" for v in x)
+    if isinstance(x, dict):
+        return "\n".join(f"- **{k}**: {v}" for k, v in x.items())
+    return str(x)
+
+
+def add_addendum(parent="ONKAYIT.md", reason: str = "", deviation: str = "", falsification: str = "", path=None, *,
+                 changes=None, notes: str = "", git_commit: bool = False) -> dict:
+    """Write and lock a dated addendum to a locked pre-registration, without touching the parent or its lock.
+
+    The addendum goes to `path` (default `<parent stem>-EK<k><suffix>` next to the parent, k = next free number,
+    e.g. ONKAYIT-EK1.md). Its text records the parent's sha256, lock time and lock hash, the previous addendum (if
+    any), the date, `reason`, `deviation` (what changes, said plainly), the new `falsification` line ("" = the
+    parent's line stands), optional `changes` (list or text) and `notes`, plus a machine-readable JSON copy. It is
+    then locked with `lock_prereg(..., parent=parent)`: its own `<file>.lock.json`, chained to the parent lock hash
+    and to the previous addendum's lock hash. Refuses when the parent is not locked or no longer matches its lock,
+    when a previous addendum does not verify, or when `path` exists (addenda are never rewritten).
+
+    Returns the lock record plus `path`. `verify_addenda(parent)` checks the whole chain later."""
+    if not str(reason).strip() or not str(deviation).strip():
+        raise ValueError("an addendum needs a reason and the deviation it makes")
+    pp = Path(parent)
+    if not pp.exists():
+        raise FileNotFoundError(f"parent prereg missing: {pp}")
+    if not _lock_path(pp).exists():
+        raise ValueError(f"{pp.name} is not locked; lock_prereg it first (an addendum amends a locked prereg)")
+    if path is None:
+        files = _addendum_files(pp)
+        k = (files[-1][0] + 1) if files else 1
+        path = pp.with_name(f"{pp.stem}-EK{k}{pp.suffix or '.md'}")
+    ap = Path(path)
+    if ap.exists():
+        raise ValueError(f"{ap} exists; addenda are never rewritten, write the next one")
+    link = _addendum_link(pp, ap)
+    now = datetime.now().astimezone()
+    k = link["addendum_index"]
+    doc = {"kind": "prereg_addendum", "index": k, "written_at": now.isoformat(timespec="seconds"),
+           "written_at_utc": now.astimezone(timezone.utc).isoformat(timespec="seconds"),
+           "reason": str(reason), "deviation": str(deviation), "falsification": str(falsification),
+           "changes": changes if changes not in (None, "", []) else None, "notes": str(notes),
+           **{f: link[f] for f in ("parent", "parent_sha256", "parent_locked_at", "parent_lock_sha256",
+                                   "prev_addendum", "prev_addendum_sha256", "prev_lock_sha256")}}
+    L = [f"# Pre-registration addendum EK-{k} ({now.strftime('%Y-%m-%d %H:%M %z')})", "",
+         f"_Amends `{pp.name}` after its lock. The parent file and its lock are not edited; this addendum has its "
+         "own lock, chained to the parent's._", "",
+         "## Parent", f"- file: `{pp.name}`", f"- sha256: `{link['parent_sha256']}`",
+         f"- locked at: {link['parent_locked_at']}", f"- lock sha256: `{link['parent_lock_sha256']}`"]
+    if link["prev_addendum"]:
+        L += [f"- previous addendum: `{link['prev_addendum']}` (sha256 `{link['prev_addendum_sha256']}`)"]
+    L += ["", "## Reason", str(reason), "", "## Deviation", str(deviation), "",
+          "## Falsification", str(falsification) if str(falsification).strip() else "Unchanged from the parent.", ""]
+    if doc["changes"] is not None:
+        L += ["## Changes", _md_block(changes), ""]
+    if str(notes).strip():
+        L += ["## Notes", str(notes), ""]
+    L += ["## Machine-readable copy", "```json", json.dumps(doc, indent=1, ensure_ascii=False, sort_keys=True,
+                                                             default=str), "```", ""]
+    ap.parent.mkdir(parents=True, exist_ok=True)
+    ap.write_text("\n".join(L), encoding="utf-8")
+    rec = _write_lock(ap, _lock_path(ap), file_sha256(ap), link, git_commit)
+    return dict(rec, path=str(ap))
+
+
+def read_addendum(path) -> dict:
+    """The machine-readable copy of an addendum written by `add_addendum`."""
+    t = Path(path).read_text(encoding="utf-8")
+    bas = t.index("```json") + len("```json")
+    return json.loads(t[bas:t.index("```", bas)])
+
+
+def verify_addenda(parent="ONKAYIT.md") -> dict:
+    """Check a prereg and every `<stem>-EK<k>` addendum next to it.
+
+    Per addendum: its own lock matches (`ok`), its lock names the parent's current sha256 and lock hash
+    (`parent_ok`: fails if the parent lock was overwritten or the parent re-locked), and its `prev_lock_sha256` is
+    the lock hash of the addendum before it, or of the parent for the first (`link_ok`). A hand-written addendum with
+    a plain lock has no link fields and fails `link_ok` ("not chained"). Returns {ok, parent, addenda: [...]}."""
+    pp = Path(parent)
+    vp = verify_prereg(pp)
+    parent_lock = _lock_sha(_lock_path(pp)) if _lock_path(pp).exists() else None
+    prev_lock, rows = parent_lock, []
+    for k, f in _addendum_files(pp):
+        v = verify_prereg(f)
+        row = {"index": k, "file": f.name, "ok": v["ok"], "sha256": v["sha256"], "locked_at": v.get("locked_at"),
+               "parent_ok": False, "link_ok": False, "reason": v["reason"]}
+        lp = _lock_path(f)
+        if lp.exists():
+            lr = json.loads(lp.read_text(encoding="utf-8"))
+            if "parent_lock_sha256" not in lr:
+                row["reason"] = "not chained (plain lock, no parent link)"
+            else:
+                row["parent_ok"] = (lr.get("parent_sha256") == vp.get("expected") == vp.get("sha256")
+                                    and lr.get("parent_lock_sha256") == parent_lock)
+                row["link_ok"] = lr.get("prev_lock_sha256") == prev_lock
+                if not row["parent_ok"]:
+                    row["reason"] = "parent or parent lock changed after this addendum"
+                elif not row["link_ok"]:
+                    row["reason"] = "chain link to the previous addendum broken"
+            prev_lock = _lock_sha(lp)
+        try:
+            row["addendum"] = read_addendum(f)
+        except (ValueError, OSError):
+            row["addendum"] = None
+        rows.append(row)
+    ok = vp["ok"] and all(r["ok"] and r["parent_ok"] and r["link_ok"] for r in rows)
+    return {"ok": ok, "parent": vp, "addenda": rows, "n": len(rows)}
 
 
 # ===================================================================== declared targets (replicant PAPER_FINDINGS)
@@ -521,6 +694,10 @@ def _seal_records(registry_dir) -> list:
     return recs
 
 
+_RECORD_FIELDS = ("seq", "sha256", "time", "time_utc", "rows", "cols", "columns", "description", "source", "archive",
+                  "prev", "prev_record", "record_hash")
+
+
 def _record_hash(prev_record_hash, rec: dict) -> str:
     body = {k: v for k, v in rec.items() if k != "record_hash"}
     return _sha(((prev_record_hash or "") + _json(body)).encode("utf-8"))
@@ -538,16 +715,32 @@ def _shape(obj):
         return None, None, None
 
 
-def seal(predictions, description: str, registry_dir=".prereg", *, git_commit: bool = False) -> dict:
+ARM_ROLES = ("preregistered", "post_deviation")      # `role` values written by seal_deviation
+_ARM_FIELDS = ("arm", "role", "deviation_of")
+
+
+def seal(predictions, description: str, registry_dir=".prereg", *, git_commit: bool = False, arm: str | None = None,
+         role: str | None = None, deviation_of: str | None = None, meta: dict | None = None) -> dict:
     """Seal a prediction (DataFrame, table file, dict or any file): SHA-256 of the canonical form + time + hash-chain
-    link; a gzip copy of the canonical bytes is archived. Sealing the same content twice returns the oldest record."""
+    link; a gzip copy of the canonical bytes is archived. Sealing the same content twice returns the oldest record.
+
+    `arm`, `role` ("preregistered" / "post_deviation" / free text), `deviation_of` (the arm this one deviates from)
+    and `meta` (extra JSON fields) are stored in the record and covered by its record hash; records without them keep
+    the old shape. With any of them set, an earlier record of the same content counts as "the same seal" only if it
+    carries the same values (so an arm can be sealed under its name after a plain seal of the same table)."""
     d = Path(registry_dir)
+    tags = {f: v for f, v in zip(_ARM_FIELDS, (arm, role, deviation_of)) if v is not None}
+    if meta:
+        clash = sorted(set(meta) & (set(_RECORD_FIELDS) | set(_ARM_FIELDS)))
+        if clash:
+            raise ValueError(f"seal meta must not set record fields {clash}")
+        tags.update(_struct(dict(meta)))
     d.mkdir(parents=True, exist_ok=True)
     b = canonical_bytes(predictions)
     sha = _sha(b)
     chain = _chain_read(d)
     for k in chain:
-        if k["sha256"] == sha:
+        if k["sha256"] == sha and all(k.get(f) == v for f, v in tags.items()):
             return k
     last = chain[-1] if chain else None
     now = datetime.now().astimezone()
@@ -558,6 +751,7 @@ def seal(predictions, description: str, registry_dir=".prereg", *, git_commit: b
            "source": None if isinstance(predictions, (pd.DataFrame, dict)) else Path(predictions).name,
            "archive": f"{sha[:12]}.gz", "prev": last["sha256"] if last else None,
            "prev_record": last["record_hash"] if last else None}
+    rec.update(tags)
     rec["record_hash"] = _record_hash(rec["prev_record"], rec)
     with open(d / rec["archive"], "wb") as f:
         f.write(gzip.compress(b, mtime=0))
@@ -605,3 +799,160 @@ def grade_sealed(predictions, truth, keys: list[str], registry_dir=".prereg", *,
     table = t.merge(g, on=keys, how=how, suffixes=("", "_truth"))
     return {"verification": v, "table": table, "n_pred": len(t), "n_truth": len(g), "n_joined": len(table),
             "graded_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+
+
+# ===================================================================== deviation arms (D6 / D7: both arms gradable)
+
+def _arm_name(obj, name, default) -> str:
+    if name:
+        return str(name)
+    if isinstance(obj, (str, Path)):
+        return Path(obj).name.split(".")[0] or default
+    return default
+
+
+def seal_deviation(pre_arm, post_arm, description: str, registry_dir=".prereg", *, reason: str, addendum=None,
+                   pre_name: str | None = None, post_name: str | None = None, git_commit: bool = False) -> dict:
+    """Seal both arms of a deviation from the pre-registration, pre-deviation arm first, in one chain.
+
+    `pre_arm` is what the locked prereg said to submit; `post_arm` is what is submitted after the deviation (both:
+    DataFrame, table file, dict or file, as `seal`). The pre arm gets `arm=pre_name`, `role="preregistered"` and
+    `superseded_by=post_name`; the post arm gets `arm=post_name`, `role="post_deviation"`, `deviation_of=pre_name`,
+    `deviation_of_record` (the pre record's hash), `deviation_reason` and, when given, the `addendum` file name and
+    sha256 (the addendum must exist and verify against its lock: write it with `add_addendum` first). Names default
+    to the file stem, else "preregistered" / "post_deviation". Identical arms are refused (no deviation to record).
+    Calling it again with the same inputs returns the same records. Returns {pre, post, chain}."""
+    if not str(reason).strip():
+        raise ValueError("seal_deviation needs the reason for the deviation")
+    pre_name = _arm_name(pre_arm, pre_name, "preregistered")
+    post_name = _arm_name(post_arm, post_name, "post_deviation")
+    if pre_name == post_name:
+        raise ValueError(f"both arms are named {pre_name!r}; pass pre_name= and post_name=")
+    if _sha(canonical_bytes(pre_arm)) == _sha(canonical_bytes(post_arm)):
+        raise ValueError("pre- and post-deviation arms are identical; seal() it once instead")
+    meta = {"deviation_reason": str(reason)}
+    if addendum is not None:
+        ap = Path(addendum)
+        if not ap.exists():
+            raise FileNotFoundError(f"addendum missing: {ap}")
+        v = verify_prereg(ap)
+        if not v["ok"]:
+            raise ValueError(f"addendum {ap.name} does not verify ({v['reason']}); lock it (add_addendum does)")
+        meta.update(addendum=ap.name, addendum_sha256=v["sha256"])
+    pre = seal(pre_arm, description, registry_dir, git_commit=git_commit, arm=pre_name, role="preregistered",
+               meta={"superseded_by": post_name})
+    post = seal(post_arm, description, registry_dir, git_commit=git_commit, arm=post_name, role="post_deviation",
+                deviation_of=pre_name, meta=dict(meta, deviation_of_record=pre["record_hash"]))
+    return {"pre": pre, "post": post, "chain": verify_chain(registry_dir)}
+
+
+def _keyed(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    """Key columns in canonical text form, so an archived arm (read back from CSV) joins a truth table whose key
+    dtypes differ (int vs str vs float)."""
+    df = df.copy()
+    for k in keys:
+        df[k] = df[k].map(_cell)
+    return df
+
+
+def _arm_table(rec: dict, d: Path, predictions) -> pd.DataFrame:
+    arm = rec["arm"]
+    if predictions is not None and arm in predictions:
+        df = _read(predictions[arm])
+        if _sha(canonical_bytes(df)) != rec["sha256"]:
+            raise ValueError(f"predictions for arm {arm!r} do not match its seal ({rec['sha256'][:12]})")
+        return df
+    if rec.get("rows") is None:
+        raise ValueError(f"arm {arm!r} was not sealed as a table; pass it in predictions=")
+    f = d / rec["archive"]
+    if not f.exists():
+        raise FileNotFoundError(f"archive of arm {arm!r} missing: {f.name}; pass it in predictions=")
+    b = gzip.decompress(f.read_bytes())
+    if _sha(b) != rec["sha256"]:
+        raise ValueError(f"archive of arm {arm!r} does not match its seal")
+    return pd.read_csv(io.BytesIO(b))
+
+
+def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = None, scorer=None, unit_loss=None,
+               predictions: dict | None = None, arms=None, how: str = "inner", seed: int = 42) -> pd.DataFrame:
+    """Grade every sealed arm (records with an `arm` field, see `seal_deviation` / `seal(arm=)`) with the same
+    scorer and return them side by side, one row per arm record in chain order.
+
+    Arm tables come from the chain's gzip archives (verified against the seal) or from `predictions={arm: data}`
+    (verified too). Each is joined with `truth` on `keys` (truth columns get the suffix `_truth`).
+    Scoring: `scorer(table) -> dict | float` if given; otherwise per-unit `unit_loss(pred, truth)` (default absolute
+    error) on `column` (default: the only non-key column the arm and truth share) gives `mae`, `rmse`, `bias`
+    (or `loss` for a custom unit_loss). With per-unit losses, an arm with `deviation_of` also gets
+    `diff_vs_pre` = mean loss(arm) - mean loss(pre arm) on shared units with a paired bootstrap 95% CI
+    (`diff_lo`, `diff_hi`, `diff_n`; negative = the deviation helped). Units with a missing loss are left out and
+    counted in `n_missing`."""
+    d = Path(registry_dir)
+    recs = [r for r in _chain_read(d) if r.get("arm")]
+    if arms is not None:
+        want = [arms] if isinstance(arms, str) else list(arms)
+        missing = sorted(set(want) - {r["arm"] for r in recs})
+        if missing:
+            raise KeyError(f"no sealed arm(s) {missing} in {d}")
+        recs = [r for r in recs if r["arm"] in want]
+    if not recs:
+        raise ValueError(f"no arm records in {d / CHAIN_NAME}; seal with seal_deviation() or seal(..., arm=)")
+    g = _read(truth)
+    if [k for k in keys if k not in g.columns]:
+        raise KeyError(f"key column(s) missing from truth: {[k for k in keys if k not in g.columns]}")
+    gk = _keyed(g, keys)
+    from .stats import paired_bootstrap_diff
+    rows, losses = [], {}
+    for r in recs:
+        t = _arm_table(r, d, predictions)
+        miss = [k for k in keys if k not in t.columns]
+        if miss:
+            raise KeyError(f"key column(s) missing from arm {r['arm']!r}: {miss}")
+        table = _keyed(t, keys).merge(gk, on=keys, how=how, suffixes=("", "_truth"))
+        row = {"seq": r.get("seq"), "arm": r["arm"], "role": r.get("role"), "deviation_of": r.get("deviation_of"),
+               "sealed_at": r.get("time"), "sha256": r["sha256"][:12], "n_pred": len(t), "n_joined": len(table)}
+        loss = None
+        if scorer is None or unit_loss is not None:
+            col = column
+            if col is None:
+                shared = [c for c in t.columns if c in g.columns and c not in keys]
+                if len(shared) != 1:
+                    raise ValueError(f"pass column=: arm {r['arm']!r} and truth share {shared or 'no'} non-key "
+                                     "columns")
+                col = shared[0]
+            if col not in t.columns or col not in g.columns:
+                raise KeyError(f"column {col!r} missing from arm {r['arm']!r} or truth")
+            pred = pd.to_numeric(table[col], errors="coerce")
+            tru = pd.to_numeric(table[f"{col}_truth"], errors="coerce")
+            raw = (pred - tru).abs() if unit_loss is None else pd.Series(unit_loss(pred, tru), index=table.index)
+            loss = pd.Series(pd.to_numeric(raw, errors="coerce").to_numpy(),
+                             index=pd.MultiIndex.from_frame(table[keys])).dropna()
+            row["n_missing"] = len(table) - len(loss)
+            if scorer is None:
+                if unit_loss is None:
+                    e = (pred - tru).dropna()
+                    row.update(mae=float(loss.mean()) if len(loss) else math.nan,
+                               rmse=float(math.sqrt((e ** 2).mean())) if len(e) else math.nan,
+                               bias=float(e.mean()) if len(e) else math.nan)
+                else:
+                    row["loss"] = float(loss.mean()) if len(loss) else math.nan
+        if scorer is not None:
+            m = scorer(table)
+            row.update(m if isinstance(m, dict) else {"score": m})
+        losses[r["record_hash"]] = loss
+        rows.append(row)
+    by_hash = {r["record_hash"]: r for r in recs}
+    for r, row in zip(recs, rows):
+        ref = r.get("deviation_of_record")
+        if ref not in by_hash:
+            ref = next((q["record_hash"] for q in recs if q["arm"] == r.get("deviation_of")), None)
+        a, b = losses.get(r["record_hash"]), losses.get(ref) if ref else None
+        if a is None or b is None or not (a.index.is_unique and b.index.is_unique):   # duplicate keys: no pairing
+            continue
+        both = pd.concat([a.rename("a"), b.rename("b")], axis=1, join="inner")
+        if len(both):
+            diff = paired_bootstrap_diff(both["a"].to_numpy(), both["b"].to_numpy(), seed=seed)
+            row.update(diff_vs_pre=diff["diff"], diff_lo=diff["lo"], diff_hi=diff["hi"], diff_n=diff["n"])
+    out = pd.DataFrame(rows)
+    out.attrs["graded_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    return out
+

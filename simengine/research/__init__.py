@@ -9,8 +9,9 @@ proposers (LLM observer, `claude -p`, random, grid, greedy, halving).
     out = loop.run()
 """
 from .loop import Loop, control_arm
-from .prereg import (Prereg, canonical_bytes, compare_targets, declare_targets, file_sha256, grade_sealed,
-                     lock_prereg, seal, targets_sha256, verify_chain, verify_prereg, verify_seal, write_prereg)
+from .prereg import (Prereg, add_addendum, canonical_bytes, compare_targets, declare_targets, file_sha256, grade_arms,
+                     grade_sealed, lock_prereg, read_addendum, seal, seal_deviation, targets_sha256, verify_addenda,
+                     verify_chain, verify_prereg, verify_seal, write_prereg)
 from .proposers import (ClaudeCodeProposer, GreedyCoordinateProposer, GridProposer, HalvingProposer, LLMProposer,
                         ProposalContext, RandomProposer, build_prompt, claude_code_llm, make_proposer,
                         parse_observer_reply, successive_halving, validate_proposal)
@@ -23,6 +24,7 @@ __all__ = [
     "Prereg", "write_prereg", "lock_prereg", "verify_prereg", "file_sha256",
     "seal", "verify_seal", "verify_chain", "grade_sealed", "canonical_bytes",
     "declare_targets", "targets_sha256", "compare_targets",
+    "add_addendum", "read_addendum", "verify_addenda", "seal_deviation", "grade_arms",
     "HarnessSpace", "harness_variants", "one_change_variants", "variant_label", "harness_sweep",
     "LLMProposer", "ClaudeCodeProposer", "RandomProposer", "GridProposer", "GreedyCoordinateProposer",
     "HalvingProposer", "successive_halving", "make_proposer", "validate_proposal", "build_prompt",

@@ -16,6 +16,7 @@ was taken from them; the note's licence check rules AI Scientist code out.
 | `loop.py` | `Loop` runs one change per turn on the dev split. A change is kept only if the paired bootstrap CI of its improvement over the current best excludes 0. Other statuses are discard, crash, and repeat (per-unit scores identical to an earlier turn). The loop stops after `stop_after` consecutive non-kept turns, `max_turns` turns, the `budget_usd` proposer budget, an exhausted proposer, or two invalid proposals in one turn. Finalisation has three steps. An optional `select_split` re-ranks the top 3 dev configs. An optional ablation reverts each changed key. Then the winner, the start config and the baselines run once on the test split, with 95% and Bonferroni CIs (k = number of proposal turns). The state is saved to `state.json` and can be resumed. The workdir also gets per-unit CSVs, `JOURNAL.md`, `results.tsv`, and the observer's raw prompt and reply. `control_arm(loop)` builds a random arm with the same number of turns. |
 | `proposers.py` | `LLMProposer(llm)` is the observer. It sees dev metrics only and must reply with JSON: one change plus `kind`, `hypothesis`, `expected` (lower, same or higher) and `falsifier`. The loop validates the reply. An invalid reply gets one repair call that includes the rejection reason. A reply that mentions the test split is rejected. Turkish keys from the original loop are accepted. `ClaudeCodeProposer` does the same through `claude -p` (tools off, no session persistence), using `simengine.llm.ClaudeCode` if available, else a local fallback. Search proposers: `RandomProposer` (the control arm), `GridProposer`, `GreedyCoordinateProposer` (hill climbing with momentum), and `HalvingProposer`, which uses `successive_halving` to screen single changes at low fidelity on dev. `make_proposer("random"/"grid"/"greedy"/"halving"/"claude-p"/"claude"/llm)`. |
 | `prereg.py`, `space.py` (additions) | Declared targets and harness robustness sweeps: see the next section. |
+| `prereg.py` (addenda, deviation arms) | `add_addendum`, `verify_addenda`, `read_addendum`, `seal_deviation`, `grade_arms`: see "Addenda and deviation arms" below. |
 | `stats.py` | `paired_bootstrap_diff`, `bootstrap_mean` (seed 42, B=1000, percentile CI: the same defaults as the measured loops). |
 
 **Runner contract** (`simengine.types.Runner`): the runner receives `cfg` with `cfg["split"]` set to `"dev"`, `"select"`
@@ -57,6 +58,40 @@ space = harness_variants({"w1": "...", "w2": "..."}, [None, 8192], [0.0, 1.0], e
 sweep = harness_sweep(runner, space, primary="punish_low")   # runner reads cfg["wording_id"], ["max_tokens"], ...
 table = compare_targets("prereg.md", {"vote_punish_low_pct": 0.80, "vote_punish_high_pct": 0.0})
 ```
+
+## Addenda and deviation arms
+
+From the blind TALP rehearsals. In D6 and D8 the team had to deviate from a locked prereg. No helper existed:
+appending to the file broke its sha256, and `lock_prereg(overwrite=True)` lost the old lock. In D6 and D7 the
+pre-deviation arm had been sealed by hand, so both arms could be graded: in D6 the post-referee choice lost to the
+pre-registered arm on test, and in D7 the deviation won. Neither outcome can be reported honestly unless the
+pre-deviation arm is sealed and graded too.
+
+| function | what it does |
+|---|---|
+| `add_addendum(parent="ONKAYIT.md", reason=, deviation=, falsification="", path=None, *, changes=None, notes="", git_commit=False)` | Writes a dated addendum `ONKAYIT-EK<k>.md` next to the parent (k = next free number) and leaves the parent file and its lock alone. The addendum's text records the parent's sha256, lock time and lock hash, the previous addendum and its sha256, the reason, the deviation and the new falsification line (empty means the parent's line stands), plus a JSON copy. It is locked with `lock_prereg(..., parent=)`, and that lock is chained to the parent lock hash and to the previous addendum's lock hash. It refuses an unlocked or edited parent, a previous addendum that no longer verifies, a missing reason or deviation, and an existing `path`. Returns the lock record plus `path`. |
+| `lock_prereg(path, parent=)` | Writes the same chained lock for an addendum you wrote yourself. Without `parent` it behaves as before. |
+| `verify_addenda(parent)` | Checks the parent and every `<stem>-EK<k>` file. For each addendum it reports `ok` (its own lock matches), `parent_ok` (the lock names the parent's current sha256 and lock hash; this fails if the parent was edited and re-locked) and `link_ok` (the lock chains to the previous addendum's lock). An addendum with a plain lock written by hand reports "not chained". |
+| `seal_deviation(pre_arm, post_arm, description, registry_dir=".prereg", *, reason, addendum=None, pre_name=None, post_name=None)` | Seals the pre-deviation arm first, with `arm=pre_name`, `role="preregistered"` and `superseded_by`. Then it seals the post-deviation arm in the same chain, with `role="post_deviation"`, `deviation_of`, `deviation_of_record` (the pre record's hash), `deviation_reason`, and the addendum's file name and sha256 (the addendum must verify). Names default to the file stem. Identical arms are refused. Running it again with the same inputs returns the same records. |
+| `seal(..., arm=, role=, deviation_of=, meta=)` | The new fields are stored in the record and covered by its record hash. Records without them keep the old shape, and `verify_chain` passes on old chains. A table sealed earlier without an arm can be sealed again under an arm name. |
+| `grade_arms(registry_dir, truth, keys, *, column=None, scorer=None, unit_loss=None, predictions=None, arms=None)` | Grades every arm record with one scorer and returns one row per arm, in chain order. Arm tables are read back from the seal archives (checked against the seal) or taken from `predictions={arm: df}` (checked too). Keys are joined in canonical text form, so an int key matches a str key. The default scoring is absolute error on `column`, giving `mae`, `rmse` and `bias`. With per-unit losses, a deviating arm also gets `diff_vs_pre` with a paired bootstrap CI (`diff_lo`, `diff_hi`, `diff_n`); a negative value means the deviation helped. A custom `scorer(table)` adds its own columns; add `unit_loss` as well if you want the paired diff. |
+
+```python
+from simengine.research import add_addendum, seal_deviation, grade_arms, verify_addenda
+
+add_addendum("ONKAYIT.md", reason="referee found a stronger base (T4b) on dev",
+             deviation="ours = H_joint, picked from ~40 configs after the stop rule; dev gains are post-selection",
+             falsification="claim fails if dev H_joint - T4b segment-clustered CI contains 0",
+             changes=["C5 sealed separately", "T4b added to the ladder"])          # -> ONKAYIT-EK1.md + lock
+seal_deviation("kol_C5.csv", "tahmin.csv", "2025 forecast", ".prereg", reason="post-referee choice",
+               addendum="ONKAYIT-EK1.md", pre_name="C5", post_name="H_joint")
+assert verify_addenda("ONKAYIT.md")["ok"]
+table = grade_arms(".prereg", truth_df, keys=["segment", "item"], column="p")    # C5 and H_joint side by side
+```
+
+The evidence card does not show both arms yet. Until it does, report the `grade_arms` table next to the card.
+The tests (`tests/test_research_prereg_deviation.py`) use synthetic data only, with one case where the deviation
+loses and one where it wins.
 
 ## When it works and when it does not (measured)
 
