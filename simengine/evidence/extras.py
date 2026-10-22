@@ -564,8 +564,8 @@ def _resolve_pred_alias(d: pd.DataFrame, method: str) -> str:
 
 
 def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] | None = None, *,
-           cluster: str | None = "person", on: str = "level", B: int = 1000, seed: int = 0,
-           alpha: float = 0.05) -> dict:
+           cluster: str | None = "person", item: str | None = "item", on: str = "level", B: int = 1000,
+           seed: int = 0, alpha: float = 0.05) -> dict:
     """Is a prediction closer to what people *say* (stated) or to what they *do* (observed)?
 
     ``frame`` has one row per person (or per person × item) with a numeric ``say_col`` anchor (stated answer,
@@ -588,6 +588,12 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
     ``−gap`` once the panel mean reaches the say anchor (``+gap`` at do), so when a prediction sits on an anchor
     the CI bound away from 0 is too tight (simulated coverage ~0.84 there, ~0.94 elsewhere); the bound next to 0,
     and so the verdict, holds.
+
+    Several items per person (an ``item`` column, ``"madde"`` accepted, with 2+ values): the level is taken per
+    item and averaged with equal item weight (``mean_i |mean_i(pred) − mean_i(say)|`` etc.), because pooled means
+    cancel when people over-report one behaviour and under-report another. The anchor gap is then given per item
+    with a Bonferroni CI (``alpha / k``) and the anchors are apart when any item's gap is. MAE pools the rows. Put
+    the items on one scale first (z-score per item): both sums mix them. ``item=None`` pools every row.
     """
     if B < 1:
         raise ValueError("B must be >= 1")
@@ -624,6 +630,18 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
             notes.append("No 'person' or 'group' column: every row is its own cluster (rows of one person are "
                          "not tied; the CI is too narrow if a person has several rows).")
     G = len(uniq)
+    icol, icodes, inames = None, None, []
+    if item is not None:
+        icol = next((c for c in (item, COLUMN_ALIASES.get(item, item)) if c in d.columns), None)
+        if icol is None and item != "item":
+            raise KeyError(f"no item column {item!r}; pass item=None to pool every row")
+        if icol is not None:
+            if d[icol].isna().any():
+                raise ValueError(f"item column {icol!r} has missing values; fill or drop them first")
+            icodes, inames = pd.factorize(d[icol], sort=False)
+            if len(inames) < 2:
+                icol, icodes, inames = None, None, []
+    K = len(inames)
     say, do = _numeric(d[sc], sc), _numeric(d[dc], dc)
     rng = np.random.default_rng(seed)
     W = rng.multinomial(G, np.full(G, 1.0 / G), size=B).astype(float) if G else np.zeros((B, 0))
@@ -636,15 +654,39 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
         with np.errstate(divide="ignore", invalid="ignore"):
             return float(s.sum() / n.sum()) if n.sum() else math.nan, (W @ s) / (W @ n)
 
+    def level(p: np.ndarray, m: np.ndarray) -> tuple[float, float, np.ndarray]:
+        """|mean − say|, |mean − do| and the bootstrap draws of their difference; per item (equal weight) if K."""
+        parts = [m] if icodes is None else [m & (icodes == k) for k in range(K)]
+        ds, dd, bdiff = [], [], []
+        for mk in parts:
+            if not mk.any():
+                continue
+            (mp, bp), (ms, bs), (md, bd) = wmean(p, mk), wmean(say, mk), wmean(do, mk)
+            ds.append(abs(mp - ms))
+            dd.append(abs(mp - md))
+            bdiff.append(np.abs(bp - bs) - np.abs(bp - bd))
+        return float(np.mean(ds)), float(np.mean(dd)), np.mean(bdiff, axis=0)
+
     pct = int(round((1 - alpha) * 100))
-    # anchor gap on rows with both anchors
+    # anchor gap on rows with both anchors (per item when there are items: pooled gaps can cancel)
     ma = ~(np.isnan(say) | np.isnan(do))
-    gap_pt, gap_b = wmean(do - say, ma)
-    g_lo, g_hi = _percentile_ci(gap_b, alpha) if G >= 2 else (None, None)
-    anchors = {"mean_say": _num(np.nanmean(say[ma])) if ma.any() else None,
-               "mean_do": _num(np.nanmean(do[ma])) if ma.any() else None,
-               "gap": _num(gap_pt), "lo": g_lo, "hi": g_hi, "n": int(ma.sum()),
-               "apart": g_lo is not None and (g_lo > 0 or g_hi < 0)}
+
+    def gap_of(mk: np.ndarray, a: float) -> dict:
+        gap_pt, gap_b = wmean(do - say, mk)
+        lo, hi = _percentile_ci(gap_b, a) if G >= 2 and mk.any() else (None, None)
+        return {"mean_say": _num(np.mean(say[mk])) if mk.any() else None,
+                "mean_do": _num(np.mean(do[mk])) if mk.any() else None,
+                "gap": _num(gap_pt), "lo": lo, "hi": hi, "n": int(mk.sum()),
+                "apart": lo is not None and (lo > 0 or hi < 0)}
+
+    anchors = gap_of(ma, alpha)
+    if K:
+        per = [dict(item=inames[k].item() if isinstance(inames[k], np.generic) else inames[k],
+                    **gap_of(ma & (icodes == k), alpha / K)) for k in range(K)]
+        anchors.update(gap=None, lo=None, hi=None, apart=any(a["apart"] for a in per), items=per,
+                       gap_abs=_num(np.mean([abs(a["gap"]) for a in per if a["gap"] is not None]))
+                       if any(a["gap"] is not None for a in per) else None)
+    g_lo, g_hi = anchors["lo"], anchors["hi"]
 
     out: list[dict] = []
     for c in cols:
@@ -659,16 +701,15 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
             r["reason"] = "no rows with prediction and both anchors"
             out.append(r)
             continue
-        mp, bp = wmean(p, m)
-        ms, bs = wmean(say, m)
-        md, bd = wmean(do, m)
+        mp, ms, md = wmean(p, m)[0], wmean(say, m)[0], wmean(do, m)[0]
+        dsay, ddo, bdiff = level(p, m)
         es, bes = wmean(np.abs(p - say), m)
         ed, bed = wmean(np.abs(p - do), m)
-        r.update(mean=mp, mean_say=ms, mean_do=md, dist_say=abs(mp - ms), dist_do=abs(mp - md),
+        r.update(mean=mp, mean_say=ms, mean_do=md, dist_say=dsay, dist_do=ddo,
                  mae_say=es, mae_do=ed, mae_diff=es - ed)
         r["diff"] = r["dist_say"] - r["dist_do"]
         if r["clusters"] >= 2:
-            r["lo"], r["hi"] = _percentile_ci(np.abs(bp - bs) - np.abs(bp - bd), alpha)
+            r["lo"], r["hi"] = _percentile_ci(bdiff, alpha)
             r["mae_lo"], r["mae_hi"] = _percentile_ci(bes - bed, alpha)
         lo, hi = (r["lo"], r["hi"]) if on == "level" else (r["mae_lo"], r["mae_hi"])
         if lo is None:
@@ -686,17 +727,26 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
                           f"({on} say − do = {_fmt(key[0])} [{_fmt(key[1])}, {_fmt(key[2])}])")
         out.append(r)
 
+    if K:
+        anchor_note = (f"Anchors per {icol} ({K}; CI at alpha/{K}, Bonferroni): mean |do − say| "
+                       f"{_fmt(anchors['gap_abs'])}; " + ("apart on " + ", ".join(
+                           str(a["item"]) for a in anchors["items"] if a["apart"]) + "." if anchors["apart"]
+                           else "no item apart (not apart): every verdict is undecided.")
+                       + f" Level = mean over {icol}s of the per-{icol} distances (the |mean − say|, |mean − do| "
+                       f"columns; mean / mean say / mean do are pooled for reference). Put {icol}s on one scale.")
+    else:
+        anchor_note = (f"Anchors: mean say {_fmt(anchors['mean_say'])}, mean do {_fmt(anchors['mean_do'])}, "
+                       f"do − say {_fmt(anchors['gap'])} [{_fmt(g_lo)}, {_fmt(g_hi)}]"
+                       + ("" if anchors["apart"] else " — not apart: every verdict is undecided."))
     notes = [f"diff = distance to say − distance to do (negative = closer to say); level uses panel means, "
              f"MAE uses person-level absolute errors. {pct} % percentile bootstrap over {G} {unit}(s), "
-             f"B = {B}, seed = {seed}; verdict reads the {on} CI.",
-             f"Anchors: mean say {_fmt(anchors['mean_say'])}, mean do {_fmt(anchors['mean_do'])}, "
-             f"do − say {_fmt(anchors['gap'])} [{_fmt(g_lo)}, {_fmt(g_hi)}]"
-             + ("" if anchors["apart"] else " — not apart: every verdict is undecided.")] + notes
+             f"B = {B}, seed = {seed}; verdict reads the {on} CI.", anchor_note] + notes
     miss = [f"{r['prediction']} {r['n_missing']}" for r in out if r["n_missing"]]
     if miss:
         notes.append("Rows dropped (missing prediction or anchor, not imputed): " + ", ".join(miss) + ".")
-    rows = [["anchors (do − say)", anchors["n"], None, anchors["mean_say"], anchors["mean_do"], None, None,
-             anchors["gap"], g_lo, g_hi, None, None, None, None, None, "apart" if anchors["apart"] else "not apart"]]
+    rows = [[f"anchors {a['item']} (do − say)" if K else "anchors (do − say)", a["n"], None, a["mean_say"],
+             a["mean_do"], None, None, a["gap"], a["lo"], a["hi"], None, None, None, None, None,
+             "apart" if a["apart"] else "not apart"] for a in (anchors["items"] if K else [anchors])]
     rows += [[r["prediction"], r["n"], r["mean"], r["mean_say"], r["mean_do"], r["dist_say"], r["dist_do"],
               r["diff"], r["lo"], r["hi"], r["mae_say"], r["mae_do"], r["mae_diff"], r["mae_lo"], r["mae_hi"],
               r["verdict"]] for r in out]
@@ -704,7 +754,7 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
                     ["prediction", "n", "mean", "mean say", "mean do", "|mean − say|", "|mean − do|", "diff", "lo",
                      "hi", "MAE say", "MAE do", "MAE diff", "MAE lo", "MAE hi", "verdict"], rows, notes,
                     predictions=out, anchors=anchors, say_col=sc, do_col=dc, cluster=cl,
-                    n_clusters=G, on=on, B=B, seed=seed, alpha=alpha)
+                    n_clusters=G, item=icol, n_items=K, on=on, B=B, seed=seed, alpha=alpha)
 
 
 # ------------------------------------------------------------------ rendering

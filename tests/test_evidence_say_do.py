@@ -32,7 +32,11 @@ class SayDo(unittest.TestCase):
         sec = extras.say_do(_frame(), "said", "did", preds=["say", "pred_do", "mid"], B=300)
         self.assertEqual(sec["kind"], "say_do")
         self.assertTrue(sec["anchors"]["apart"])
-        self.assertAlmostEqual(sec["anchors"]["gap"], -1.0, delta=0.1)
+        self.assertEqual(sec["n_items"], 2)                # the frame's item column: anchors per item
+        self.assertIsNone(sec["anchors"]["gap"])
+        for a in sec["anchors"]["items"]:
+            self.assertAlmostEqual(a["gap"], -1.0, delta=0.1)
+            self.assertTrue(a["apart"])
         s, d, m = _by(sec, "pred_say"), _by(sec, "pred_do"), _by(sec, "pred_mid")
         self.assertEqual(s["verdict"], extras.SAY)
         self.assertLess(s["hi"], 0)
@@ -44,7 +48,7 @@ class SayDo(unittest.TestCase):
         self.assertGreater(m["hi"], 0)
         self.assertIn("closer to what people say", s["card_line"])
         self.assertEqual(sec["n_clusters"], 150)
-        self.assertEqual(len(sec["rows"]), 4)           # anchors + 3 predictions
+        self.assertEqual(len(sec["rows"]), 5)           # 2 item anchor rows + 3 predictions
         json.dumps(sec)                                  # JSON-friendly
 
     def test_point_values(self):
@@ -98,6 +102,39 @@ class SayDo(unittest.TestCase):
         with self.assertRaises(KeyError):                   # a named cluster column that is absent is an error
             extras.say_do(f, "said", "did", preds=["y"], cluster="persona_id", B=50)
 
+    def test_items_with_opposite_gaps(self):
+        # people over-report one behaviour and under-report another: pooled means cancel, per-item level does not
+        rng = np.random.default_rng(0)
+        rows = []
+        for i in range(200):
+            for k, g in enumerate([1.0, -1.0]):
+                do = rng.normal(3, 1)
+                say = do + g + rng.normal(0, 0.2)
+                rows.append({"person": f"p{i}", "madde": f"q{k}", "said": say, "did": do,
+                             "pred_say": say + rng.normal(0, 0.3), "pred_do": do + rng.normal(0, 0.3)})
+        f = pd.DataFrame(rows)
+        sec = extras.say_do(f, "said", "did", B=300)
+        self.assertEqual((sec["item"], sec["n_items"]), ("item", 2))
+        self.assertTrue(sec["anchors"]["apart"])
+        self.assertAlmostEqual(sec["anchors"]["gap_abs"], 1.0, delta=0.05)
+        self.assertEqual(_by(sec, "pred_say")["verdict"], extras.SAY)
+        self.assertEqual(_by(sec, "pred_do")["verdict"], extras.DO)
+        self.assertAlmostEqual(_by(sec, "pred_say")["diff"], -1.0, delta=0.1)
+        pooled = extras.say_do(f, "said", "did", item=None, B=300)
+        self.assertFalse(pooled["anchors"]["apart"])     # the trap the per-item level avoids
+        self.assertTrue(all(r["verdict"] == extras.UNDECIDED for r in pooled["predictions"]))
+        one = f[f["madde"] == "q0"]                        # one item: same numbers as no item column
+        a = extras.say_do(one, "said", "did", B=100)
+        b = extras.say_do(one.drop(columns="madde"), "said", "did", B=100)
+        self.assertIsNone(a["item"])
+        self.assertEqual(a["rows"], b["rows"])
+        with self.assertRaises(KeyError):
+            extras.say_do(f, "said", "did", item="question", B=50)
+        g = f.copy()
+        g.loc[0, "madde"] = None
+        with self.assertRaises(ValueError):
+            extras.say_do(g, "said", "did", B=50)
+
     def test_missing_and_aliases(self):
         f = _frame(persons=50).rename(columns={"pred_say": "tahmin_say"})
         f.loc[:4, "tahmin_say"] = np.nan
@@ -126,7 +163,9 @@ class SayDo(unittest.TestCase):
         with self.assertRaises(ValueError):
             extras.say_do(g, "said", "did")
         sec = extras.say_do(f, "said", "did", B=50)
-        self.assertIn("| anchors (do − say) |", extras.section_markdown(sec))
+        self.assertIn("| anchors q0 (do − say) |", extras.section_markdown(sec))
+        self.assertIn("| anchors (do − say) |", extras.section_markdown(extras.say_do(f, "said", "did", item=None,
+                                                                                       B=50)))
         self.assertIn("se-say_do", extras.section_html(sec))
         self.assertIn("say_do", extras.__all__)
 
