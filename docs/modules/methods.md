@@ -311,25 +311,6 @@ LightGBM beats Markov-2 by +4.66 [+2.04, +7.55], and by [+1.68, +7.66] user-clus
 ablate it. The source's page-structure, click-type and text-overlap features were dataset-specific and are **not
 ported**; pass equivalents as `numeric` / `categorical`.
 
-## Theory-persona mixture calibration (`mixture.py`)
-
-Port of edsl-test `personas/homo_silicus/calibrate.py` (`fit_weights`, `mixture` and the duplicate-row
-warning). edsl-test has no LICENSE file; it has the same owner and is reused internally with this provenance note. A population is modelled as a mixture over a few theory types ("You only care about your own
-pay-off.", ...). Each type's behaviour on calibration targets is measured once, then simplex weights (w >= 0,
-sum 1) are fitted so the weighted average of the types matches the human targets. This is the "selection" step of
-General Social Agents (Manning, Zhu & Horton) applied to the Homo Silicus types (Horton 2023, arXiv:2301.07543).
-Validation runs on targets that were never fitted, in a different game format.
-
-```python
-import simengine.methods as M
-games = {**M.charness_rabin_games(), "dictator": M.dictator_game()}
-B = M.probe_types(llm, M.THEORY_TYPES, games, reps=10, prefix=M.HUMANIZING_PREFIX)   # type x target
-fit = M.fit_mixture_weights(B, M.CR_HUMAN_LEFT, grid_step=0.02, val=M.ENGEL_DICTATOR)
-fit.weights, fit.train_sse, fit.val_rmse, fit.unidentified_pairs, fit.weight_range
-```
-
-- **Fit.** `fit_mixture_weights(type_behavior, human_target, *, grid_step=0.02, val=None)` searches the whole
-  simplex grid, as the source does, and minimises the SSE on the targets in `human_target.index`. The grid is
 **Session level: conversion / abandonment from the first steps.** `next_action.sessions` and `next_action.funnel`
 turn the step table into session rows without building candidates (not re-exported from `simengine.methods`;
 import the module):
@@ -350,6 +331,25 @@ features. A prefix shorter than k already reveals an early end, hence the `reach
 leaves at its conversion step, and `continued[i] == reached[i + 1]`. Nothing measured yet; these are data
 helpers (G4 rehearsal: ~15 lines of pandas written by hand).
 
+## Theory-persona mixture calibration (`mixture.py`)
+
+Port of edsl-test `personas/homo_silicus/calibrate.py` (`fit_weights`, `mixture` and the duplicate-row
+warning). edsl-test has no LICENSE file; it has the same owner and is reused internally with this provenance note. A population is modelled as a mixture over a few theory types ("You only care about your own
+pay-off.", ...). Each type's behaviour on calibration targets is measured once, then simplex weights (w >= 0,
+sum 1) are fitted so the weighted average of the types matches the human targets. This is the "selection" step of
+General Social Agents (Manning, Zhu & Horton) applied to the Homo Silicus types (Horton 2023, arXiv:2301.07543).
+Validation runs on targets that were never fitted, in a different game format.
+
+```python
+import simengine.methods as M
+games = {**M.charness_rabin_games(), "dictator": M.dictator_game()}
+B = M.probe_types(llm, M.THEORY_TYPES, games, reps=10, prefix=M.HUMANIZING_PREFIX)   # type x target
+fit = M.fit_mixture_weights(B, M.CR_HUMAN_LEFT, grid_step=0.02, val=M.ENGEL_DICTATOR)
+fit.weights, fit.train_sse, fit.val_rmse, fit.unidentified_pairs, fit.weight_range
+```
+
+- **Fit.** `fit_mixture_weights(type_behavior, human_target, *, grid_step=0.02, val=None)` searches the whole
+  simplex grid, as the source does, and minimises the SSE on the targets in `human_target.index`. The grid is
   vectorised and keeps the source's lexicographic order, so ties resolve the same way. Six types at 2% steps are
   3,478,761 points and take about 0.6 s. `method="slsqp"` (scipy) fits continuous weights for libraries too large
   for the grid; past `max_grid` points the grid raises and points you there.
