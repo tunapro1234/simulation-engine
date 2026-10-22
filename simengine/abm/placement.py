@@ -54,7 +54,7 @@ from scipy import sparse
 
 COLS = ("user", "day", "slot", "x", "y")
 ALIASES = {"uid": "user", "d": "day", "t": "slot"}
-_ROUND = 9          # gains are rounded before comparisons so plain and lazy greedy break ties identically
+_SCALE = 1e9        # gains are rounded to 1e-9 before comparisons so plain and lazy greedy break ties identically
 
 
 # ---------------------------------------------------------------- trajectories and grid
@@ -133,7 +133,7 @@ def exposures(traj: Any, grid: CellGrid, days: Iterable[int] | None = None, slot
     if users is None:
         users = np.unique(c["user"])
     users = np.asarray(users, np.int64)
-    keep = grid.cell(c["x"], c["y"]) >= 0
+    keep = (grid.cell(c["x"], c["y"]) >= 0) & (len(users) > 0)
     if days is not None:
         keep &= np.isin(c["day"], np.fromiter(days, np.int64))
     if slots is not None:
@@ -206,6 +206,25 @@ def reach_frequency(M, cells, min_freq: int = 3, users: np.ndarray | None = None
 
 # ---------------------------------------------------------------- greedy / lazy greedy
 
+def _csc(M) -> sparse.csc_matrix:
+    """Float CSC copy, duplicates summed and explicit zeros dropped: gains and visitor counts read raw column slices,
+    so a duplicate (user, cell) entry would be credited twice under the cap and a stored zero counted as a visitor."""
+    M = sparse.csc_matrix(M, dtype=float, copy=True)
+    M.sum_duplicates()
+    M.eliminate_zeros()
+    return M
+
+
+def _rnd(g):
+    """Round to 1e-9, half to even, bit-identical for arrays and scalars (round(x, 9) and np.round(x, 9) disagree on
+    some .5 boundaries, which broke lazy == plain ties)."""
+    return np.rint(g * _SCALE) / _SCALE if isinstance(g, np.ndarray) else round(g * _SCALE) / _SCALE
+
+
+def _key(g, c, ratio: bool):
+    return _rnd(g / c) if ratio else g
+
+
 @dataclass
 class Placement:
     """Chosen cells in pick order, marginal gains, objective value, total cost, online upper bound on the optimum
@@ -224,7 +243,7 @@ class _State:
     """Exposure counts c_u(S) and the gain of adding one or all cells (CSC column slices, vectorised)."""
 
     def __init__(self, M, r, weights):
-        self.M = sparse.csc_matrix(M, dtype=float)
+        self.M = _csc(M)
         self.r = float(r)
         self.w = np.ones(self.M.shape[0]) if weights is None else np.asarray(weights, float)
         self.c = np.zeros(self.M.shape[0])
@@ -239,12 +258,12 @@ class _State:
         self.evals += 1
         a, b = self.M.indptr[j], self.M.indptr[j + 1]
         g = np.bincount(np.zeros(b - a, np.int64), self._contrib(self.M.indices[a:b], self.M.data[a:b]), 1)[0]
-        return round(float(g), _ROUND)
+        return _rnd(float(g))
 
     def gains(self) -> np.ndarray:
         self.evals += self.M.shape[1]
         g = np.bincount(self.col, self._contrib(self.M.indices, self.M.data), self.M.shape[1])
-        return np.round(g, _ROUND)
+        return _rnd(g)
 
     def add(self, j: int) -> None:
         a, b = self.M.indptr[j], self.M.indptr[j + 1]
@@ -262,7 +281,7 @@ def _plain(st: _State, avail: np.ndarray, cost: np.ndarray, budget: float, ratio
         if not avail.any():
             break
         g = st.gains()
-        key = np.where(avail, np.round(g / cost, _ROUND) if ratio else g, -np.inf)
+        key = np.where(avail, _key(g, cost, ratio), -np.inf)
         j = int(np.argmax(key))
         if g[j] <= 0:
             break
@@ -277,7 +296,7 @@ def _plain(st: _State, avail: np.ndarray, cost: np.ndarray, budget: float, ratio
 def _lazy(st: _State, avail: np.ndarray, cost: np.ndarray, budget: float, ratio: bool):
     g0 = st.gains()
     fresh = {int(j): float(g0[j]) for j in np.flatnonzero(avail)}          # last evaluated gain per cell
-    heap = [((-round(g / cost[j], _ROUND) if ratio else -g), j, 0) for j, g in fresh.items()]
+    heap = [(-_key(g, float(cost[j]), ratio), j, 0) for j, g in fresh.items()]
     heapq.heapify(heap)
     cells, gains, spent, step = [], [], 0.0, 0
     while heap:
@@ -294,19 +313,24 @@ def _lazy(st: _State, avail: np.ndarray, cost: np.ndarray, budget: float, ratio:
             step += 1
             continue
         g = fresh[j] = st.gain(j)
-        heapq.heappush(heap, ((-round(g / cost[j], _ROUND) if ratio else -g), j, step))
+        heapq.heappush(heap, (-_key(g, float(cost[j]), ratio), j, step))
     return cells, gains, spent
 
 
 def online_bound(M, cells, k: int | None = None, costs: np.ndarray | None = None, budget: float | None = None,
-                 r: int = 1, weights: np.ndarray | None = None) -> float:
+                 r: int = 1, weights: np.ndarray | None = None, candidates: Iterable[int] | None = None) -> float:
     """Upper bound on the optimal F for budget k (unit costs) or `budget` (costs), valid for ANY placement `cells`:
-    F(A) + the best fractional knapsack of single-cell gains delta_s given A (Leskovec et al. 2007, Theorem 4)."""
+    F(A) + the best fractional knapsack of single-cell gains delta_s given A (Leskovec et al. 2007, Theorem 4).
+    `candidates` restricts V (the optimum over those cells only; tighter)."""
     st = _State(M, r, weights)
     for j in cells:
         st.add(int(j))
     d = st.gains()
     d[np.asarray(list(cells), np.int64)] = 0.0
+    if candidates is not None:
+        out = np.ones(len(d), bool)
+        out[np.asarray(list(candidates), np.int64)] = False
+        d[out] = 0.0
     if costs is None:
         return st.value() + float(np.sort(d)[::-1][:int(k)].clip(0).sum())
     cost = np.asarray(costs, float)
@@ -330,7 +354,7 @@ def greedy_placement(M, k: int | None = None, *, costs: np.ndarray | None = None
     lazy=False runs the plain greedy (one vectorised pass over all cells per pick); same cells.
     Greedy stops when no cell adds value. fill=True then spends the rest of the budget on the remaining candidates
     by distinct visitors (zero gain on these exposures, but a hedge for unseen days); recorded in extra["filled"]."""
-    M = sparse.csc_matrix(M, dtype=float)
+    M = _csc(M)
     n = M.shape[1]
     avail = np.zeros(n, bool)
     avail[np.arange(n) if candidates is None else np.asarray(list(candidates), np.int64)] = True
@@ -350,7 +374,8 @@ def greedy_placement(M, k: int | None = None, *, costs: np.ndarray | None = None
         cells, gains, spent = (_lazy if lazy else _plain)(st, avail, cost, B, ratio)
         runs.append((st.value(), cells, gains, spent, st.evals, "benefit_cost" if ratio else "unit_cost"))
     value, cells, gains, spent, evals, which = max(runs, key=lambda t: t[0])
-    bound = online_bound(M, cells, k=k, costs=costs, budget=budget, r=r, weights=weights)
+    bound = online_bound(M, cells, k=k, costs=costs, budget=budget, r=r, weights=weights,
+                         candidates=None if candidates is None else np.flatnonzero(avail))
     filled: list[int] = []
     if fill:
         rest = avail.copy()
@@ -382,10 +407,10 @@ def top_visited(M, k: int | None = None, *, by: str = "visits", costs: np.ndarra
                 budget: float | None = None, candidates: Iterable[int] | None = None) -> list[int]:
     """Baseline: cells ranked by total exposures (by="visits") or distinct visitors (by="visitors"); first k, or
     in rank order while the budget allows."""
-    M = sparse.csc_matrix(M)
-    score = np.asarray(M.sum(0)).ravel() if by == "visits" else np.diff(M.indptr).astype(float)
     if by not in ("visits", "visitors"):
         raise ValueError("by must be 'visits' or 'visitors'")
+    M = _csc(M)
+    score = np.asarray(M.sum(0)).ravel() if by == "visits" else np.diff(M.indptr).astype(float)
     cand = np.arange(M.shape[1]) if candidates is None else np.asarray(list(candidates), np.int64)
     order = cand[np.argsort(-score[cand], kind="stable")]
     return _take_in_order(order, k, None if costs is None else np.asarray(costs, float), budget)
@@ -394,7 +419,7 @@ def top_visited(M, k: int | None = None, *, by: str = "visits", costs: np.ndarra
 def random_cells(M, k: int | None = None, *, seed: int = 0, costs: np.ndarray | None = None,
                  budget: float | None = None, candidates: Iterable[int] | None = None) -> list[int]:
     """Baseline: uniform random cells among `candidates` (default: cells with at least one exposure in M)."""
-    M = sparse.csc_matrix(M)
+    M = _csc(M)
     cand = np.flatnonzero(np.diff(M.indptr) > 0) if candidates is None else np.asarray(list(candidates), np.int64)
     order = np.random.default_rng(seed).permutation(cand)
     return _take_in_order(order, k, None if costs is None else np.asarray(costs, float), budget)
