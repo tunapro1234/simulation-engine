@@ -9,7 +9,9 @@ cards and dashboards), a pre-registered research loop, and benchmark tasks. A se
 method zoo (10 methods) with a Big Five fidelity check, schema-constrained answers with re-prompting, a one-shot
 economic game battery scored by distance to published human numbers, a who-to-punish agent society, theory-persona
 mixture calibration, extra evidence sections (variance ratio, completion, coefficient recovery) and harness-variant
-sweeps. The measured lesson: pure persona panels
+sweeps. A persona injection zoo (`simengine.persona.inject`: 52 methods in 12 families plus 2 controls, each scored against
+no-persona and persona-swap controls; literature effects only, not yet measured here) compares ways of putting a
+real person's data into the prompt. The measured lesson: pure persona panels
 rarely beat simple baselines. The LLM helps when there is no data, when it is stacked with a learner, and when it
 serves as a prior in small tests. Every number below has a source in [docs/RESULTS.md](docs/RESULTS.md). This is
 prior work: declare it if you use it at a hackathon (open source, AGPL-3.0-or-later; cite the dated `v0.1.0` release).
@@ -133,12 +135,29 @@ simengine loop examples/loop.json --max-turns 10
 - Rozetler: `high confidence`, `inconclusive`, `below baseline` (bizim − en güçlü taban GA'sı tümüyle sıfırın
   altında; araştırma kuralında bu da "kararsız" sayılır), `awaiting truth`.
 
+## Persona enjeksiyonu
+
+Gerçek bir kişinin verisi (öznitelikler, diğer cevapları, mülakat, davranış logu, komşuları, grubu) prompta nasıl
+girmeli? `simengine.persona.inject` literatürden 12 ailede 52 yöntemi (+2 kontrol) aynı hücrelerde karşılaştırır:
+her kol `no_persona` ve `swap` (başkasının verisi) kontrolüne karşı, kişi kümeli eşli bootstrap GA'sıyla.
+
+```python
+import simengine.persona as sp
+arms = ["plain_fields", ("own_answers_rag", {"questions": bank, "k": 3}), ("similar_respondents", {"pool": people})]
+plan = sp.compare_injectors(llm, people, bank, "answers", arms, dry_run=True)   # çağrı sayısı + üst sınır USD
+res = sp.compare_injectors(llm, people, bank, "answers", arms, max_usd=2.0); res.table
+```
+
+Çevrimdışı örnek: `python examples/persona_inject_compare.py` (FakeLLM, ~2 sn). Hangi veride hangi yöntem, beklenen
+etki (kaynaklı), maliyet ve risk tablosu: [docs/modules/persona-inject.md](docs/modules/persona-inject.md).
+Hiçbiri simengine'de gerçek LLM ile ölçülmedi; tablodaki sayılar makalelerin kendi sayıları.
+
 ## Modül haritası
 
 | modül | ne yapar | belge |
 |---|---|---|
 | `simengine.llm` | Claude / `claude -p` / FakeLLM arka uçları, disk önbelleği, maliyet defteri, bütçe, 401'de durma | [llm](docs/modules/llm.md) |
-| `simengine.persona` | persona şeması, tablodan / geçmişten persona, LLM ile üretim, enum doğrulama, sızıntı koruması; persona yöntem hayvanat bahçesi (10 yöntem, ajan bankası), Big Five kurucu + Mini-IPIP sadakat kontrolü (`validate_bigfive`) | [persona](docs/modules/persona.md) |
+| `simengine.persona` | persona şeması, tablodan / geçmişten persona, LLM ile üretim, enum doğrulama, sızıntı koruması; persona yöntem hayvanat bahçesi (10 yöntem, ajan bankası), Big Five kurucu + Mini-IPIP sadakat kontrolü (`validate_bigfive`); persona enjeksiyonu (`persona.inject`, 12 aile, 52 yöntem + 2 kontrol, kontrollü kıyas) | [persona](docs/modules/persona.md), [persona-inject](docs/modules/persona-inject.md) |
 | `simengine.sim` | anket, SSR, A/B paneli + güven kontrolü, tartışma turu, segment dağılımı, kişi başı tahmin (L0/L1/L2); şemalı cevap + hata geri bildirimiyle yeniden sorma (`ask_constrained`, tahmin/kurtarma yok) | [sim](docs/modules/sim.md) |
 | `simengine.methods` | tabanlar, sepet yöntemleri, A/B (TF-IDF, LLM, stack, erken test Bayes), stack, büzülme, MNL, sonraki eylem; teori-persona karışım ağırlıkları + tanımlanabilirlik uyarısı (`fit_mixture_weights`) | [methods](docs/modules/methods.md) |
 | `simengine.abm` | benimseme ABM + ABC, fikir kayması, pazar ABM, elastisite, retweet eğrileri (Hawkes, SEISMIC), ajan toplumu; ekonomik oyun toplumları (kimi cezalandırmalı oylaması, tekrarlı PD, güven) | [abm](docs/modules/abm.md) |
@@ -158,8 +177,9 @@ Kısayollar: `se.Claude`, `se.FakeLLM`, `se.CostLedger`, `se.EmptyResponseError`
 `se.point_for_metric`, `se.llm_prior_feature`. Alt paketler ilk erişimde yüklenir.
 
 Örnekler (`examples/`): `quickstart.py`, `ab_test.py`, `segment_distribution.py`, `research_loop.py` + `loop.json`,
-`abm_adoption.py`, `econ_games.py` (persona yöntemleri → oyunlar → insana uzaklık → kıyas → kimi cezalandırmalı
-karnesi; çevrimdışı, ~3 sn) ve bir günlük yarışma planı [`hackathon_day.md`](examples/hackathon_day.md). Yöntem
+`abm_adoption.py`, `persona_inject_compare.py` (persona enjeksiyon kolları, kontroller ve GA; çevrimdışı, ~2 sn),
+`econ_games.py` (persona yöntemleri → oyunlar → insana uzaklık → kıyas → kimi cezalandırmalı karnesi; çevrimdışı,
+~3 sn) ve bir günlük yarışma planı [`hackathon_day.md`](examples/hackathon_day.md). Yöntem
 notları: [docs/METHODS.md](docs/METHODS.md). Alan haritası ve doğrulama: [docs/landscape.md](docs/landscape.md)
 (rakip iddiaları, açık simülatörler, kıyaslar; her sayı "makale" ya da "satıcı beyanı" etiketli),
 [docs/validation.md](docs/validation.md) (jürilerin tanıdığı doğrulama ölçütleri → simengine işlevi),
