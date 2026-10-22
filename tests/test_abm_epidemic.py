@@ -139,6 +139,9 @@ class TestSpatialSEIR(unittest.TestCase):
             ep.SpatialSEIR(SIR, shape=(5, 5), positions=[30])
         with self.assertRaises(ValueError):
             ep.SpatialSEIR(SIR, shape=(5, 5))
+        with self.assertRaises(ValueError):                  # gamma * dt > 1
+            ep.SpatialSEIR(ep.EpiParams(beta=1.0, gamma=2.0), shape=(5, 5), n=5).run(1)
+        ep.SpatialSEIR(ep.EpiParams(beta=1.0, gamma=2.0), shape=(5, 5), n=5, steps_per_day=2).run(1)
 
     @unittest.skipUnless(os.environ.get("SIMENGINE_DATA"), "SIMENGINE_DATA not set")
     def test_yjmob100k_loader(self):

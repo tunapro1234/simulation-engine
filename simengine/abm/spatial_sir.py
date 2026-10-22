@@ -6,8 +6,10 @@ Contact is frequency dependent and local: a susceptible agent in cell c has haza
 c (own cell included; r = 0 is same-cell only, r = None is full mixing, the mean-field control). Positions are
 either static home cells ``(n,)`` (contact via the neighbourhood) or mobility trajectories ``(n, T)`` (one cell per
 time slot; contact via co-location in the window at each slot, ``steps_per_day`` = slots per day, trajectory index
-``t % T``). Transitions are per step with probabilities ``1 - exp(-rate * dt)`` (exponential latent / infectious
-periods), so with r = None and enough steps per day the ABM mean converges to :func:`seir_ode`.
+``t % T``). Infection per step has probability ``1 - exp(-hazard * dt)``; E -> I and I -> R have probability
+``rate * dt`` (geometric residence with mean exactly 1 / rate; ``1 - exp(-rate * dt)`` would lengthen the mean by
+~dt / 2 and inflate R0, e.g. 2.76 instead of 2.5 at one step per day), so with r = None the ABM mean tracks
+:func:`seir_ode` (measured agreement in the doc).
 
 R0: :func:`r0_index_case` (one infectious agent in a susceptible population, secondary cases made absorbing, so the
 count is the realised R0 of that contact structure), :func:`r0_growth` (early exponential growth rate r ->
@@ -315,8 +317,10 @@ class SpatialSEIR:
         np.put_along_axis(state, idx, I, 1)
         np.put_along_axis(inf_day, idx, 0, 1)
         pres = np.ones((B, n), bool) if present is None else np.broadcast_to(np.asarray(present, bool), (B, n))
-        pE = 0.0 if (absorb or p.sigma is None) else -np.expm1(-p.sigma * dt)
-        pI = -np.expm1(-p.gamma * dt)
+        if max(p.gamma, p.sigma or 0.0) * dt > 1:
+            raise ValueError("rate * dt > 1: raise steps_per_day")
+        pE = 0.0 if (absorb or p.sigma is None) else p.sigma * dt     # mean-preserving residence (see docstring)
+        pI = p.gamma * dt
         jump_S = 1 if (absorb or p.sigma is not None) else 2        # SIR: S -> I directly
         counts = np.zeros((4, B, days + 1))
         new = np.zeros((B, days + 1))
