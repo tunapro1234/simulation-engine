@@ -275,5 +275,69 @@ class TestMetrics(unittest.TestCase):
             G.gini([-1, 2])
 
 
+
+class TestReviewEdgeCases(unittest.TestCase):
+    def test_radius_must_be_integer(self):
+        for r in (0, 1.5, -1):
+            with self.assertRaises(ValueError):
+                G.Grid((9, 9), radius=r)
+        self.assertEqual(G.Grid((9, 9), radius=2.0).radius, 2)
+
+    def test_neighbour_sum_dtypes(self):
+        g = G.Grid((5, 5))
+        self.assertTrue((g.neighbour_sum(np.full((5, 5), 200, np.uint8)) == 1600).all())   # no uint8 wrap
+        self.assertEqual(g.neighbour_sum(np.ones((5, 5), np.int8)).dtype, np.int32)
+        self.assertEqual(g.neighbour_sum(np.ones((5, 5), np.uint32)).dtype, np.int64)
+        self.assertEqual(g.neighbour_sum(np.ones((5, 5), np.uint64)).dtype, np.uint64)     # not float64
+        self.assertEqual(g.neighbour_sum(np.ones((5, 5), np.float32)).dtype, np.float32)
+
+    def test_agents_lattice_rejects_bad_cells_and_kinds(self):
+        g = G.Grid((3, 3), torus=False)
+        with self.assertRaises(ValueError):
+            G.Agents([0, -1], [0, 1]).lattice(g)          # -1 from a bounded neighbour_table
+        with self.assertRaises(ValueError):
+            G.Agents([0, 9], [0, 1]).lattice(g)
+        with self.assertRaises(ValueError):
+            G.Agents([0, 1], [0, -1]).lattice(g)
+        self.assertTrue((G.Agents([], []).lattice(g) == G.EMPTY).all())
+
+    def test_synchronous_result_is_fresh(self):
+        s = np.arange(4)
+        new = G.synchronous_step(s, lambda old, rng: old, np.random.default_rng(0))
+        self.assertTrue(new.flags.writeable)
+        new[0] = 7                                        # does not raise, does not touch s
+        self.assertEqual(s[0], 0)
+        with self.assertRaises(ValueError):
+            G.synchronous_step(s, lambda old, rng: old[:2], np.random.default_rng(0))
+
+    def test_moran_permutation_alternatives(self):
+        n = 99
+        g = G.Grid((10, 10), neighbourhood="von_neumann")
+        clustered = (np.arange(10)[None, :] < 5) * np.ones((10, 1))
+        cb = (np.indices((10, 10)).sum(0) % 2).astype(float)
+        p = {a: G.moran_permutation(clustered, g, n_perm=n, alternative=a)[1]
+             for a in ("directed", "greater", "lesser", "two-sided")}
+        self.assertEqual(p, {"directed": 1 / 100, "greater": 1 / 100, "lesser": 1.0, "two-sided": 2 / 100})
+        q = {a: G.moran_permutation(cb, g, n_perm=n, alternative=a)[1] for a in ("directed", "greater", "lesser")}
+        self.assertEqual(q, {"directed": 1 / 100, "greater": 1.0, "lesser": 1 / 100})
+        with self.assertRaises(ValueError):
+            G.moran_permutation(cb, g, alternative="folded")
+        i, pv = G.moran_permutation(np.ones((10, 10)), g, n_perm=9)
+        self.assertTrue(np.isnan(i) and np.isnan(pv))
+        big = G.Grid((300, 300))                          # chunk is capped by 2**22 cells, result unchanged
+        x = np.random.default_rng(0).random(big.shape)
+        self.assertEqual(G.moran_permutation(x, big, n_perm=5, chunk=64)[1],
+                         G.moran_permutation(x, big, n_perm=5, chunk=5)[1])
+
+    def test_dissimilarity_and_share_input_checks(self):
+        with self.assertRaises(ValueError):
+            G.dissimilarity(np.zeros((4, 4), int), 0)
+        with self.assertRaises(ValueError):
+            G.dissimilarity(np.zeros(4, int), 2)
+        lat = np.zeros((4, 4), int)
+        lat[0, 0] = -2
+        with self.assertRaises(ValueError):
+            G.same_type_share(lat, G.Grid((4, 4)))
+
 if __name__ == "__main__":
     unittest.main()
