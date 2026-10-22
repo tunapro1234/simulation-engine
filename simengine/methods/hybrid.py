@@ -50,7 +50,9 @@ class ShrunkDeviation:
     Distribution recipe "population + beta * (LLM segment - LLM population)" (calibrate the LLM's segment deviation on
     history): ``base`` = the known overall answer distribution (K,), ``llm`` = the LLM's per-segment distributions
     (n, K), ``ref`` = the LLM's own overall distribution (K,), ``y`` = the true segment distributions of the train
-    cells; ``alpha_`` is beta. One call each for fit and predict::
+    cells; ``alpha_`` is beta. Cells spanning several items: pass ``base`` and ``ref`` row-aligned as (n, K) (pad
+    missing options with 0). ``base`` must be known at prediction time (a published overall, or train respondents),
+    not computed from the held-out cells' answers. One call each for fit and predict::
 
         sd = ShrunkDeviation(distribution=True, alphas=np.linspace(0, 1.5, 16))   # beta > 1 allowed if wanted
         sd.fit(base=pop, llm=llm_seg[train], y=true_seg[train], ref=llm_pop)
@@ -198,9 +200,10 @@ class BinaryCalibrator:
     """Recalibrate binary probabilities on dev (intent kit `kalibre`).
 
     ``method``: ``"platt"`` (logistic on the logit), ``"isotonic"``, ``"ratio"`` (multiply by base_rate / mean(p),
-    clipped to [0, 1]: fixes the level only, ranking unchanged) or ``"auto"`` (isotonic from 1000 dev rows, else
-    Platt). With ``monotone=True`` (default) a fitted Platt slope <= 0, which would invert the ranking, falls back to
-    the ratio method with a warning (``fallback_`` says why). Platt on fewer than 200 dev rows warns either way.
+    clipped to [0, 1]: fixes the level only, ranking unchanged except ties where scale > 1 clips at 1) or ``"auto"``
+    (isotonic from 1000 dev rows, else Platt). With ``monotone=True`` (default) a fitted Platt slope <= 0, which would
+    invert the ranking, falls back to the ratio method with a warning (``fallback_`` says why). Platt on fewer than
+    200 dev rows warns either way; a one-class dev set (small n, rare outcome) always falls back to ratio.
 
     Usage::
 
@@ -226,6 +229,11 @@ class BinaryCalibrator:
         self.scale_ = self.base_rate_ / m if m > 0 else 1.0
         self.Z_ = p[:, None] if self.method_ in ("isotonic", "ratio") else _z("binary", [p])
         self.y_ = y
+        if self.method_ == "platt" and len(np.unique(y)) < 2:
+            self.fallback_ = f"dev labels have one class (n_dev={len(y)})"
+            warnings.warn(f"BinaryCalibrator: {self.fallback_}, Platt cannot be fitted; using method='ratio'",
+                          stacklevel=2)
+            self.method_ = "ratio"
         if self.method_ == "platt":
             if len(y) < RATIO_MIN_DEV:
                 warnings.warn(f"BinaryCalibrator: Platt on n_dev={len(y)} < {RATIO_MIN_DEV}; the slope is noisy and "

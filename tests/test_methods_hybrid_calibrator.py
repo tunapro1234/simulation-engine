@@ -69,6 +69,15 @@ class TestBinaryCalibrator(unittest.TestCase):
         q = cal.predict(self.p)
         self.assertLess(abs(float(q.mean()) - float(self.y.mean())), 0.01)
 
+    def test_one_class_dev_falls_back_to_ratio(self):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cal = BinaryCalibrator().fit([0.1, 0.2, 0.3], [0, 0, 0])
+        self.assertEqual(cal.method_, "ratio")
+        self.assertIn("one class", cal.fallback_)
+        self.assertTrue(any("one class" in str(x.message) for x in w))
+        np.testing.assert_allclose(cal.predict(np.array([0.2, 0.5])), [0.0, 0.0])
+
     def test_bad_method(self):
         with self.assertRaises(ValueError):
             BinaryCalibrator("sigmoid")
@@ -93,6 +102,16 @@ class TestShrunkDeviationDistribution(unittest.TestCase):
         self.assertEqual(pred.shape, (20, K))
         np.testing.assert_allclose(pred.sum(1), 1.0, atol=1e-9)
         self.assertLess(np.mean((pred - y[te]) ** 2), np.mean((pop - y[te]) ** 2))
+
+    def test_row_aligned_base_and_ref(self):
+        rs = np.random.default_rng(3)
+        n, K = 30, 3
+        base, ref = rs.dirichlet([2] * K, n), rs.dirichlet([2] * K, n)   # one item per row
+        llm = ref + 0.5 * (rs.dirichlet([2] * K, n) - 1 / K)
+        y = np.clip(base + 0.3 * (llm - ref), 0, None)
+        y /= y.sum(1, keepdims=True)
+        sd = ShrunkDeviation(distribution=True).fit(base=base, llm=llm, y=y, ref=ref)
+        self.assertAlmostEqual(sd.alpha_, 0.3)
 
 
 if __name__ == "__main__":
