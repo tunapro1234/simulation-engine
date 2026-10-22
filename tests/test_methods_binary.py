@@ -72,6 +72,17 @@ class TargetEncodeTest(unittest.TestCase):
         self.assertAlmostEqual(oof.iloc[2], 1.0)                    # fold 0 row (y, 0) sees only fold 1's y=1
         self.assertTrue(np.isfinite(oof).all())
 
+    def test_rows_in_no_fold_do_not_see_own_label(self):
+        # oof_predict fold ids: -1 = always trained on; those rows still must not be encoded from their own label
+        rng = np.random.default_rng(3)
+        d = pd.DataFrame({"k": [f"k{i}" for i in range(200)] * 2, "y": rng.integers(0, 2, 400).astype(float)})
+        ids = np.r_[np.full(200, -1.0), np.tile(np.arange(4.0), 50)]
+        ids[:20] = np.nan
+        enc, _ = target_encode(d, None, "k", "y", folds=ids, m=1)
+        self.assertLess(abs(roc_auc_score(d.y.iloc[:200], enc.iloc[:200]) - 0.5), 0.1)
+        ins, _ = target_encode(d, None, "k", "y", m=1, oof=False)
+        self.assertGreater(roc_auc_score(d.y.iloc[:200], ins.iloc[:200]), 0.75)
+
     def test_errors(self):
         with self.assertRaises(KeyError):
             target_encode(self.tr, None, "nope", "y")

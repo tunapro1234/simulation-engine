@@ -90,9 +90,10 @@ def target_encode(train: pd.DataFrame, test: pd.DataFrame | None, col, y: str, *
     the other folds only, so it never sees its own label) or in-sample (``oof=False``, leaks: use only for a quick
     look). ``test`` rows: statistics of all training rows. Rows with a missing ``y`` are not counted but still get an
     encoding. ``folds``: number of shuffled folds (``seed``), or fold ids (a column name, Series or array, one per
-    training row; use the same ids as ``oof_predict(folds=...)``; -1 = never held out, encoded from all training
-    rows; NaN = encoded from all training rows). Returns ``(train_encoding, test_encoding)`` float Series aligned
-    with each frame's index (``test_encoding`` is None when ``test`` is None).
+    training row; use the same ids as ``oof_predict(folds=...)``; rows with -1 or NaN belong to no fold and are
+    encoded out of fold over their own shuffled split, so they never see their own label either). Returns
+    ``(train_encoding, test_encoding)`` float Series aligned with each frame's index (``test_encoding`` is None when
+    ``test`` is None).
     """
     if y not in train.columns:
         raise KeyError(f"target column {y!r} not in train")
@@ -105,11 +106,18 @@ def target_encode(train: pd.DataFrame, test: pd.DataFrame | None, col, y: str, *
     tr = full.copy()
     if oof:
         ids = pd.Series(_fold_ids(folds, train, seed))
-        for lab in pd.unique(ids.dropna()):
-            if lab == -1:
-                continue
+        labels = [lab for lab in pd.unique(ids.dropna()) if lab != -1]
+        for lab in labels:
             te = (ids == lab).to_numpy()
             tr[te], _ = _encode(k_tr[~te], y_tr[~te], k_tr[te], m)
+        rest = np.flatnonzero((ids.isna() | (ids == -1)).to_numpy())
+        if rest.size:   # rows in no fold (-1 / NaN) still must not see their own label: own random split
+            perm = np.random.default_rng(seed).permutation(rest)
+            for part in np.array_split(perm, max(2, len(labels))):
+                if part.size:
+                    te = np.zeros(len(ids), dtype=bool)
+                    te[part] = True
+                    tr[te], _ = _encode(k_tr[~te], y_tr[~te], k_tr[te], m)
     out_tr = pd.Series(tr, index=train.index, name=name)
     if test is None:
         return out_tr, None
