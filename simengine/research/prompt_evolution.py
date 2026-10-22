@@ -11,8 +11,9 @@ user-supplied scorer on per-unit data:
   random training subset, keep the top `top_frac`, optional iterative Monte Carlo resampling ("Generate a variation
   of the following instruction while keeping the semantic meaning."), survivors scored on the full training split.
 - `promptbreeder`: Promptbreeder-style binary-tournament GA (Fernando et al. 2023, arXiv:2309.16797). Units carry a
-  task-prompt and a mutation-prompt; nine operators in five classes (zero/first-order generation, EDA, EDA rank and
-  index, lineage, zero/first-order hyper-mutation, Lamarckian working-out-to-prompt) plus 10% prompt crossover.
+  task-prompt and a mutation-prompt; eight of the paper's nine operators drawn uniformly (zero/first-order
+  generation, EDA, EDA rank and index, lineage, zero/first-order hyper-mutation, Lamarckian working-out-to-prompt)
+  plus 10% prompt crossover after them; no context shuffling. Each generation pairs the population at random.
 
 Search sees the training split only. `select_and_test` re-ranks the top-k texts on the validation split, seals the
 chosen text with `simengine.research.seal` (and checks a locked prereg if given), then scores the winner and the

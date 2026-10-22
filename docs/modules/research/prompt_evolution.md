@@ -9,9 +9,9 @@ split is scored once, for the winner and for the baselines. It ships three searc
 
 | method | source | what is implemented |
 |---|---|---|
-| `opro` | Yang et al. 2023, *Large Language Models as Optimizers*, arXiv:2309.03409 (§4, Fig. 3) | The meta-prompt holds the best `keep_top` (20) texts so far with their training scores, sorted ascending so the best comes last. Scores are rounded to integers 0-100 (`score_scale`). It also holds `n_exemplars` (3) training exemplars, sampled again at every step, with `<INS>` at the insertion point (`position="q_begin"`, or `"q_end"`). The meta-instruction is quoted from Fig. 3: "Write your new text that is different from the old ones and has a score as high as possible. Write the text in square brackets." Each step draws `per_step` (8) samples, and the first `[...]` span is parsed. `show_scores=False` gives the paper's "no scores" ablation. |
+| `opro` | Yang et al. 2023, *Large Language Models as Optimizers*, arXiv:2309.03409 (§4, Fig. 3) | The meta-prompt holds the best `keep_top` (20) texts so far with their training scores, sorted ascending so the best comes last. Scores are rounded to integers 0-100 (`score_scale`). It also holds `n_exemplars` (3) training exemplars, sampled again at every step, with `<INS>` at the insertion point (`position="q_begin"`, or `"q_end"`). The meta-instruction is quoted from Fig. 3: "Write your new text that is different from the old ones and has a score as high as possible. Write the text in square brackets." Each step draws `per_step` (8) samples, and the first `[...]` span is parsed. `show_scores=False` gives the paper's "no scores" ablation. With `higher_is_better=False` the list still runs worst to best, so the header says "descending order ... where lower scores indicate better quality" and the tail asks for a score "as low as possible", as in the paper's minimisation meta-prompts (Fig. 19-20). |
 | `ape` | Zhou et al. 2022, *Large Language Models Are Human-Level Prompt Engineers*, arXiv:2211.01910 (Alg. 1, Fig. 2-3) | Forward-mode generation template ("I gave a friend an instruction and five inputs. ... The instruction was"). Each candidate is generated from its own random `n_demos` (5) training demonstrations, with `n_candidates` (50, the paper's default) in total. Candidates are scored on a random training subset (`subset_size`), the top `top_frac` are kept, and the survivors are scored on the full training split. `resample_rounds > 0` turns on iterative APE ("Generate a variation of the following instruction while keeping the semantic meaning.") with a new random subset each round. |
-| `promptbreeder` | Fernando et al. 2023, *Promptbreeder*, arXiv:2309.16797 (§3) | A binary-tournament GA over units of (task-prompt, mutation-prompt). Initialisation sends "<mutation-prompt> <thinking-style> INSTRUCTION: <problem> INSTRUCTION MUTANT:". Each replication draws one operator uniformly from nine operators in five classes: zero-order generation ("A list of 100 hints:"), first-order generation, EDA (diversity-filtered list in random order), EDA rank and index (ascending list, deliberately headed "descending order of score"), lineage ("GENOTYPES FOUND IN ASCENDING ORDER OF QUALITY"), zero-order hyper-mutation (problem + thinking-style gives a new mutation-prompt), first-order hyper-mutation ("Please summarize and improve the following instruction:"), and Lamarckian working-out-to-task-prompt ("I gave a friend an instruction and some advice. ..."). After the operator, a 10% prompt crossover (fitness-proportionate donor) may replace the task-prompt. The mutant overwrites the loser. |
+| `promptbreeder` | Fernando et al. 2023, *Promptbreeder*, arXiv:2309.16797 (§3) | A binary-tournament GA over units of (task-prompt, mutation-prompt). Initialisation sends "<mutation-prompt> <thinking-style> INSTRUCTION: <problem> INSTRUCTION MUTANT:". Each generation pairs the whole population at random (§4) and each pair competes once. The paper names nine operators in five classes; eight of them are drawn uniformly per replication here: zero-order generation ("A list of 100 hints:"), first-order generation, EDA (diversity-filtered list in random order), EDA rank and index (ascending list, deliberately headed "descending order of score"), lineage ("GENOTYPES FOUND IN ASCENDING ORDER OF QUALITY"), zero-order hyper-mutation (problem + thinking-style gives a new mutation-prompt), first-order hyper-mutation ("Please summarize and improve the following instruction:"), and Lamarckian working-out-to-task-prompt ("I gave a friend an instruction and some advice. ..."). After the operator, a 10% prompt crossover (fitness-proportionate donor) may replace the task-prompt; context shuffling is not implemented. The mutant overwrites the loser. |
 
 The template strings were checked against the papers' text (arXiv PDFs, read 22 Oct 2026). `MUTATION_PROMPTS` and
 `THINKING_STYLES` are short subsets quoted from Promptbreeder Appendix C/D; pass your own lists for real runs.
@@ -80,11 +80,14 @@ Command, from the repo root (script kept outside the repo; it calls `evolve` per
 | opro, `show_scores=False` | 80 | 5460 | 0.627 | 0.621 | 0.579 | 0.091 | 0.611 | 5 |
 | ape (50 candidates) | 50 | 1534 | 0.587 | 0.621 | 0.573 | 0.091 | 0.611 | 5 |
 | ape, 2 resample rounds | 74.8 | 1926 | 0.619 | 0.608 | 0.600 | 0.091 | 0.611 | 5 |
-| promptbreeder (pop 10, 8 gen) | 59.6 | 4410 | 0.609 | 0.613 | 0.576 | 0.091 | 0.611 | 5 |
+| promptbreeder (pop 10, 8 gen) | 60 | 4170 | 0.583 | 0.629 | 0.560 | 0.091 | 0.611 | 5 |
 
-Each arm took under 0.3 s on the AWS box. The two OPRO rows are identical because the toy responder never reads
-scores, so this ablation only checks the wiring. On a real LLM it is the paper's "no scores" ablation. On this toy
-every winner ends 0.01-0.04 below the oracle text on test, and validation runs above test by about 0.01-0.05.
+Each run took under 1 s on the AWS box (mean 0.17 s for promptbreeder, under 0.03 s for the other arms). The two
+OPRO rows are identical because the toy responder never reads scores, so this ablation only checks the wiring. On a
+real LLM it is the paper's "no scores" ablation. Averaged over the 5 seeds, every arm's winner ends 0.01-0.05 below
+the oracle text on test, and validation runs above test by 0.01-0.07; single seeds range from 0.12 below to 0.03
+above the oracle. The promptbreeder row was re-run on 22 Oct after the generation-pairing fix (before it: 59.6
+calls, test 0.576); the other rows reproduced exactly.
 
 Literature numbers, not reproduced here (source: the papers):
 
@@ -102,9 +105,12 @@ headline numbers.
   few-shot context shuffling, and uses character 2-4-gram TF-IDF cosine instead of BERT embeddings for the 0.95
   diversity filter. The default population (20) and generation count (10) are below the paper's 50 and 20-30.
   `batch_size=None` scores fitness on the full training split; the paper uses a fresh batch of 100.
-- In `promptbreeder`, a Lamarckian draw without scorer outputs falls back to first-order generation
-  (`lamarckian_fallbacks`). By default a "correct" working is any unit at the maximum observed score
-  (`correct_at=`).
+- In `promptbreeder`, a Lamarckian draw reads the parent's cached outputs (no new scoring) and falls back to
+  first-order generation when there are no outputs or no correct units (`lamarckian_fallbacks`). By default a
+  "correct" working is a unit at the best per-unit score cached on train over all texts (in the scoring
+  direction), i.e. 1 under exact match. With continuous scores pass `correct_at=`. If no text has scored above 0
+  yet under exact match, the best cached score is 0 and every unit counts as correct; pass `correct_at=1` to avoid
+  that.
 - APE has no reverse (infilling) mode and no log-probability score, because the Claude backends expose neither. The
   adaptive filter is a single stage per round; the paper uses repeated stages on non-overlapping subsets.
 - OPRO keeps a single best score per text. A paraphrase is a new text, so near-duplicates can fill the top-20 list.
@@ -114,4 +120,4 @@ headline numbers.
 - No real-LLM measurement is reported. Before you claim a gain, run it with `simengine.llm.Claude(budget_usd=...)`,
   a locked prereg and the seed prompt as the baseline.
 
-Tests: `python3 -m unittest tests.test_research_prompt_evolution` (23 tests, synthetic units, FakeLLM).
+Tests: `python3 -m unittest tests.test_research_prompt_evolution` (25 tests, synthetic units, FakeLLM).
