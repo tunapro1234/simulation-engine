@@ -139,7 +139,8 @@ All baselines are LLM-free, use train cells only, and never look at test answers
 These come from one run on the local copy of all 17 shards (22 Oct 2026, `nice -n 19`). The shards were first
 aggregated with `write_hist`. Each value is `value [95% CI]`, and n counts studies. All three splits together took
 about 5 s after the aggregation. A review pass rebuilt `hist.parquet` from the shards (37 s, 1.05 GB peak RSS; same
-cells, counts and split shares) and re-ran every number below: all reproduced to the printed digits. Command (Python, from the repository root):
+cells, counts and split shares) and re-ran every number below: all reproduced to the printed digits.
+Command (Python, from the repository root):
 
 ```python
 from simengine.bench.tasks import socsci210 as ss
