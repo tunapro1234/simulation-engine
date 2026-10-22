@@ -312,6 +312,7 @@ def elasticity(model: MNL, market: pd.DataFrame, price: str = "price",
         raise ValueError("elasticity: pass one market (a single task)")
     if price not in m.columns:
         raise ValueError(f"elasticity: market has no {price!r} column")
+    m = m.assign(**{price: m[price].astype(float)})          # integer prices would refuse the perturbed values
     named = "alternative" in rename_aliases(market, ALIASES).columns
     labels = pd.Index(m["alternative"] if named else market.index, name="alternative")
     s = model.predict_proba(m)

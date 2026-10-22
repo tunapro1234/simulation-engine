@@ -120,6 +120,8 @@ class TestInference(unittest.TestCase):
         num = (np.log(simulate_shares(self.m, up)) - np.log(simulate_shares(self.m, dn))) / (2 * h)
         np.testing.assert_allclose(e["cross"].iloc[:, 2].to_numpy(), num.to_numpy(), rtol=1e-4)
         self.assertEqual(len(elasticity(self.m, MARKET)["arc"]), 12)  # default grid: 4 factors x 3 alternatives
+        ints = elasticity(self.m, MARKET.astype({"price": int}))
+        np.testing.assert_allclose(ints["own"].to_numpy(), elasticity(self.m, MARKET)["own"].to_numpy())
 
 
 class TestValidation(unittest.TestCase):
