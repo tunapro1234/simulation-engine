@@ -18,6 +18,7 @@ Satır = bir birim (kişi, kişi×soru, segment×soru, varyant). Sütunlar:
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -26,6 +27,12 @@ import pandas as pd
 GOREVLER = ("ikili", "cok_sinif", "dagilim", "surekli", "ab")
 ON_EK = "tahmin_"
 TEST_ADLARI = ["test", "deger", "degerlendirme", "holdout"]
+GOREVLER_EN = ("binary", "multiclass", "distribution", "continuous", "ab")   # GOREVLER ile aynı sıra
+
+
+def _ingilizce(sutunlar: list[str]) -> list[str]:
+    """Hata mesajı için: tahmin_<ad> → pred_<ad> (EvalFrame yazımı)."""
+    return ["pred_" + c[len(ON_EK):] if c.startswith(ON_EK) else c for c in sutunlar]
 
 
 def _vektor(x):
@@ -133,15 +140,15 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
             siniflar: list | None = None) -> Veri:
     """Girdiyi doğrula, görev tipini bul, vektör sütunlarını çöz."""
     if "gercek" not in df.columns:
-        raise ValueError("'gercek' sütunu zorunlu")
+        raise ValueError("'truth' column is required (alias: gercek)")
     tsut = [c for c in df.columns if c.startswith(ON_EK)]
     if yontemler:
         tsut = [ON_EK + y for y in yontemler]
         eksik = [c for c in tsut if c not in df.columns]
         if eksik:
-            raise ValueError(f"eksik tahmin sütunları: {eksik}")
+            raise ValueError(f"missing prediction columns: {_ingilizce(eksik)} (alias: {eksik})")
     if not tsut:
-        raise ValueError("en az bir 'tahmin_<yontem>' sütunu gerekli")
+        raise ValueError("at least one 'pred_<method>' column is required (alias: tahmin_<method>)")
     notlar = []
     tam = df.reset_index(drop=True).copy()
     if "bolum" in tam:
@@ -157,17 +164,17 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
     eks = _eksik(d["gercek"])
     if eks.any():
         if eks.all():
-            raise ValueError("'gercek' sütununun tamamı eksik: gerçek yok (evaluate bu durumda 'awaiting truth' "
-                             "raporu döner)")
+            raise ValueError("every 'truth' (alias: gercek) value is missing: no truth yet (evaluate returns an "
+                             "'awaiting truth' report in this case)")
         notlar.append(f"gerçeği eksik satırlar düşürüldü: {int(eks.sum())} / {len(d)}")
         d = d[~eks].reset_index(drop=True)
     if egitim is not None and len(egitim):
         egitim = egitim[~_eksik(egitim["gercek"])].reset_index(drop=True)
     gorev = gorev or gorev_bul(d, tsut)
     if gorev not in GOREVLER:
-        raise ValueError(f"bilinmeyen görev: {gorev} ({GOREVLER})")
+        raise ValueError(f"unknown task {gorev!r}: use one of {GOREVLER_EN} (internal: {GOREVLER})")
     if gorev == "ab" and "madde" not in d:
-        raise ValueError("ab görevi 'madde' (test kimliği) sütunu ister")
+        raise ValueError("task 'ab' needs an 'item' column, the test id (alias: madde)")
 
     d = d.copy()
     if gorev == "dagilim":
@@ -218,6 +225,11 @@ def gercek_yok(df: pd.DataFrame) -> bool:
         return True
     g = df["gercek"]
     if bool(_eksik(g).all()):
+        # sütun var ama tamamı boş: çoğu zaman başarısız bir birleştirme (ör. 'unit' üzerinden), sessiz 'bekliyor' değil
+        warnings.warn(f"the 'truth' (alias: gercek) column is present but all {len(g)} values are missing (NaN/None/"
+                      "empty): reporting 'awaiting truth'. If truth was expected, check the join that filled it (e.g. "
+                      "on 'unit'); to evaluate sealed predictions before truth, drop the column instead.",
+                      UserWarning, stacklevel=3)
         return True
     if "bolum" in df.columns:
         g = g[df["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()]
