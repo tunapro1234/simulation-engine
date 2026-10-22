@@ -1,4 +1,10 @@
-"""Evidence extras: spread, completion, published-finding deltas, stylized-fact scores, coefficient recovery.
+"""Evidence extras: spread, completion, published-finding deltas, stylized-fact scores, coefficient recovery, say-do.
+
+Usage::
+
+    from simengine.evidence import extras
+    sec = extras.say_do(frame, "said", "did", preds=["llm", "persistence"], cluster="person")
+    print(extras.section_markdown(sec))
 
 These are card *sections* that sit next to the main evidence card (`card`, `card_markdown`). They answer the
 questions a jury asks about synthetic respondents that the baseline ladder does not:
@@ -13,6 +19,9 @@ questions a jury asks about synthetic respondents that the baseline ladder does 
   numerator and the denominator (generalised from the edsl-test who-to-punish scorer).
 - ``coefficient_recovery``: fit the same OLS on simulated and human rows and report sign agreement and the
   share of coefficients that differ significantly (Bisbee et al.).
+- ``say_do``: with two anchors per person (what they said, what they did), is each prediction's panel mean
+  (and person-level error) closer to the stated or to the observed value? Person-cluster bootstrap CI and a
+  verdict line for the card.
 
 Every function returns a plain, JSON-friendly dict with ``kind``, ``title``, ``columns``, ``rows`` and ``notes``
 (plus its own numbers). ``section_markdown`` / ``section_html`` render one section or a list of sections, so they
@@ -28,11 +37,11 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from ..types import PRED_PREFIX, normalize_frame
+from ..types import COLUMN_ALIASES, PRED_ALIASES, PRED_PREFIX, normalize_frame
 
 __all__ = [
     "variance_ratio", "completion_row", "completion_from_frame", "published_findings", "stylized_facts_score",
-    "coefficient_recovery", "section_markdown", "section_html",
+    "coefficient_recovery", "say_do", "section_markdown", "section_html",
 ]
 
 HOMOGENISATION_BELOW = 0.8      # same thresholds as the spread block of `evaluate` (analiz.yayilim)
@@ -532,6 +541,154 @@ def coefficient_recovery(sim_df: pd.DataFrame, human_df: pd.DataFrame, formula_c
     return _section("coefficient_recovery", f"Coefficient recovery: {y}",
                     ["coefficient", "sim", "human", "diff", "p", "differs", "same sign"], rows, notes,
                     coefficients=coefs, summary=summary, formula={"y": y, "x": xs}, alpha=alpha)
+
+
+# ------------------------------------------------------------------ say-do anchors
+SAY, DO, UNDECIDED = "closer to what people say", "closer to what people do", "undecided"
+
+
+def _col(d: pd.DataFrame, name: str, what: str) -> str:
+    """Column name after normalize_frame (Turkish aliases are renamed there)."""
+    for c in (name, COLUMN_ALIASES.get(name, name)):
+        if c in d.columns:
+            return c
+    raise KeyError(f"no {what} column {name!r}")
+
+
+def _resolve_pred_alias(d: pd.DataFrame, method: str) -> str:
+    m = str(method)
+    for p in PRED_ALIASES:                       # "tahmin_x" was renamed to "pred_x" by normalize_frame
+        if m.startswith(p):
+            m = PRED_PREFIX + m[len(p):]
+    return _resolve_pred(d, m)
+
+
+def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] | None = None, *,
+           cluster: str | None = "person", on: str = "level", B: int = 1000, seed: int = 0,
+           alpha: float = 0.05) -> dict:
+    """Is a prediction closer to what people *say* (stated) or to what they *do* (observed)?
+
+    ``frame`` has one row per person (or per person × item) with a numeric ``say_col`` anchor (stated answer,
+    intention), a numeric ``do_col`` anchor (observed behaviour) and one or more prediction columns. ``preds`` are
+    method names or columns (``"llm"`` → ``pred_llm``); None takes every ``pred_*`` column. For each prediction:
+
+    - **level**: distance of the panel mean to each anchor mean, ``|mean(pred) − mean(say)|`` and
+      ``|mean(pred) − mean(do)|``, and their difference ``say − do`` (negative = closer to say);
+    - **MAE**: person-level mean absolute error to each anchor and the same ``say − do`` difference.
+
+    Both differences get a percentile CI from a cluster bootstrap over ``cluster`` (persons; rows of a person
+    move together). The same resamples are used for every prediction and for the anchor gap, so they are paired.
+    The verdict reads the CI of the ``on`` difference (``"level"``, default, or ``"mae"``): wholly below 0 →
+    closer to what people say, wholly above 0 → closer to what people do, otherwise undecided. Rows missing the
+    prediction or either anchor are dropped for that prediction and counted. Without a ``cluster`` column every
+    row is its own cluster (noted). If the anchors themselves are not apart (the gap CI covers 0) the verdict is
+    forced to undecided: there is nothing to be closer to.
+    """
+    if B < 1:
+        raise ValueError("B must be >= 1")
+    if on not in ("level", "mae"):
+        raise ValueError("on must be 'level' or 'mae'")
+    d = normalize_frame(frame)
+    sc, dc = _col(d, say_col, "say"), _col(d, do_col, "do")
+    if preds is None:
+        cols = [c for c in d.columns if isinstance(c, str) and c.startswith(PRED_PREFIX) and c not in (sc, dc)]
+        if not cols:
+            raise KeyError(f"no {PRED_PREFIX}* columns; pass preds=[...]")
+    else:
+        cols = [_resolve_pred_alias(d, p) for p in ([preds] if isinstance(preds, str) else preds)]
+    notes = []
+    if cluster is not None and cluster in d.columns:
+        if d[cluster].isna().any():
+            raise ValueError(f"cluster column {cluster!r} has missing values; fill or drop them first")
+        codes, uniq = pd.factorize(d[cluster], sort=False)
+        unit = f"{cluster} cluster"
+    else:
+        codes, uniq = np.arange(len(d)), np.arange(len(d))
+        unit = "row"
+        if cluster is not None:
+            notes.append(f"No {cluster!r} column: every row is its own cluster (rows of one person are not tied).")
+    G = len(uniq)
+    say, do = _numeric(d[sc], sc), _numeric(d[dc], dc)
+    rng = np.random.default_rng(seed)
+    W = rng.multinomial(G, np.full(G, 1.0 / G), size=B).astype(float) if G else np.zeros((B, 0))
+
+    def csum(x: np.ndarray, m: np.ndarray) -> np.ndarray:
+        return np.bincount(codes[m], weights=x[m], minlength=G)
+
+    def wmean(x: np.ndarray, m: np.ndarray) -> tuple[float, np.ndarray]:
+        s, n = csum(x, m), np.bincount(codes[m], minlength=G).astype(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return float(s.sum() / n.sum()) if n.sum() else math.nan, (W @ s) / (W @ n)
+
+    pct = int(round((1 - alpha) * 100))
+    # anchor gap on rows with both anchors
+    ma = ~(np.isnan(say) | np.isnan(do))
+    gap_pt, gap_b = wmean(do - say, ma)
+    g_lo, g_hi = _percentile_ci(gap_b, alpha) if G >= 2 else (None, None)
+    anchors = {"mean_say": _num(np.nanmean(say[ma])) if ma.any() else None,
+               "mean_do": _num(np.nanmean(do[ma])) if ma.any() else None,
+               "gap": _num(gap_pt), "lo": g_lo, "hi": g_hi, "n": int(ma.sum()),
+               "apart": g_lo is not None and (g_lo > 0 or g_hi < 0)}
+
+    out: list[dict] = []
+    for c in cols:
+        p = _numeric(d[c], c)
+        m = ma & ~np.isnan(p)
+        r = {"prediction": c, "n": int(m.sum()), "n_missing": int(len(d) - m.sum()),
+             "clusters": int(np.unique(codes[m]).size), "mean": None, "mean_say": None, "mean_do": None,
+             "dist_say": None, "dist_do": None, "diff": None, "lo": None, "hi": None,
+             "mae_say": None, "mae_do": None, "mae_diff": None, "mae_lo": None, "mae_hi": None,
+             "verdict": UNDECIDED, "reason": None, "card_line": None}
+        if not m.any():
+            r["reason"] = "no rows with prediction and both anchors"
+            out.append(r)
+            continue
+        mp, bp = wmean(p, m)
+        ms, bs = wmean(say, m)
+        md, bd = wmean(do, m)
+        es, bes = wmean(np.abs(p - say), m)
+        ed, bed = wmean(np.abs(p - do), m)
+        r.update(mean=mp, mean_say=ms, mean_do=md, dist_say=abs(mp - ms), dist_do=abs(mp - md),
+                 mae_say=es, mae_do=ed, mae_diff=es - ed)
+        r["diff"] = r["dist_say"] - r["dist_do"]
+        if r["clusters"] >= 2:
+            r["lo"], r["hi"] = _percentile_ci(np.abs(bp - bs) - np.abs(bp - bd), alpha)
+            r["mae_lo"], r["mae_hi"] = _percentile_ci(bes - bed, alpha)
+        lo, hi = (r["lo"], r["hi"]) if on == "level" else (r["mae_lo"], r["mae_hi"])
+        if lo is None:
+            r["reason"] = "fewer than 2 clusters: no CI"
+        elif not anchors["apart"]:
+            r["reason"] = "anchors not apart (do − say gap CI covers 0)"
+        elif hi < 0:
+            r["verdict"] = SAY
+        elif lo > 0:
+            r["verdict"] = DO
+        else:
+            r["reason"] = f"{pct} % CI of the {on} difference covers 0"
+        key = (r["diff"], lo, hi) if on == "level" else (r["mae_diff"], lo, hi)
+        r["card_line"] = (f"{c[len(PRED_PREFIX):] if c.startswith(PRED_PREFIX) else c}: {r['verdict']} "
+                          f"({on} say − do = {_fmt(key[0])} [{_fmt(key[1])}, {_fmt(key[2])}])")
+        out.append(r)
+
+    notes = [f"diff = distance to say − distance to do (negative = closer to say); level uses panel means, "
+             f"MAE uses person-level absolute errors. {pct} % percentile bootstrap over {G} {unit}(s), "
+             f"B = {B}, seed = {seed}; verdict reads the {on} CI.",
+             f"Anchors: mean say {_fmt(anchors['mean_say'])}, mean do {_fmt(anchors['mean_do'])}, "
+             f"do − say {_fmt(anchors['gap'])} [{_fmt(g_lo)}, {_fmt(g_hi)}]"
+             + ("" if anchors["apart"] else " — not apart: every verdict is undecided.")] + notes
+    miss = [f"{r['prediction']} {r['n_missing']}" for r in out if r["n_missing"]]
+    if miss:
+        notes.append("Rows dropped (missing prediction or anchor, not imputed): " + ", ".join(miss) + ".")
+    rows = [["anchors (do − say)", anchors["n"], None, anchors["mean_say"], anchors["mean_do"], None, None,
+             anchors["gap"], g_lo, g_hi, None, None, None, None, None, "apart" if anchors["apart"] else "not apart"]]
+    rows += [[r["prediction"], r["n"], r["mean"], r["mean_say"], r["mean_do"], r["dist_say"], r["dist_do"],
+              r["diff"], r["lo"], r["hi"], r["mae_say"], r["mae_do"], r["mae_diff"], r["mae_lo"], r["mae_hi"],
+              r["verdict"]] for r in out]
+    return _section("say_do", "Say or do: which anchor the prediction is closer to",
+                    ["prediction", "n", "mean", "mean say", "mean do", "|mean − say|", "|mean − do|", "diff", "lo",
+                     "hi", "MAE say", "MAE do", "MAE diff", "MAE lo", "MAE hi", "verdict"], rows, notes,
+                    predictions=out, anchors=anchors, say_col=sc, do_col=dc, cluster=cluster if unit != "row" else None,
+                    n_clusters=G, on=on, B=B, seed=seed, alpha=alpha)
 
 
 # ------------------------------------------------------------------ rendering
