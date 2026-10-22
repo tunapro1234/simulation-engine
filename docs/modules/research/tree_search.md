@@ -17,7 +17,9 @@ Two searches for automated modelling. Both use the same runner contract and the 
 
 Each evaluated payload is a `Node`. `finalize()` runs the winner and a reference once on the test split. A paired
 bootstrap gives the difference with its CI. The result also reports `winner_test_minus_dev`, because the winner's dev
-score is a maximum over many noisy scores and so reads too good.
+score is a maximum over many noisy scores and so reads too good. It also reports `reference_test_minus_dev` (the
+same gap for the reference, i.e. the dev -> test shift: other rows, a refit, a later period) and
+`excess_test_minus_dev` = winner gap − reference gap, the part of the gap that selection on dev adds on top of the shift.
 
 ## API
 
@@ -36,6 +38,8 @@ ts = TreeSearch(runner, ConfigOperators(space), primary="brier", higher_is_bette
                 num_drafts=5, debug_prob=0.5, max_debug_depth=3, workdir="runs/tree", seed=0)
 out = ts.run()              # {"best_node", "best_payload", "best_dev", "counts", "runner_calls", "history", ...}
 fin = ts.finalize()["final"]   # test once: winner vs reference (first good node)
+# fin: winner_dev, reference_dev, test{winner, reference, ...}, test_diff{winner-reference: {ci95, bonferroni}},
+#      winner_test_minus_dev, reference_test_minus_dev, excess_test_minus_dev
 
 m = MCTSSearch(runner, space, primary="brier", higher_is_better=False, budget=40, c=2 ** 0.5, n_grid=5)
 m.run(); m.finalize()       # reference = the space defaults
@@ -111,7 +115,8 @@ The test split can be reached only from `finalize()`; `evaluate(..., "test")` ra
 Every number below comes from a run made for this module on 22 Oct 2026. The machine was shared and under load, so
 wall times are only rough.
 
-**Tests:** `python -m unittest tests.test_research_tree_search`: 18 tests, OK in about 1.2 s.
+**Tests:** `python -m unittest tests.test_research_tree_search`: 21 tests, OK in about 1-4 s (18 at first, 3 added
+in review on 22 Oct).
 
 **Toy objective, 10 seeds, 20 dev evaluations each.** This uses the objective from the tests, discretised to x in
 {0, .2, …, 1}, k in {1, 4, 8, 12, 16, 24} and method in {a, b, c}, where c crashes; lower is better. The best
@@ -125,7 +130,11 @@ reachable true effect is 0.020; the defaults have 0.906. The table gives the tru
 | `Loop` + random proposer (one change, kept only if the paired CI excludes 0) | 0.020 | 0.020 | 0.020 | 0.020 |
 
 On this smooth objective with shared per-unit noise, local one-change search (AIDE-improve, Loop) beats MCTS and
-random search at this budget. MCTS with a budget of 20 cannot get past the first level of a 6×6×3 tree.
+random search at this budget. With a budget of 20, MCTS expands all 6 first-level nodes (x) and 14-16 of the 36
+second-level nodes (x, k) in seeds 0-2; the third key (`method`, which carries the largest single effect) is never
+expanded and is set only by random rollouts. Key order therefore matters for MCTS at small budgets.
+
+Review re-run (22 Oct, same script, same machine): the four rows above reproduced exactly.
 
 **Bank Marketing (bench task `bank`, CC BY 4.0, row-position split, `duration` dropped).**
 
@@ -150,15 +159,24 @@ SIMENGINE_DATA=<data-root> OMP_NUM_THREADS=1 nice -n 19 python examples/tree_sea
 | Loop + random proposer | 0.1016 / 0.2580 | 0.1016 / 0.2580 | 0.1016 / 0.2580 | +0.0150 |
 
 Paired 95% CIs of winner − default on test exclude 0 in every run: 11 runs worse than the defaults, and one better
-(MCTS seed 2, −0.0042 [−0.0054, −0.0031]). The three Loop seeds took different paths to the same winner.
+(MCTS seed 2, −0.0042 [−0.0054, −0.0031]). The three Loop seeds took different paths to the same winner, so the 12
+runs have 10 distinct winners, 9 of them worse than the defaults on test.
 
 The task's own baselines on the same test rows, from `BankMarketing.baselines`: constant 0.2810, persistence 0.2615,
 logistic 0.1906, LightGBM grid 0.2708.
 
 **Reading.** Every search lowers dev Brier by about 0.004 to 0.009. On test, almost every winner is worse than the
-defaults, and all GBDT configs are worse than plain logistic regression. This split has a strong base-rate shift (the
-bank task documents about 4.8% yes in train and about 30.8% in test). Tuning on dev fits the dev period, so a lower
-dev score does not carry over. The search modules do what they claim; the result is a reminder that the
+defaults, and all 11 GBDT configs that were run on test (the defaults and the 10 distinct winners, best 0.2387) are
+worse than plain logistic regression (0.1906). The other 2,549 configs were never run on test. This split has a
+strong base-rate shift (the loaded task gives 4.81% yes in train, 11.07% in dev and 30.83% in test). Tuning on dev
+fits the dev period, so a lower dev score does not carry over. 9 of the 10 distinct winners use the smallest
+`max_iter` (50), and all 10 use `min_samples_leaf` 320 or `l2_regularization` 10, i.e. strong shrinkage; that this
+shrinkage is what hurts on the shifted test period is our reading, not tested.
+
+Gap decomposition (computed from the same runs): the defaults go from dev 0.1085 to test 0.2430, a gap of +0.1344
+that is pure dev -> test shift. The winners' gaps are larger; the excess over the defaults' gap (mean, min-max over 3
+seeds) is AIDE +0.0213 (0.0179-0.0232), random +0.0164 (0.0144-0.0183), MCTS +0.0109 (0.0008-0.0180), Loop +0.0220.
+`finalize()` now reports this excess as `excess_test_minus_dev`. The search modules do what they claim; the result is a reminder that the
 dev-to-test gap (`winner_test_minus_dev`) and a test-once comparison against a simple baseline are what decide.
 
 ## Limitations
@@ -169,7 +187,9 @@ dev-to-test gap (`winner_test_minus_dev`) and a test-once comparison against a s
 - `ConfigOperators` improve is a random local step with no learned model behind it. `LLMOperators` is tested only
   with FakeLLM; this module made no real LLM calls.
 - `MCTSSearch` searches every used key of the defaults. It ignores conditional keys (`space.used(cfg)` per config),
-  and ranges become `n_grid` grid points. The test-split reference (the space defaults) costs one extra dev runner
+  and ranges become `n_grid` grid points. Keys are expanded in order, so at small budgets the last keys are set only
+by random rollouts. A resume with other keys, another `n_grid` or other grid values is refused, because tree paths
+are indices into the grid. The test-split reference (the space defaults) costs one extra dev runner
   call if the search never visited it. Wall-clock budgets are not supported, only runner-call budgets.
 - Code payloads are hashed by their exact text, so a whitespace edit counts as a new solution. The test-reference
   regex is off by default in code mode, because it also matches names such as `train_test_split`.
