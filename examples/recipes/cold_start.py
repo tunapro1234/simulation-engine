@@ -86,8 +86,8 @@ if miss := {"item_id", "title", "category", "description", "target"} - set(df.co
     sys.exit(f"--data is missing columns: {sorted(miss)}")
 df["price"] = df.price if "price" in df else np.nan
 if "launch_date" in df:                                              # time split: the newest launches are the test
-    t = pd.to_datetime(df.launch_date).astype("int64")
-    df["split"] = np.where(t > np.quantile(t[df.target.notna()], 0.7), "test", "train")
+    t = pd.to_datetime(df.launch_date)                               # a row without a date stays in train
+    df["split"] = np.where(t > t[df.target.notna()].quantile(0.7), "test", "train")
 else:                                                                # else an item-disjoint hash split
     df["split"] = ["test" if zlib.crc32(str(v).encode()) % 10 < 3 else "train" for v in df.item_id]
 df.loc[df.target.isna(), "split"] = "new"
@@ -108,13 +108,27 @@ else:
 price = lambda p: "" if pd.isna(p) else f"\nPrice: {p:.0f}"
 ask = lambda r, name: (SYSTEM, f"Product: {name}\nCategory: {r.category}{price(r.price)}\nDescription: {r.description}")
 jobs = [ask(r, r.title) for r in df.itertuples()] + [ask(r, "(name hidden)") for r in df.itertuples()]
-try:
-    replies = llm.map(jobs, max_tokens=120)
-except se.llm.BudgetExceeded as e:
-    sys.exit(f"stopped by the budget: {e}")
-num = lambda j: float(j[KEY]) if isinstance(j, dict) and isinstance(j.get(KEY), (int, float)) else np.nan
-v = np.array([num(se.sim.parse_json(r.text)) for r in replies])
-print(f"LLM calls: {len(jobs)} ({len(df)} items x named + blind); unparsed: {int(np.isnan(v).sum())}")
+try:                                                                 # a refused / failed call -> unparsed, not a crash
+    replies = llm.map(jobs, max_tokens=120, **({"return_exceptions": True} if a.live else {}))
+except se.llm.StopError as e:                                        # budget cap, missing / bad key, account limit
+    sys.exit(f"stopped by the budget: {e}" if isinstance(e, se.llm.BudgetExceeded) else f"stopped: {e}")
+texts = ["" if isinstance(r, Exception) else r.text for r in replies]
+
+
+def num(text):
+    """KEY from a reply: the JSON value, else a `"key": 4.2` / `"key": "4.2"` pattern (quoted or cut-off replies)."""
+    j = se.sim.parse_json(text)
+    if isinstance(j, dict) and isinstance(j.get(KEY), (int, float)) and not isinstance(j.get(KEY), bool):
+        return float(j[KEY])
+    m = re.search(r'"%s"\s*:\s*"?(-?\d+(?:\.\d+)?)' % re.escape(KEY), text)
+    return float(m.group(1)) if m else np.nan
+
+
+v = np.array([num(t) for t in texts])
+print(f"LLM calls: {len(jobs)} ({len(df)} items x named + blind); unparsed or failed: {int(np.isnan(v).sum())}")
+if np.isnan(v).mean() > 0.2:                                         # a card on imputed medians would be noise
+    sys.exit(f"{int(np.isnan(v).sum())} of {len(v)} replies have no numeric {KEY!r}; fix SYSTEM / KEY. "
+             f"First one: {next(t for t, x in zip(texts, v) if np.isnan(x))[:200]!r}")
 df["llm"], df["llm_blind"] = np.where(np.isnan(v), np.nanmedian(v), v).reshape(2, -1)   # unparsed -> median prior
 
 # 4. Similar-item baselines from labelled items only (train rows cross-fitted: no item sees its own target):
@@ -124,7 +138,7 @@ vocab = {w: j for j, w in enumerate(sorted({w for t in tok for w in t}))}
 M = np.array([[t.count(w) for w in vocab] for t in tok], float)          # term counts per item
 M *= np.log((1 + len(tr)) / (1 + (M[tr] > 0).sum(0))) + 1                    # idf from train items only
 M /= np.linalg.norm(M, axis=1, keepdims=True) + 1e-12
-fold = np.array([zlib.crc32(str(v).encode()) % 5 for v in df.item_id])
+fold = np.array([zlib.crc32(f"fold{v}".encode()) % 5 for v in df.item_id])   # salted: independent of the hash split
 
 
 def from_pool(rows, pool):
@@ -144,7 +158,8 @@ df.loc[df.index[te], ["knn", "cat_mean"]] = from_pool(te, tr)
 
 
 # 5. Blend: ridge of target on [1, knn, cat_mean, llm] fitted on train. Intercept + slope absorb the LLM's optimism;
-#    a small LLM weight = it adds little beyond similar items. The same fit on llm_blind gives the blind twin.
+#    a small LLM weight = it adds little beyond similar items. The same fit on llm_blind gives the blind twin, and
+#    without the LLM the LLM-free twin: ours - stack_free is what the LLM adds (blending two baselines alone helps).
 def ridge(cols, rows, lam=1.0):
     X = np.column_stack([np.ones(len(df))] + [df[c].to_numpy(float) for c in cols])
     P = lam * np.diag([0.0] + [1.0] * len(cols))                      # do not shrink the intercept
@@ -152,19 +167,25 @@ def ridge(cols, rows, lam=1.0):
     return X @ w, w
 
 
-for name, arm in {"stack": "llm", "stack_blind": "llm_blind"}.items():
-    df[name], w = ridge(["knn", "cat_mean", arm], tr)
-    for k in range(5):                                               # honest train-split predictions (cross-fit)
+def blend(cols):
+    """Ridge on all train rows for test (and later new) rows; train rows get cross-fitted predictions."""
+    p, w = ridge(cols, tr)
+    for k in range(5):
         rows = tr[fold[tr] == k]
-        df.loc[df.index[rows], name] = ridge(["knn", "cat_mean", arm], tr[fold[tr] != k])[0][rows]
-    if name == "stack":
-        print(f"optimism: raw LLM mean {df.llm.iloc[tr].mean():.2f} vs observed {y[tr].mean():.2f}; "
-              f"weights knn {w[1]:.2f}, cat_mean {w[2]:.2f}, llm {w[3]:.2f}")
+        p[rows] = ridge(cols, tr[fold[tr] != k])[0][rows]
+    return p, w
+
+
+df["stack"], w = blend(["knn", "cat_mean", "llm"])
+df["stack_blind"], df["stack_free"] = blend(["knn", "cat_mean", "llm_blind"])[0], blend(["knn", "cat_mean"])[0]
+print(f"optimism: raw LLM mean {df.llm.iloc[tr].mean():.2f} vs observed {y[tr].mean():.2f}; "
+      f"weights knn {w[1]:.2f}, cat_mean {w[2]:.2f}, llm {w[3]:.2f}")
 
 # 6. Seal the test predictions BEFORE the truth is joined (pre-registration; the card shows the seal).
 frame = pd.DataFrame({"truth": df.target, "group": df.item_id, "split": df.split, "time": df.get("launch_date"),
                       "pred_cat_mean": df.cat_mean, "pred_knn": df.knn, "pred_llm": df.llm,
-                      "pred_stack": df["stack"], "pred_stack_blind": df["stack_blind"]})[df.split != "new"]
+                      "pred_stack_free": df.stack_free, "pred_stack": df["stack"],
+                      "pred_stack_blind": df["stack_blind"]})[df.split != "new"]
 registry = out / ".onkayit"
 se.seal(frame[frame.split == "test"].drop(columns="truth"), "cold_start test predictions; ours = stack, raw = llm",
         registry=registry)
@@ -180,9 +201,9 @@ if len(new):
         print(f"{str(df.title.iloc[i])[:15]:15} {p:6.2f} [{p + q[0]:.2f}, {p + q[1]:.2f}]      "
               f"{df.llm.iloc[i]:5.2f}  {df.knn.iloc[i]:5.2f}")
 
-# 8. Evidence card: baseline ladder (cat_mean, knn), shuffle control, blind arm, paired CIs, audits.
+# 8. Evidence card: LLM-free ladder (cat_mean, knn, stack_free), shuffle control, blind arm, paired CIs, audits.
 report = se.evidence.evaluate(frame, title="cold_start new-item ratings", ours="stack", raw="llm", task="continuous",
-                              primary=a.metric, baselines_oof=["cat_mean", "knn"], blind_col="pred_stack_blind",
+                              primary=a.metric, baselines_oof=["cat_mean", "knn", "stack_free"], blind_col="pred_stack_blind",
                               B=a.B, prereg=registry, cutoff=a.cutoff, multiplier=False)
 s = se.evidence.summary(report)
 print("\n" + str(s["headline_en"] or s["headline"]))
