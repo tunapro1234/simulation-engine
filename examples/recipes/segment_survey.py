@@ -170,6 +170,8 @@ for m, r in w1["arms"].items():
     print(f"  {m:16} {r['point']:.3f} [{r['ci_basic'][0]:.3f}, {r['ci_basic'][1]:.3f}]")   # basic CI: small-cell bias
 for d in w1["diffs"]:
     print(f"  {d['a']} - {d['b']}: {d['point']:+.3f} [{d['ci_basic'][0]:+.3f}, {d['ci_basic'][1]:+.3f}]")
+bad = [f"{c['segment']}/{c['item']}" for c in w1["cells"] if c["llm_dist"] > c["train_overall"]]
+print("cells where the raw LLM is worse than the train marginal (show these):", bad or "none")
 
 # 9. Population share per option: PPI++ = train answers + LLM shares for everyone (here the holdout plays the
 #    unlabelled population; on the day use census segment counts). Raw LLM only: llm_prior has seen train labels.
