@@ -1,5 +1,5 @@
 """Otomatik denetimler: sızıntı, persona karıştırma, madde ortalaması, tavan aşımı, çöküş,
-sınıf dengesizliği, kontaminasyon (kesim tarihi), pozisyon takası, seçim yanlılığı.
+sınıf dengesizliği, kontaminasyon (kesim tarihi), pozisyon takası, seçim yanlılığı, taban belirsizliği.
 
 Her denetim: {"kontrol", "durum": tamam|uyari|hata|atlandi, "ayrinti", "deger"}.
 """
@@ -211,3 +211,73 @@ def ezber(yol: str | None):
         return _k("ezber testi (LLM veriyi biliyor mu)", "atlandi", f"okunamadı: {e}")
     durum = r.get("durum") if r.get("durum") in ("tamam", "uyari", "hata") else "atlandi"
     return _k("ezber testi (LLM veriyi biliyor mu)", durum, r.get("ayrinti", "sonuç dosyasında 'durum' yok"), r.get("deger"))
+
+
+def taban_belirsizligi(tekrar: dict, tabanlar: list, metrik: str, yon: float, etiket: dict | None = None,
+                       bizim: str | None = None, nokta: dict | None = None, ga_yontemi: str = "percentile"):
+    """En güçlü taban belirsiz mi: tabanlar arası seçim gürültüsü.
+
+    tekrar[c][metrik]: her sütunun ortak (eşli) bootstrap tekrarları; en iyi taban (nokta tahminiyle) ile öbür her
+    taban arasındaki eşli farkın GA'sı 0'ı içeriyorsa o taban en iyiyle eşittir. İkinci taban ayrışmıyorsa 'uyari':
+    eşit küme, eşitlerin hepsine karşı en kötü durum bizim − taban (tekrar başına eşitlerin en iyisi, eşli GA) ve
+    taban sayısıyla seçim gürültüsü notu. Ayrışıyorsa 'tamam'; 2'den az taban varsa None.
+
+        den.append(taban_belirsizligi(tekrar, ["taban_B1", "taban_B2"], "mae", -1, etiket, bizim="tahmin_x"))
+
+    Farklar metrik yönüne göre (yon × fark; + = ilk taraf iyi). Rozet ve manşet değişmez; yalnız denetim satırı."""
+    etiket = etiket or {}
+    t = [c for c in dict.fromkeys(tabanlar) if c != bizim and metrik in tekrar.get(c, {})]
+
+    def v(c):
+        if nokta and metrik in nokta.get(c, {}):
+            return float(nokta[c][metrik])
+        r = np.asarray(tekrar[c][metrik], float)
+        return float(np.nanmedian(r)) if np.isfinite(r).any() else np.nan
+
+    t = [c for c in t if np.isfinite(v(c))]
+    if len(t) < 2:
+        return None
+    t.sort(key=lambda c: -yon * v(c))
+    en_iyi, ad = t[0], (lambda c: str(etiket.get(c, c)))
+    kontrol = "en güçlü taban belirsiz mi (tabanlar arası seçim gürültüsü)"
+
+    def fark(a, b):
+        f = yon * (np.asarray(tekrar[a][metrik], float) - np.asarray(tekrar[b][metrik], float))
+        nf = yon * (v(a) - v(b))
+        al, us = ga(f, nokta=nf, yontem=ga_yontemi)
+        return nf, al, us
+
+    esit, ikinci = [en_iyi], None
+    for c in t[1:]:
+        nf, al, us = fark(en_iyi, c)
+        ikinci = ikinci or (c, nf, al, us)
+        if np.isfinite(al) and al <= 0:   # GA 0'ı içeriyor: en iyiden ayrışmıyor
+            esit.append(c)
+    c2, nf2, al2, us2 = ikinci
+    ilk_iki = f"{ad(en_iyi)} − {ad(c2)} = {_f(nf2)} [{_f(al2)}, {_f(us2)}]"
+    if len(esit) == 1:
+        return _k(kontrol, "tamam", f"{metrik}: en güçlü taban {ad(en_iyi)} ikinciden ayrışıyor ({ilk_iki}; "
+                                    f"strongest baseline separated from the runner-up) · {len(t)} taban", 1)
+    adlar = ", ".join(ad(c) for c in esit)
+    ayr = (f"{metrik}: en güçlü taban belirsiz: {adlar} GA içinde (strongest baseline uncertain: {adlar} within CI); "
+           f"{ilk_iki}")
+    satir = _k(kontrol, "uyari", ayr, len(esit))
+    satir["esitler"] = [ad(c) for c in esit]
+    if bizim and metrik in tekrar.get(bizim, {}) and np.isfinite(v(bizim)):
+        # tekrar başına eşitlerin en iyisine karşı fark: seçimin kendisi de yeniden örneklenir (en kötü durum)
+        b = np.asarray(tekrar[bizim][metrik], float)
+        F = np.vstack([yon * (b - np.asarray(tekrar[c][metrik], float)) for c in esit])
+        ok = np.isfinite(F).all(axis=0)
+        fr = np.where(ok, np.min(np.where(np.isfinite(F), F, np.inf), axis=0), np.nan)
+        nf = min(yon * (v(bizim) - v(c)) for c in esit)
+        al, us = ga(fr, nokta=nf, yontem=ga_yontemi)
+        tek = {c: fark(bizim, c) for c in esit}
+        zayif = min(esit, key=lambda c: tek[c][1] if np.isfinite(tek[c][1]) else np.inf)
+        satir["en_kotu"] = {"fark": nf, "alt": al, "ust": us, "en_dusuk_alt": ad(zayif)}
+        satir["ayrinti"] += (f" · bizim − eşitlerin en kötüsü {_f(nf)} [{_f(al)}, {_f(us)}] (worst case ours − tied "
+                             f"baselines, paired); tek tek en düşük alt sınır: {ad(zayif)} {_f(tek[zayif][0])} "
+                             f"[{_f(tek[zayif][1])}, {_f(tek[zayif][2])}]")
+    satir["ayrinti"] += (f" · {len(t)} taban arasından nokta tahminiyle en iyisini seçmek seçim gürültüsü taşır: rozet ve "
+                         f"'en güçlü taban' satırını eşitlerin hepsine karşı oku (best of {len(t)} baselines picked by "
+                         "point estimate; read the badge against every tied baseline)")
+    return satir
