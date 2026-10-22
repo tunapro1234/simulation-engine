@@ -1,6 +1,6 @@
 # Recipe: price sensitivity and willingness to pay (choice-based conjoint)
 
-Script: [`examples/recipes/pricing.py`](../../examples/recipes/pricing.py) (under 200 lines, numbered steps 0-8).
+Script: [`examples/recipes/pricing.py`](../../examples/recipes/pricing.py) (about 225 lines, numbered steps 0-8).
 Test: `tests/test_recipe_pricing.py`.
 
 ```bash
@@ -13,6 +13,15 @@ python3 examples/recipes/pricing.py --live --key-file <path> --max-usd 1     # o
 Outputs go to `--out` (default `runs/pricing`, git-ignored): `card.md`, `dashboard.html`, `price_curve.csv`, the
 seal registry `.onkayit/` and, with `--live`, the reply cache and cost ledger under `.cache/`. `--B` sets the
 bootstrap replicates (200 by default, 1000 for the final card).
+
+Needs numpy, pandas and scipy (`pip install -e .` from the repo root) and, for `--live`, the `anthropic` package
+(`pip install -e .[llm]`). A plain system `python3` without them fails at the first import.
+
+Adapting it to a new brief (about 10 minutes): edit step 0 only. `PRODUCT`, `CUR` and `PER` (what one price buys,
+e.g. "per month"); one `ATTRS` entry per attribute column, turning a value into the words the LLM reads; `MARKET`
+with the same columns (your product A, the main competitor B, none); leave `SYSTEM` alone. Run once offline with
+`--data` to check the plumbing (with attributes other than the demo's, the fake LLM reacts to price only, so its
+numbers mean nothing), then `--live --max-usd 1`.
 
 ## When to use
 
@@ -41,7 +50,7 @@ bootstrap replicates (200 by default, 1000 for the final card).
 | `segment` | str | respondent segment, e.g. `student` |
 | `persona` | str | segment description fed to the LLM (first value per segment is used). **No choice information** |
 | `task` | str | choice-set id, unique per person (`p001_t03`); two people answering "task 3" need two ids |
-| `design` | str, optional | id of the options shown: the same id means the same profiles. The LLM is asked once per segment x design. Missing: design = task, one call per segment x task (set `--max-usd`) |
+| `design` | str, optional | id of the options shown: the same id means the same profiles. The LLM is asked once per segment x design. Missing: design = task, one call per segment x task plus one no-persona call per task (set `--max-usd`) |
 | `alternative` | str | `A`, `B`, ... and exactly one `none` row per task (the no-buy option: price 0, attributes 0) |
 | `price` | num | price of the option, in `CUR` |
 | `<ATTRS>` | num | one column per key of `ATTRS` in step 0 (0/1 or numeric, e.g. `meals`, `organic`, `free_cancel`) |
@@ -61,15 +70,15 @@ hackathon research folder).
 
 | step | in the script | change on the day | backed by |
 |---|---|---|---|
-| 0 | `PRODUCT`, `CUR`, `ATTRS` (column -> how the LLM reads it), `SEGMENTS`, `MARKET`, `SYSTEM` | the brief's product and currency, one entry per attribute column, segment texts from the client's research, the reference market (your product A, the main competitor B, none); keep the JSON reply format | Meister et al. (arXiv:2411.05403): segment-level distributions beat per-person persona steering; keep persona texts short (rich biographies did worse in SubPOP and Funhouse Mirrors) |
+| 0 | `PRODUCT`, `CUR`, `PER`, `ATTRS` (column -> how the LLM reads it), `SEGMENTS`, `MARKET`, `SYSTEM` | the brief's product, currency and price unit, one entry per attribute column, the reference market (your product A, the main competitor B, none); keep the JSON reply format. `SEGMENTS` only feeds the synthetic demo: with `--data` the persona texts come from the CSV's `persona` column (write them from the client's research) | Meister et al. (arXiv:2411.05403): segment-level distributions beat per-person persona steering; keep persona texts short (rich biographies did worse in SubPOP and Funhouse Mirrors) |
 | 1 | load, column check, person-disjoint split | the split the brief fixes, if any; never split one respondent across train and test | the leakage guard behind every result in `docs/RESULTS.md`; the card's group-overlap audit checks it |
 | 2 | backend; `--live` refuses to start without `--max-usd` | `--model` only if the brief demands it | Sonnet − Haiku +1.0 point, not significant (talp73); Park et al. (arXiv:2411.10109): model generation ~1 point. Not worth the budget |
 | 3 | one prompt per (segment, design) asking for the probability of each option, plus one no-persona prompt per design | nothing; 4 x 16 + 16 = 80 calls, cents on Haiku | **#4** ask per segment for a verbalised JSON distribution (Meister: TV 0.226; `sim.segment_distribution` closed 0.82 of the gap in G1). The no-persona arm is the control that shows whether the persona text matters |
-| 4 | CBC logit on train respondents with segment shifts of the buy constant and the price slope (`mnl`, the baseline to beat) and `stack` = the same logit + log LLM share as one more attribute | add segment x attribute terms when the brief says segments value features differently | **#1** the strongest data baseline, declared on the card (`baselines_oof=["mnl"]`); measured: MNL 0.509 vs equal share 0.210 on the camera conjoint, LLM arms did not beat MNL/HB there. **#3** LLM as a feature of the data model (honest gain small: +0.006 on Twin-2K-500); its fitted weight also acts as **#2** calibration of the LLM's "yes" lean (Schoenegger et al., arXiv:2402.19379) |
-| 5 | pooled part-worths -> WTP = −β_attr / β_price per attribute, 95 % person-bootstrap CIs, for the human train respondents and for a silicon sample of 120 respondents drawn from the LLM's segment shares (same segment mix) | pass `train[train.segment == "..."]` to `fit` / `boot` for one segment's WTP; `--B 1000` for the slide | **#6** LLM effect sizes are inflated and need shrinking (Manning et al., arXiv:2404.11794: 13.2x; Hewitt et al.: r = .85 on survey experiments, .34 on megastudies). Wang, Zhang & Zhang (arXiv:2412.19363): combining LLM and human conjoint answers saves 24.9-79.8 % of the data, naive substitution saves nothing. So the human column is the number; the silicon column is a check |
-| 6 | share of A in `MARKET` as A's price moves over 80-125 % of its reference price, human CI band from the same bootstrap draws, LLM share, revenue (price x share), arc elasticity; `price_curve.csv` | the sweep range must stay inside the prices respondents saw; replace revenue with margin (`(price − unit_cost) x share`) when the brief gives costs | standard logit share simulation (`methods.conjoint.simulate_shares` / `elasticity` do the same with analytic own/cross elasticities); pooled logit carries the IIA pattern, so for person-level tastes use `conjoint_hb.HBMNL` (same person, new task: HB 0.715 vs MNL 0.482 on the camera conjoint) |
+| 4 | CBC logit on train respondents with segment shifts of the buy constant and the price slope (`mnl`, the baseline to beat) and `stack` = the same logit + log LLM share as one more attribute | add segment x attribute terms when the brief says segments value features differently | **#1** the strongest data baseline, declared on the card (`baselines_oof=["mnl"]`); measured: MNL 0.509 vs equal share 0.210 on the camera conjoint (no LLM arm was run there); on CPC18 risky choice an LLM answer as a GBDT feature made MSE×100 worse, 0.585 -> 0.627. **#3** LLM as a feature of the data model (honest gain small: +0.006 on Twin-2K-500); its fitted weight also acts as **#2** calibration of the LLM's "yes" lean (Schoenegger et al., arXiv:2402.19379) |
+| 5 | pooled part-worths -> WTP = −β_attr / β_price per attribute, 95 % person-bootstrap CIs, for the human train respondents and for a silicon sample of 120 respondents drawn from the LLM's segment shares (same segment mix, same number of tasks per respondent as the median human, so the two CIs are comparable; the silicon CI is draw noise at n = 120, not uncertainty about the LLM). A WARNING is printed when a price part-worth CI reaches 0 | pass `train[train.segment == "..."]` to `fit` / `boot` for one segment's WTP; `--B 1000` for the slide | **#6** LLM effect sizes are inflated and need shrinking (Manning et al., arXiv:2404.11794: 13.2x; Hewitt et al.: r = .85 on survey experiments, .34 on megastudies). Wang, Zhang & Zhang (arXiv:2412.19363): combining LLM and human conjoint answers saves 24.9-79.8 % of the data, naive substitution saves nothing. So the human column is the number; the silicon column is a check |
+| 6 | share of A in `MARKET` as A's price moves over the tested price range (lowest to highest price shown, 11 points), human CI band from the same bootstrap draws, LLM share, revenue (price x share), arc elasticity; `price_curve.csv`; the revenue-max price with the 95 % range of the per-draw maximum, flagged when that range reaches the edge of the sweep | nothing for the range (it never extrapolates); replace revenue with margin (`(price − unit_cost) x share`) when the brief gives costs | standard logit share simulation (`methods.conjoint.simulate_shares` / `elasticity` do the same with analytic own/cross elasticities); pooled logit carries the IIA pattern, so for person-level tastes use `conjoint_hb.HBMNL` (same person, new task: HB 0.715 vs MNL 0.482 on the camera conjoint) |
 | 7 | `se.seal` of the test predictions ({alternative: probability} per task) with "ours = stack" in the description | nothing; seal before looking at the test choices | pre-registration; the card's selection-bias audit finds `ours` in the seal |
-| 8 | `se.evidence.evaluate(task="multiclass", primary="log_loss")` -> ladder (uniform, design shares, design x segment shares, CBC logit), no-persona arm, prediction shuffle, paired CIs, audits, `card.md`, `dashboard.html` | `--B 1000`; `memorization=` once the audit has run | **#1** the card is the deliverable; **#7** memorisation probe (Hewitt) |
+| 8 | `se.evidence.evaluate(task="multiclass", primary="log_loss")` -> ladder (uniform, design shares, design x segment shares, CBC logit), no-persona arm, prediction shuffle, paired CIs, audits, the registered comparison llm − llm_nopersona (named in the seal, so the card marks it pre-registered, not post hoc), `card.md`, `dashboard.html` | `--B 1000`; `memorization=` once the audit has run | **#1** the card is the deliverable; **#7** memorisation probe (Hewitt) |
 
 Skipped on purpose (the literature ranking's "do not spend time on"): reflection / memory streams, rich biography
 personas, fine-tuning, many samples per persona, embedding-similarity scoring (SSR −2.4), a bigger model. #5 (type
@@ -83,24 +92,29 @@ Offline run, default settings (FakeLLM, synthetic CBC, 125 test respondents x 8 
 
    | attribute | human [95 % CI] | LLM silicon [95 % CI] | LLM / human |
    |---|---|---|---|
-   | +1 weekly meal | 10.8 [5.0, 17.1] | 49.5 [32.5, 71.2] | 4.6x |
-   | organic | 38.8 [24.0, 53.1] | 87.0 [53.4, 137.6] | 2.2x |
-   | cancel any time | 41.3 [29.5, 55.3] | 121.3 [84.2, 164.1] | 2.9x |
+   | +1 weekly meal | 10.8 [5.0, 17.1] | 57.5 [39.7, 85.1] | 5.3x |
+   | organic | 38.8 [24.0, 53.1] | 107.5 [62.1, 154.8] | 2.8x |
+   | cancel any time | 41.3 [29.5, 55.3] | 104.4 [68.3, 158.9] | 2.5x |
 
-   The human CIs cover the synthetic truth (16 / 33 / 45 TL). The LLM ranks the features the same way but its WTP
-   is two to five times too high, and none of its intervals overlap the human ones. Say it on the slide: "the
+   The human CIs cover the synthetic truth (16 / 33 / 45 TL). The LLM puts the extra meal last, as humans do, but
+   cannot separate organic from cancel any time (its two CIs overlap almost fully; the fake LLM values them
+   equally). Its WTP is two to five times too high, and none of its intervals overlap the human ones. Say it on the slide: "the
    panel knows what people like, not how much they will pay".
-2. **The price curve** for A against a competitor at 349 TL: share falls from 0.66 [0.62, 0.72] at 239 TL to 0.30
-   [0.26, 0.34] at 374 TL; elasticity goes from −1.0 to −2.8; revenue is flat between 239 and 269 TL and peaks at
-   254 TL. The LLM curve is much flatter (0.64 -> 0.45): pricing on it would overprice.
+2. **The price curve** for A against a competitor at 349 TL, over the tested 229-379 TL: share falls from 0.69
+   [0.64, 0.75] at 229 TL to 0.29 [0.24, 0.33] at 379 TL; elasticity goes from −0.9 to −2.9; revenue is flat
+   between 229 and 274 TL (157-159 per respondent) and peaks at 244 TL, but 95 % of the bootstrap maxima lie in
+   229-259 TL and that range reaches the cheapest tested price, so the script flags it. The honest slide line is
+   "not above about 260 TL; the optimum may be lower than we tested". The LLM curve is much flatter (0.74 -> 0.49)
+   and higher everywhere: pricing on it would overprice.
 3. **The baseline ladder** (log loss per task on test respondents, lower is better, person-bootstrap 95 % CI):
    uniform 1.099, shuffled stack 1.064, no-persona LLM 1.062, LLM 1.022 [0.973, 1.086], design shares 0.979,
    design x segment shares 0.897, CBC logit 0.878 [0.845, 0.911], stack 0.877 [0.845, 0.911]. Stack − logit
    +0.000 [−0.000, +0.001]: badge "inconclusive". The LLM adds nothing on top of a segmented logit fitted to the
    human answers. That is the expected result (camera conjoint: LLM arms did not beat MNL/HB), and it is the
    honest headline.
-4. **The controls**: the no-persona LLM is barely better than uniform (1.062); the persona LLM improves on it by
-   0.040 [−0.013, +0.090], not significant at 125 respondents, so do not claim the persona text works. The
+4. **The controls**: the no-persona LLM is barely better than uniform (1.062); the registered comparison
+   llm − llm_nopersona is −0.040 [−0.090, +0.013] (persona better, CI includes 0) at 125 respondents, so do not
+   claim the persona text works. The
    shuffled stack (predictions moved across tasks) falls back to the no-persona level (1.064), so the stack's
    score comes from matching each task, not from overall shares.
 5. **The seal and the spend**: the hash and time of the sealed test predictions and, with `--live`, the ledger
@@ -122,14 +136,20 @@ Offline run, default settings (FakeLLM, synthetic CBC, 125 test respondents x 8 
   then the card flags "not proven: leakage/memorization". Prefer products and prices after the model's cutoff
   (Hewitt et al. report post-cutoff studies separately).
 - **WTP is a ratio.** When β_price is near zero (a price range too narrow, or a segment that ignores price) WTP
-  explodes and its bootstrap interval becomes huge or changes sign. Check that the price part-worth's CI is well
-  away from zero before quoting WTP; use the person bootstrap (asymmetric percentile CI), not ± 2 SE.
-- **Extrapolation.** The curve is only valid inside the prices respondents saw (229-379 TL in the demo). The script
-  flags a revenue maximum at the edge of the sweep; test wider prices instead of extending the curve.
+  explodes and its bootstrap interval becomes huge or changes sign. The script prints a WARNING when the price
+  part-worth's CI reaches zero (a stub LLM that always answers the same shares triggers it for the silicon arm); use the person bootstrap (asymmetric percentile CI), not ± 2 SE.
+- **Extrapolation.** The curve is only valid inside the prices respondents saw (229-379 TL in the demo), so the
+  sweep is exactly that range. When the bootstrap range of the revenue maximum reaches either end, the script
+  flags it: test wider prices in a new survey instead of extending the curve.
 - **Pooled tastes.** The pooled logit gives one WTP for an average respondent and IIA shares. If the segment WTPs
   differ (rerun step 5 per segment), present them per segment, or use `conjoint_hb.HBMNL`.
-- **Unparsed replies.** A reply without numeric option keys becomes 1e-3 per option and then uniform after
-  renormalising. Many of those flatten the LLM columns; fix `SYSTEM` or `max_tokens` if the LLM curve looks flat.
-- **Budget.** `--live` refuses to start without `--max-usd`. Once the ledger total reaches the cap the backend raises
-  `BudgetExceeded` before any new call; finished replies stay in the cache, so the same command with a higher cap
-  resumes. The key comes from `$ANTHROPIC_API_KEY` or `--key-file` and is never printed.
+- **Unparsed or failed replies.** A refusal, an error after retries or a reply without numeric option keys becomes
+  uniform for that task, and the script prints `WARNING: n/80 replies failed or had no numeric option keys`. Many
+  of those flatten the LLM columns; fix `SYSTEM` or `max_tokens` if the count is not 0.
+- **Budget.** `--live` refuses to start without `--max-usd`. The cap applies to the ledger `<out>/.cache/ledger.jsonl`,
+  which is cumulative over every run into that `--out`. The backend checks it before each call and raises
+  `BudgetExceeded`; calls already in flight (4 in parallel) still finish, so the total can overshoot by a few
+  calls (a stub-client test with a cap worth about 14 calls stopped after 17). A bad key or an account spend limit
+  also stops the run with a one-line message. Finished replies stay in the cache, so the same command with a
+  higher cap resumes (refusals are not cached and are asked again). The key comes from `--key-file`, else
+  `$ANTHROPIC_API_KEY`, else the file named by `$SIMENGINE_KEY_FILE`, and is never printed.
