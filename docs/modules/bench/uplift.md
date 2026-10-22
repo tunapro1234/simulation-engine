@@ -134,12 +134,62 @@ Cells are `value [95% CI]`.
 | t_gbdt | 0.006 [-0.001, 0.012] | 0.008 [-0.003, 0.018] | 0.050 [0.032, 0.067] |
 | random | 0.000 [-0.006, 0.007] | 0.001 [-0.009, 0.010] | 0.034 [0.016, 0.051] |
 
-<!-- CRITEO -->
+### criteo_uplift, outcome="visit", all rows (n_test 2,795,918; treated share 0.850; test ATE +0.0103)
+
+`bench.get("criteo_uplift")`, B = 200 (not 1000: scoring the 2.8M-row test set with B = 1000 would take about
+an hour). Wall time 16 min (fit 285 s, score 666 s), peak RSS 7.3 GB, `nice -n 19`.
+
+| method | qini | auuc | uplift@30 |
+|---|---|---|---|
+| s_gbdt | 0.088 [0.082, 0.094] | 0.034 [0.032, 0.037] | 0.029 [0.027, 0.031] |
+| t_gbdt | 0.087 [0.081, 0.094] | 0.034 [0.032, 0.037] | 0.029 [0.028, 0.031] |
+| t_logistic | 0.085 [0.079, 0.092] | 0.033 [0.031, 0.036] | 0.028 [0.027, 0.030] |
+| class_transform | 0.076 [0.070, 0.083] | 0.030 [0.028, 0.032] | 0.028 [0.026, 0.029] |
+| random | -0.000 [-0.005, 0.004] | -0.000 [-0.002, 0.002] | 0.010 [0.009, 0.011] |
+
+### criteo_uplift, outcome="visit", n_rows=3,000,000 (n_test 600,000; test ATE +0.0104)
+
+`bench.get("criteo_uplift", n_rows=3_000_000)`, B = 1000; wall time about 10 min.
+
+| method | qini | auuc | uplift@30 |
+|---|---|---|---|
+| s_gbdt | 0.093 [0.079, 0.108] | 0.036 [0.031, 0.042] | 0.030 [0.025, 0.034] |
+| t_logistic | 0.083 [0.069, 0.097] | 0.032 [0.027, 0.038] | 0.029 [0.025, 0.033] |
+| class_transform | 0.079 [0.066, 0.095] | 0.031 [0.026, 0.037] | 0.028 [0.024, 0.033] |
+| t_gbdt | 0.077 [0.062, 0.092] | 0.030 [0.024, 0.036] | 0.028 [0.024, 0.032] |
+| random | -0.005 [-0.015, 0.005] | -0.002 [-0.006, 0.002] | 0.010 [0.007, 0.012] |
+
+### criteo_uplift, outcome="conversion", n_rows=3,000,000 (n_test 600,000; test ATE +0.0011)
+
+`bench.get("criteo_uplift", n_rows=3_000_000, outcome="conversion")`, B = 1000; wall time 8.8 min, peak RSS 3.0 GB.
+
+| method | qini | auuc | uplift@30 |
+|---|---|---|---|
+| s_gbdt | 0.192 [0.123, 0.263] | 0.006 [0.004, 0.008] | 0.003 [0.002, 0.005] |
+| t_logistic | 0.172 [0.101, 0.240] | 0.006 [0.003, 0.008] | 0.003 [0.002, 0.004] |
+| t_gbdt | 0.074 [0.011, 0.134] | 0.002 [0.000, 0.004] | 0.002 [0.001, 0.003] |
+| random | 0.021 [-0.018, 0.059] | 0.001 [-0.001, 0.002] | 0.001 [0.001, 0.002] |
+| class_transform | -0.083 [-0.135, -0.032] | -0.003 [-0.004, -0.001] | 0.001 [0.000, 0.001] |
+
+A 1M-row visit run (`n_rows=1_000_000`, B = 200) was repeated on 2026-10-23 and gave identical numbers to the
+digit (t_logistic qini 0.090 [0.067, 0.118], random -0.006), so the runs are deterministic given the seeds.
+
+Why class transformation fails on Criteo conversion (measured, 2026-10-23): a LightGBM classifier predicting the
+treatment flag from f0..f11 (3M random rows, 80/20 split, same GBDT parameters) reaches held-out AUC 0.509, and the
+treated share runs from 0.846 to 0.867 across its predicted-propensity deciles (about 60,000 rows each, so a binomial
+SE near 0.0015). Class transformation assumes a constant treated share; the reweighting fixes the overall share
+but not the share at x. Its target z is then driven by e(x) with slope about -1 when the outcome is rare, and a
+0.02 swing in e(x) is an order of magnitude above the 0.001 conversion uplift, so the method ranks by inverse
+propensity. The T- and S-learners do not have this term. With visit (uplift 0.01) the bias is smaller and
+class transformation only trails.
 
 What the numbers say: on Hillstrom and X5 every baseline sits within a few hundredths of `random` and most CIs
 overlap it; the mens e-mail arm shows no detectable heterogeneity at all. The intervals are wide at these test sizes
 (Diemert et al. 2021 report that AUUC differences between their baselines become separable only from about 1M test
 rows on Criteo). Treat a new method's win on Hillstrom or X5 as real only when its CI clears the best baseline.
+On Criteo visit every learner clears `random` clearly (qini about 0.08-0.09 vs 0.00), but the four learners sit
+inside each other's CIs even on the full 2.8M-row test set, apart from class transformation, which trails slightly.
+On Criteo conversion the ordering is unstable (wide CIs) and class transformation goes below random (see above).
 
 ## Provenance
 
@@ -157,7 +207,9 @@ rows on Criteo). Treat a new method's win on Hillstrom or X5 as real only when i
 - X5 uses client profile features only; the purchase history (`purchases.csv.gz`, 639 MB) is not read, and winning
   X5 solutions are built on it, so these X5 numbers understate what is reachable.
 - Criteo is subsampled non-uniformly by the publisher for privacy, so its ATE and uplift levels are not real ad
-  effects (dataset README).
+  effects (dataset README). The treated share also depends slightly on the features (held-out AUC 0.509, measured
+  above); `class_transform` does not correct for this, so do not use it as the Criteo conversion reference.
+- The full-data Criteo run is B = 200, the others B = 1000. The full run needs about 7.3 GB RAM.
 - `kind = "binary"` describes the outcome; predictions are scores, so `simengine.evidence.evaluate`'s binary metrics
   (AUC on truth, Brier) are not meaningful on this frame. Use `task.score`.
 - No hyper-parameter search, no cross-fitting, a single random split; the Hillstrom `spend` outcome is not offered.
