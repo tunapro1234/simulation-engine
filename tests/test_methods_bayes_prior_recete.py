@@ -109,6 +109,33 @@ class TestWeakPriorGuard(unittest.TestCase):
         with self.assertRaises(ValueError):
             simulate_saving_calibrated(a, b, weak, mode="nope", **KW)
 
+    def test_tiebreak_warns_when_wrong_on_ties(self):
+        a, b, _ = _pairs()
+        wrong = np.where(a > b, 0.4, 0.6)
+        with self.assertWarnsRegex(RuntimeWarning, "tied at n0"):
+            r = simulate_saving_calibrated(a, b, wrong, mode="tiebreak", **KW)
+        self.assertLess(r["hybrid"]["100"], r["human"]["100"])
+
+
+class TestBootCalibration(unittest.TestCase):
+    def test_points_unchanged_ci_recalibrated(self):
+        a, b, good = _pairs()
+        weak = _pairs(noise=2.0, seed=4)[2]
+        on = _quiet(compare_priors, {"good": good, "weak": weak}, a, b, **KW)
+        off = _quiet(compare_priors, {"good": good, "weak": weak}, a, b, boot_calibration=False, **KW)
+        self.assertIn("recalibrated per replicate", on["bootstrap"])
+        self.assertIn("calibration held fixed", off["bootstrap"])
+        for k in ("good", "weak"):
+            self.assertEqual(on["priors"][k]["hybrid"], off["priors"][k]["hybrid"])
+            self.assertEqual(on["priors"][k]["multiplier"], off["priors"][k]["multiplier"])
+        self.assertEqual(on["diffs"]["weak"]["accuracy"], off["diffs"]["weak"]["accuracy"])
+        self.assertNotEqual(on["diffs"]["weak"]["accuracy_ci"], off["diffs"]["weak"]["accuracy_ci"])
+        # held fixed: replicate accuracy is the resampled mean of the per-pair accuracy (the research script's CI)
+        s = _quiet(simulate_saving_calibrated, a, b, weak, boot_calibration=False, return_pairs=True, **KW)
+        self.assertEqual(s["ci"], off["priors"]["weak"]["ci"])
+        tb = _quiet(simulate_saving_calibrated, a, b, weak, mode="tiebreak", **KW)
+        self.assertNotIn("calibration", tb["bootstrap"])
+
 
 class TestCensoring(unittest.TestCase):
     def test_above_curve(self):
@@ -140,6 +167,7 @@ class TestSavingSection(unittest.TestCase):
         self.assertIn("impression multiplier", md)
         self.assertIn("> 4x", md)
         self.assertIn("calibration tests (n_calib) | 20", md)
+        self.assertIn("CI: 95% bootstrap (pair, recalibrated per replicate)", md)
         self.assertTrue(s["multiplier_censored"])
 
     def test_compare(self):

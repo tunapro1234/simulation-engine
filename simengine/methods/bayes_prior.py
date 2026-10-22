@@ -12,9 +12,11 @@ Two replay protocols are ported, and they give different numbers on the same dat
   prior -> hybrid 0.815, 2.47x saving (1.34x at 400, none at 800); TF-IDF prior 2.79x; TF-IDF + Opus stack 3.68x.
 * ``simulate_saving_calibrated``: `uretim/deney/kod/analiz/ornek_tasarrufu_llm_ga.py` (each of 10 blocks is
   calibrated on ``n_calib`` random pairs from the other blocks, 5 draws, 200 replays, seed 5, pair-bootstrap 95% CI
-  of the multiplier at n=100). This is the headline of uretim/deney/RAPOR.md 2.2-2.3: no archive, Opus 5.5 direct
-  prior calibrated on 20 tests: accuracy 0.718 -> 0.808, 2.27x (CI 1.67-3.11); TF-IDF 2.44x; stack 3.30x
-  (`ornek_tasarrufu_llm_ga.json`). Replicated on ek600 at 2.05x (1.70-2.50).
+  of the multiplier at n=100; the library re-draws the calibration in each replicate by default, so its CI is
+  wider than the script's, which held it fixed and under-covered in simulation). This is the headline of
+  uretim/deney/RAPOR.md 2.2-2.3: no archive, Opus 5.5 direct prior calibrated on 20 tests: accuracy 0.718 ->
+  0.808, 2.27x (script CI 1.67-3.11); TF-IDF 2.44x; stack 3.30x (`ornek_tasarrufu_llm_ga.json`). Replicated on
+  ek600 at 2.05x (1.70-2.50).
 
 Most of the gain comes from breaking ties in tests with very few clicks ("human decides, prior breaks ties"
 alone gives 0.786).
@@ -303,20 +305,46 @@ def _hybrid(p, lor_t, se_t, y, sims, tie, human_dec, ns, n0, n_calib, draws, blo
     return acc, np.asarray(dec0, bool), np.asarray(ks, float)
 
 
-def _gain(human_acc, hyb_n0, idx, ns, n0):
+def _boot_hybrid_n0(p, lor_t, se_t, y, early0, idx, n_calib, draws, blocks, fix_scale, seed, j):
+    """Hybrid accuracy at n0 on bootstrap resample ``idx``, recalibrated on it: every draw re-picks each block's
+    ``n_calib`` calibration pairs from the resample (pairs of other ORIGINAL blocks only, so a pair never calibrates
+    its own copy). Same RNG per replicate ``j`` for every prior, so prior differences stay paired."""
+    lor0, se20 = early0[0][:, idx], early0[1][:, idx]
+    pi, li, si, yi, zi = p[idx], lor_t[idx], se_t[idx], y[idx], _logit(p[idx])
+    blk = (np.arange(len(y)) % blocks)[idx]
+    r = np.random.default_rng((seed, 7919, j))
+    acc = []
+    for _ in range(draws):
+        mu, tau2 = np.zeros(len(idx)), np.ones(len(idx))
+        for b in range(blocks):
+            cand, own = np.flatnonzero(blk != b), blk == b
+            if len(cand) == 0 or not own.any():
+                continue
+            m = r.choice(cand, min(n_calib, len(cand)), replace=False)
+            k, t2 = calibrate_prior(pi[m], li[m], si[m], fix_scale)
+            mu[own], tau2[own] = k * zi[own], t2
+        acc.append(np.mean((posterior_lor(mu, tau2, lor0, se20)[0] > 0) == yi))
+    return float(np.mean(acc))
+
+
+def _gain(human_acc, hyb_n0, idx, ns, n0, target=None):
     hy = np.maximum.accumulate(np.array([human_acc[n][idx].mean() for n in ns]))
-    target = hyb_n0[idx].mean()
+    target = hyb_n0[idx].mean() if target is None else target
     if target > hy.max():
         return np.nan
     return float(np.exp(np.interp(target, hy, np.log(np.asarray(ns, float)))) / n0)
 
 
-def _guard(name, mode, prior_only, ks, n_calib):
-    """Weak-prior warnings: the free slope k spans 0 over the calibration sets, or prior-only accuracy < 0.6."""
+def _guard(name, mode, prior_only, ks, n_calib, tie_acc=None):
+    """Weak-prior warnings: the free slope k spans 0 over the calibration sets, or prior-only accuracy < 0.6.
+    tiebreak: the prior is right on < 0.5 of the tests tied at n0 (``tie_acc``; the only way it loses to human-only)."""
     out, who = [], f"prior {name!r}: " if name else ""
     lo, hi = (float(np.percentile(ks, 2.5)), float(np.percentile(ks, 97.5))) if len(ks) else (np.nan, np.nan)
     if mode == "tiebreak":
-        if prior_only < 0.5:
+        if tie_acc is not None and tie_acc < 0.5:
+            out.append(f"{who}the prior is right on {tie_acc:.3f} < 0.5 of the tests tied at n0: breaking ties with "
+                       "it is worse than a coin")
+        elif prior_only < 0.5:
             out.append(f"{who}prior-only accuracy {prior_only:.3f} < 0.5: breaking ties with it is worse than a coin")
         return out
     if len(ks) and lo <= 0 <= hi:
@@ -330,7 +358,7 @@ def _guard(name, mode, prior_only, ks, n_calib):
 
 
 def _calibrated(priors: dict, ctr_a, ctr_b, clicks_a, clicks_b, n_calib, ns, reps, draws, blocks, n_boot, n0, seed,
-                fix_scale, mode, cluster):
+                fix_scale, mode, cluster, boot_calibration=True):
     """Shared engine of ``simulate_saving_calibrated`` and ``compare_priors``: one replay, every prior on it."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
@@ -353,19 +381,28 @@ def _calibrated(priors: dict, ctr_a, ctr_b, clicks_a, clicks_b, n_calib, ns, rep
     shared = {"n_pairs": int(n_pairs), "n_calib": int(n_calib), "ns": list(ns), "n0": int(n0), "mode": mode,
               "reps": int(reps), "draws": int(draws), "blocks": int(blocks),
               "human": {str(n): float(human_acc[n].mean()) for n in ns}, "tie_rate": float(ties.mean()),
-              "bootstrap": "pair" if groups is None else f"cluster ({len(groups)} clusters)"}
+              "bootstrap": ("pair" if groups is None else f"cluster ({len(groups)} clusters)")
+              + (", recalibrated per replicate" if boot_calibration and mode == "bayes" else
+                 ", calibration held fixed" if mode == "bayes" else "")}
+    early0 = early_lor(sims[n0][0], n0, sims[n0][1], n0) if boot_calibration and mode == "bayes" else None
     per, raw = {}, {}
     for name, p in ps.items():
         acc, dec0, ks = _hybrid(p, lor_t, se_t, y, sims, tie, human_dec, ns, n0, n_calib, draws, blocks, fix_scale,
                                 mode)
         point = _gain(human_acc, acc[n0], np.arange(n_pairs), ns, n0)
-        bs = np.array([_gain(human_acc, acc[n0], i, ns, n0) for i in boot])
+        if early0 is not None:
+            hb = np.array([_boot_hybrid_n0(p, lor_t, se_t, y, early0, i, n_calib, draws, blocks, fix_scale, seed, j)
+                           for j, i in enumerate(boot)])
+        else:
+            hb = np.array([acc[n0][i].mean() for i in boot])
+        bs = np.array([_gain(human_acc, acc[n0], i, ns, n0, t) for t, i in zip(hb, boot)])
         ci, ci_cen, n_cen = _ci(bs, cap)
         prior_only = float(np.mean(np.where(p == .5, .5, (p > .5) == y)))
         rule = float(np.mean(np.where(ties, np.where(p == .5, tie, p > .5), human_dec[n0]) == y))
         censored = not np.isfinite(point)
         lo_lim = float(min(ns) / n0)
-        ws = _guard(name if len(ps) > 1 else "", mode, prior_only, ks, n_calib)
+        tie_acc = float(np.mean((np.where(p == .5, tie, p > .5) == y)[ties])) if ties.any() else None
+        ws = _guard(name if len(ps) > 1 else "", mode, prior_only, ks, n_calib, tie_acc)
         per[name] = {"hybrid": {str(n): float(acc[n].mean()) for n in ns}, "prior_only": prior_only,
                      "multiplier": None if censored else point, "ci": ci,
                      "multiplier_censored": bool(censored),
@@ -378,14 +415,15 @@ def _calibrated(priors: dict, ctr_a, ctr_b, clicks_a, clicks_b, n_calib, ns, rep
                                  "hi": float(np.percentile(ks, 97.5)) if len(ks) else None,
                                  "n_sets": int(len(ks))},
                      "warnings": ws}
-        raw[name] = {"acc": acc, "dec0": dec0, "bs": bs}
+        raw[name] = {"acc": acc, "dec0": dec0, "bs": bs, "boot_acc": hb}
     return shared, per, raw, {"y": y, "human_acc": human_acc, "boot": boot, "cap": cap}
 
 
 def simulate_saving_calibrated(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b=None, n_calib: int = 20,
                                ns=NS_CALIBRATED, reps: int = 200, draws: int = 5, blocks: int = 10,
                                n_boot: int = 500, n0: int = 100, seed: int = 5, fix_scale: bool = False,
-                               return_pairs: bool = False, mode: str = "bayes", cluster=None) -> dict:
+                               return_pairs: bool = False, mode: str = "bayes", cluster=None,
+                               boot_calibration: bool = True) -> dict:
     """Impression saving when only ``n_calib`` finished tests are available to calibrate the prior, with a
     pair-bootstrap 95% CI of the multiplier at ``n0`` impressions/arm (port of `ornek_tasarrufu_llm_ga.py`).
 
@@ -394,7 +432,8 @@ def simulate_saving_calibrated(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b
     are replayed ``reps`` times. The human curve is made monotone (running max) before the inverse interpolation.
     Ties at ``n0``: ``human_decides_prior_breaks_ties`` is the accuracy of "human decides, prior breaks ties".
     Measured (Upworthy llm300, Opus 5.5 direct, n_calib=20): human 0.718 -> hybrid 0.808, 2.27x [1.67, 3.11];
-    n_calib=150: 2.58x [1.88, 3.42] (uretim/deney/RAPOR.md 2.2-2.3, `ornek_tasarrufu_llm_ga.json`).
+    n_calib=150: 2.58x [1.88, 3.42] (uretim/deney/RAPOR.md 2.2-2.3, `ornek_tasarrufu_llm_ga.json`). Those CIs
+    held the calibration fixed (``boot_calibration=False``); the default CI is wider (see below).
 
     mode: ``"bayes"`` (default, the normal-normal hybrid) or ``"tiebreak"`` (human decides by the higher sample
         CTR, the prior only breaks ties; no worse than human-only in expectation whenever the prior is right on
@@ -402,6 +441,11 @@ def simulate_saving_calibrated(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b
     return_pairs: also return ``hybrid_pairs`` / ``human_pairs`` ({str(n): per-pair accuracy}, their means are
         ``hybrid`` / ``human``), ``decisions_n0`` (draws x reps x pairs bool, True = ship A) and ``a_better``.
     cluster: optional test id per pair; the bootstrap then resamples tests, not pairs (several pairs per test).
+    boot_calibration: True (default) re-draws every block's calibration sets inside each bootstrap replicate, from
+        the resampled pairs, so the CI includes calibration noise. False holds the per-pair hybrid accuracy fixed
+        (the research script's CI). Simulated coverage of the nominal 95% CI (300 pairs, n_calib=20, 300 samples
+        from a synthetic population): multiplier 0.82-0.94 with False, 0.93-0.96 with True; accuracy differences
+        0.83-0.93 with False, 0.96-0.98 with True. Point values do not change.
 
     Censoring: when the hybrid beats the top of the human curve, ``multiplier`` is None,
     ``multiplier_censored=True`` and ``multiplier_lower_bound = max(ns) / n0``; bootstrap replicates above the
@@ -411,7 +455,8 @@ def simulate_saving_calibrated(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b
     ``blocks x draws`` calibration sets (``k_calib``: its median and 2.5-97.5% spread), or prior-only accuracy
     < 0.6."""
     shared, per, raw, aux = _calibrated({"prior": prior_prob}, ctr_a, ctr_b, clicks_a, clicks_b, n_calib, ns, reps,
-                                        draws, blocks, n_boot, n0, seed, fix_scale, mode, cluster)
+                                        draws, blocks, n_boot, n0, seed, fix_scale, mode, cluster,
+                                        boot_calibration)
     out = {**shared, **per["prior"]}
     for w in out["warnings"]:
         warnings.warn(w, RuntimeWarning, stacklevel=2)
@@ -426,14 +471,15 @@ def simulate_saving_calibrated(ctr_a, ctr_b, prior_prob, clicks_a=None, clicks_b
 def compare_priors(priors: dict, ctr_a, ctr_b, clicks_a=None, clicks_b=None, n_calib: int = 20,
                    ns=NS_CALIBRATED, reps: int = 200, draws: int = 5, blocks: int = 10, n_boot: int = 500,
                    n0: int = 100, seed: int = 5, fix_scale: bool = False, mode: str = "bayes",
-                   cluster=None) -> dict:
+                   cluster=None, boot_calibration: bool = True) -> dict:
     """Several priors on ONE replay: same binomial replays, tie coins, calibration sets and bootstrap resamples,
     so their differences are paired.
 
     priors: ``{name: prior_prob}`` (P(A better) per pair); the first one is the reference. Every prior's entry in
     ``priors`` equals ``simulate_saving_calibrated`` on the same arguments (point values and CI). ``diffs[name]``
     (names after the first): hybrid accuracy at ``n0`` and multiplier minus the reference's, with paired 95%
-    bootstrap CIs (pair bootstrap, or test-clustered with ``cluster=`` test ids). ``vs_human[name]``: hybrid minus
+    bootstrap CIs (pair bootstrap, or test-clustered with ``cluster=`` test ids; calibration re-drawn in every
+    replicate with ``boot_calibration=True``, the same draws for every prior). ``vs_human[name]``: hybrid minus
     human-only accuracy at ``n0`` with its CI. Multiplier differences drop replicates where either side is
     censored (``n_boot_used``). Weak-prior warnings are raised per prior.
 
@@ -445,12 +491,12 @@ def compare_priors(priors: dict, ctr_a, ctr_b, clicks_a=None, clicks_b=None, n_c
     if not priors:
         raise ValueError("priors is empty")
     shared, per, raw, aux = _calibrated(dict(priors), ctr_a, ctr_b, clicks_a, clicks_b, n_calib, ns, reps, draws,
-                                        blocks, n_boot, n0, seed, fix_scale, mode, cluster)
+                                        blocks, n_boot, n0, seed, fix_scale, mode, cluster, boot_calibration)
     names = list(per)
     ref = names[0]
     hum = aux["human_acc"][n0]
     accs = {k: raw[k]["acc"][n0] for k in names}
-    boot_acc = {k: np.array([accs[k][i].mean() for i in aux["boot"]]) for k in names}
+    boot_acc = {k: raw[k]["boot_acc"] for k in names}
     boot_hum = np.array([hum[i].mean() for i in aux["boot"]])
 
     def pct(x):
@@ -480,10 +526,10 @@ def _mult_txt(m, lb=None):
     return f"{m:.2f}x"
 
 
-def _ci_txt(ci, cap):
+def _ci_txt(ci, cap, cen=(True, True)):
     lo, hi = ci
     if lo is None and hi is None:
-        return "—" if cap is None else f"> {cap:g}x"
+        return f"> {cap:g}x" if cap is not None and all(cen) else "—"      # "—": no bootstrap (n_boot=0)
     return f"[{_mult_txt(lo)}, {_mult_txt(hi) if hi is not None else f'> {cap:g}x'}]"
 
 
@@ -505,7 +551,7 @@ def saving_section(result: dict, title: str | None = None) -> dict:
     head = (f"{result['n_pairs']} test pairs, prior calibrated on {result['n_calib']} finished tests "
             f"({result['blocks']} blocks x {result['draws']} draws, {result['reps']} replays), mode={result['mode']}")
     notes = [head, "Offline replay: the truth is each pair's full-data winner; small tests are resampled from the "
-             f"full-data CTRs. CI: {result['bootstrap']} bootstrap, 95%."]
+             f"full-data CTRs. CI: 95% bootstrap ({result['bootstrap']})."]
     if "priors" in result:
         ref = result["reference"]
         cols = ["arm", f"accuracy @ {n0}/arm", "vs human (95% CI)", f"vs {ref} (95% CI)", "multiplier",
@@ -515,7 +561,8 @@ def saving_section(result: dict, title: str | None = None) -> dict:
             vh, d = result["vs_human"][k], result["diffs"].get(k)
             rows.append([k, r["hybrid"][str(n0)], f"{vh['accuracy']:+.3f} {_acc_ci(vh['accuracy_ci'])}",
                          None if d is None else f"{d['accuracy']:+.3f} {_acc_ci(d['accuracy_ci'])}",
-                         _mult_txt(r["multiplier"], r["multiplier_lower_bound"]), _ci_txt(r["ci"], cap)])
+                         _mult_txt(r["multiplier"], r["multiplier_lower_bound"]),
+                         _ci_txt(r["ci"], cap, r["ci_censored"])])
             notes += r["warnings"]
             if r["multiplier_censored"]:
                 notes.append(f"{k}: hybrid accuracy is above the human curve's top ({max(result['ns'])}/arm); "
@@ -531,7 +578,7 @@ def saving_section(result: dict, title: str | None = None) -> dict:
             ["human decides, prior breaks ties", result["human_decides_prior_breaks_ties"],
              f"tie rate {result['tie_rate']:.3f}"],
             ["impression multiplier", _mult_txt(m, lb), "human-only impressions needed / n0"],
-            ["multiplier 95% CI", _ci_txt(result["ci"], cap),
+            ["multiplier 95% CI", _ci_txt(result["ci"], cap, result["ci_censored"]),
              f"{result['n_boot_censored']} bootstrap replicates above the curve" if result["n_boot_censored"] else ""],
             ["calibration tests (n_calib)", result["n_calib"], ""],
             ["calibration slope k", k["median"],
