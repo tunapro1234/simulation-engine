@@ -89,6 +89,23 @@ class TestSessions(unittest.TestCase):
             na.sessions(toy(), outcome_key="purchase", prefix_k=0)
         with self.assertRaises(ValueError):
             na.sessions(toy(), outcome_key=lambda g: ("purchase", 99))
+        with self.assertRaises(ValueError):                         # a conversion must sit on a step
+            na.funnel(toy(), outcome_key=lambda g: ("purchase", -1))
+
+    def test_session_label_column_refused(self):
+        df = toy()
+        df["bought"] = df["session"].isin(["s1", "s3"]).astype(int)   # session label on every row
+        with self.assertRaises(ValueError):
+            na.sessions(df, outcome_key="bought")
+        t = na.sessions(df, outcome_key=lambda g: "purchase" if g["bought"].iloc[0] else "abandon",
+                        prefix_k=3).set_index("session")
+        self.assertEqual(t.loc["s1", "prefix"], ["search", "view", "cart"])   # last step is the outcome
+        self.assertEqual(t.loc["s1", "outcome_step"], 4)
+
+    def test_unmatched_action_warns(self):
+        with self.assertWarns(UserWarning):
+            t = na.sessions(toy(), outcome_key="Purchase")
+        self.assertEqual(int(t["converted"].sum()), 0)
 
 
 class TestFunnel(unittest.TestCase):

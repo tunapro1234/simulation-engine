@@ -28,6 +28,7 @@ step index how many sessions reach it and the continue / abandon / convert rates
 """
 from __future__ import annotations
 
+import warnings
 from typing import Any, Callable, Sequence, Union
 
 import numpy as np
@@ -255,6 +256,8 @@ def _session_outcomes(s: pd.DataFrame, session_col: str, action_col: str, outcom
             a = int(a)
             if not -1 <= a < len(grp):
                 raise ValueError(f"outcome position {a} outside session of {len(grp)} steps")
+            if c and a < 0:                            # a conversion must sit on a step, else the prefix holds it
+                raise ValueError(f"callable returned {pos_label!r} with position -1; give its step or None")
             lab.append(lb)
             conv.append(c)
             at.append(a)
@@ -262,8 +265,20 @@ def _session_outcomes(s: pd.DataFrame, session_col: str, action_col: str, outcom
     else:
         if outcome_key in s.columns:                   # a per-step flag column (truthy = conversion step)
             hit = s[outcome_key].fillna(0).astype(bool)
+            share = hit.groupby(s[session_col], sort=False).agg(["any", "all"])
+            if share["any"].any() and share["all"][share["any"]].all() and (n[share["any"]] > 1).any():
+                # a session-level label repeated on every row: the first step would count as the conversion,
+                # every converted prefix would be empty and reached_k would drop them all
+                raise ValueError(f"{outcome_key!r} is truthy on every step of each flagged session: a session "
+                                 "label, not a per-step flag. Use outcome_key=lambda g: "
+                                 f"'{pos_label}' if g[{outcome_key!r}].iloc[0] else '{neg_label}' (last step = outcome)"
+                                 " or the conversion action value")
         else:                                          # an action value (e.g. "purchase")
             hit = s[action_col] == outcome_key
+            if len(s) and not hit.any():
+                top = s[action_col].value_counts().index[:8].tolist()
+                warnings.warn(f"no step has {action_col} == {outcome_key!r}: every session is {neg_label!r} "
+                              f"(most common actions: {top})", stacklevel=3)
         first = s["_pos"].where(hit).groupby(s[session_col], sort=False).min().reindex(n.index)
         conv = first.notna()
         o = pd.DataFrame({"outcome": np.where(conv, pos_label, neg_label), "converted": conv.to_numpy(),
@@ -278,8 +293,10 @@ def sessions(steps: pd.DataFrame, *, outcome_key: OutcomeKey, prefix_k: int = 3,
     """One row per session from a step table, for predicting the session outcome from its first steps.
 
     ``outcome_key``:
-      - str naming a column of ``steps``: per-step flag, the first truthy step is the conversion step;
-      - other str: the action value that marks conversion (e.g. ``"purchase"``), first occurrence counts;
+      - str naming a column of ``steps``: per-step flag, the first truthy step is the conversion step (a session
+        label repeated on every row raises: it would make every converted prefix empty; use a callable);
+      - other str: the action value that marks conversion (e.g. ``"purchase"``), first occurrence counts (warns
+        when no step matches, e.g. a case typo);
       - callable(session_steps_ordered) -> label, or (label, position) with the 0-based position of the outcome
         step (``-1`` / ``None`` = no outcome step; a ``labels[0]`` label without a position means the last step).
     Sessions with a conversion step get ``labels[0]``, the rest ``labels[1]`` (callables return their own label).
