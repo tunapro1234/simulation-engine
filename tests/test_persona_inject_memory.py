@@ -106,8 +106,17 @@ class TestLeakage(unittest.TestCase):
         self.assertEqual(p.meta["reflections_dropped"], 1)
         self.assertIn("Used the target", p.system)              # q3 is not the target here
         self.assertNotIn("Cares about cars", p.system)
-        with self.assertRaises(ValueError):
-            pi.get_injector("memory_reflect")({**person(), "reflections": [{"text": "no seen list"}]}, QS[3])
+        for bad in ({"text": "no seen list"}, {"text": "string seen", "seen": "q3"}, {"seen": ["q0"]}, "bare text"):
+            with self.assertRaises(ValueError):                  # a string 'q3' must not pass as ('q', '3')
+                pi.get_injector("memory_reflect")({**person(), "reflections": [bad]}, QS[3])
+
+    def test_int_qids(self):
+        qs = [{**q, "id": i} for i, q in enumerate(QS)]
+        pp = {"id": "u1", "answers": {0: "yes", 1: "daily", 2: "no", 3: "SECRETVALUE"}}
+        for name, kw in (("memory_stream", {}), ("memory_session", {}), ("memory_session", {"prior_only": True})):
+            p = pi.get_injector(name, questions=qs, **kw)(pp, qs[3])
+            self.assertEqual(p.meta["memories"], ["0", "1", "2"])
+            self.assertNotIn("SECRETVALUE", p.system + p.flatten())
 
     def test_no_memories_left(self):
         p = pi.get_injector("memory_stream")({"id": "a", "answers": {"q0": "yes"}}, QS[0])
@@ -147,7 +156,7 @@ class TestDeterminism(unittest.TestCase):
         ppl = [person(f"u{i}", "yes" if i % 2 else "no") for i in range(6)]
         llm = FakeLLM(lambda s, u: '{"answer": "yes"}')
         res = pi.compare_injectors(llm, ppl, QS[3:4], "answers", ["memory_stream", "memory_session"], B=50)
-        self.assertEqual(set(res.table["arm"]) >= {"memory_stream", "memory_session", "swap_memory_stream"}, True)
+        self.assertLessEqual({"memory_stream", "memory_session", "swap_memory_stream"}, set(res.table["arm"]))
         self.assertEqual(res.errors.get("memory_stream", 0), 0)
 
 
@@ -157,6 +166,8 @@ class TestOfflineSteps(unittest.TestCase):
         imp = mem.rate_importance(llm, [person()], QS)
         self.assertEqual(imp, {("u1", "q0"): 8, ("u1", "q1"): 8, ("u1", "q3"): 8})
         self.assertIn("poignancy", llm.calls[0][1])
+        echo = FakeLLM(lambda s, u: "On the scale of 1 to 10, rating: 7")   # echoed scale is not the rating
+        self.assertEqual(mem.rate_importance(echo, [{"id": "a", "answers": {"q0": "yes"}}], QS), {("a", "q0"): 7})
 
     def test_reflect_cites_and_hides(self):
         def responder(system, user):
