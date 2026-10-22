@@ -39,13 +39,16 @@ class TestRecipePricing(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = run("--out", d, "--B", "60")
             self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-            for s in ("LLM calls: 80", "WTP in TL per unit", "price curve for A", "revenue-max price", "badge:"):
+            for s in ("LLM calls: 80", "WTP in TL per unit", "price curve for A", "revenue-max price",
+                      "95% of bootstrap draws", "llm − llm_nopersona", "badge:"):
                 self.assertIn(s, r.stdout)
             for f in ("card.md", "dashboard.html", "price_curve.csv"):
                 self.assertTrue((Path(d) / f).exists(), f)
             self.assertTrue(list((Path(d) / ".onkayit").glob("*.jsonl")))       # predictions sealed
             curve = pd.read_csv(Path(d) / "price_curve.csv")
             self.assertTrue((curve.human.diff().dropna() < 0).all())            # demand falls with price
+            self.assertTrue(curve.price.min() >= 229 and curve.price.max() <= 379)  # inside the tested prices
+            self.assertNotIn("WARNING", r.stdout)                                   # every fake reply parsed
             self.assertTrue(((curve.lo <= curve.human) & (curve.human <= curve.hi)).all())
             card = (Path(d) / "card.md").read_text()
             self.assertIn("stack", card)
