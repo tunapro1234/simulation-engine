@@ -54,10 +54,19 @@ def _truth(s: pd.Series, a_wins, tie_labels) -> np.ndarray:
                              "For labels pass a_wins=<label meaning A won>")
         return v
     lab = "a" if a_wins is None else a_wins
-    v = np.where(s.isna(), np.nan, np.where(s == lab, 1.0, 0.0))
-    if isinstance(lab, str):
-        v = np.where(s.astype(str).str.lower().isin([t.lower() for t in tie_labels]), 0.5, v)
-    return v
+    if not isinstance(lab, str):
+        return np.where(s.isna(), np.nan, np.where(s == lab, 1.0, 0.0))
+    # string labels compare case-insensitively ("A" == "a"); with the default "a" anything but a / b / tie raises,
+    # so a "1"/"0" or "A wins" column cannot silently turn into all-B wins
+    low = s.astype(str).str.strip().str.lower()
+    tie = low.isin([t.lower() for t in tie_labels])
+    if a_wins is None:
+        bad = s.notna() & ~tie & ~low.isin(("a", "b"))
+        if bad.any():
+            raise ValueError(f"label y must be a / b / tie; got {sorted(set(s[bad].astype(str)))[:5]}. "
+                             "Pass a_wins=<label meaning A won> or a numeric 1/0 column")
+    v = np.where(s.isna(), np.nan, np.where(low == lab.lower(), 1.0, 0.0))
+    return np.where(s.notna() & tie, 0.5, v)
 
 
 def ab_pairs_frame(pairs: pd.DataFrame, pred_cols, y: str = "y", group: str | None = "test_id", *,
@@ -123,7 +132,7 @@ def _texts_frame(pairs: pd.DataFrame, y: str, group: str | None) -> pd.DataFrame
         raise KeyError(f"pair table has no group column {group!r}; pass group=None")
     d = d.reset_index(drop=True)
     d["_test"] = d[group].astype(str) if group is not None else d.index.astype(str)
-    d["_y"] = _truth(d[y], None if pd.api.types.is_numeric_dtype(d[y]) else "a", TIE_LABELS)
+    d["_y"] = _truth(d[y], None, TIE_LABELS)                  # numeric 1/0/0.5 or a / b / tie labels
     d["text_a"], d["text_b"] = d.text_a.fillna("").astype(str), d.text_b.fillna("").astype(str)
     return d[np.isin(d["_y"], (0.0, 1.0))].reset_index(drop=True)
 
@@ -139,8 +148,11 @@ def ab_memorization_items(pairs: pd.DataFrame, n: int | None = 100, seed: int = 
     """Probe items for `memorization_audit`: n real pairs ('which text won?', expected = the real winner's text) plus
     n control pairs whose A and B texts come from two different tests (shuffled across tests), so no one can know
     a winner; the control's expected text is a coin flip. Real hit rate - control hit rate > 0 is the completion gap.
-    Note: a model with good taste also beats the controls on real pairs (real pairs have a true winner), so read
-    this gap next to `ab_memorization` (named - neutral context on the same real pairs), which cancels taste.
+    Taste confound: real pairs have a true winner and controls do not, so ANY better-than-chance model (no memory at
+    all) beats the controls and `memorization_audit` returns "uyari" (pair accuracy 0.65 -> gap ~ +0.15). That
+    "uyari" is not a memorization verdict; pass `ab_memorization` (named - neutral on the same real pairs, taste
+    cancels) to `evaluate(memorization=...)`. These items only help when the gap is far above the model's known
+    pair accuracy - 0.5.
     Items: {"prompt", "expected", "control", "test", "pair"}; A/B order is randomised. n=None uses every pair."""
     rng = np.random.default_rng(seed)
     d = _sample(_texts_frame(pairs, y, group), n, rng)
@@ -256,6 +268,9 @@ def ab_memorization(llm, pairs: pd.DataFrame, named_context: str, neutral_contex
         rew = (_paraphrase_llm(llm, texts, batch, max_tokens) if paraphrase is True
                else [str(paraphrase(t)) for t in texts])
         pf = pd.DataFrame({"text_a": rew[:len(d)], "text_b": rew[len(d):]})
+        # share of texts actually rewritten: an unparsed paraphrase reply keeps the original text, which pulls
+        # paraphrase_gap toward 0 (a silent "tamam"); read it before trusting that gap
+        rewritten = float(np.mean([str(r).strip() != str(t).strip() for r, t in zip(rew, texts)]))
         m = LLMDirectAB(llm, context=named_context, batch=batch, reverse=reverse, max_tokens=max_tokens, **llm_kw)
         arms["paraphrase"] = _hit(m.predict(pf), yy)
         cov["paraphrase"] = m.coverage_
@@ -279,8 +294,8 @@ def ab_memorization(llm, pairs: pd.DataFrame, named_context: str, neutral_contex
         pg, (pa, pu) = float(series["pgap"].mean()), ci["pgap"]
         uyari = uyari or pa > margin
         ayrinti += (f"; yeniden yazılmış metinde adlı isabet {arms['paraphrase'].mean():.3f}, özgün − yeniden yazılmış "
-                    f"{f(pg)} [{f(pa)}, {f(pu)}]")
-        out.update({"accuracy_paraphrase": float(arms["paraphrase"].mean()),
+                    f"{f(pg)} [{f(pa)}, {f(pu)}] (metinlerin {rewritten:.0%}'i yeniden yazıldı)")
+        out.update({"accuracy_paraphrase": float(arms["paraphrase"].mean()), "paraphrased_share": rewritten,
                     "accuracy_paraphrase_ci": list(ci["acc_paraphrase"]), "coverage_paraphrase": cov["paraphrase"],
                     "paraphrase_gap": pg, "paraphrase_gap_ci": [pa, pu]})
     out["durum"] = "uyari" if uyari else "tamam"

@@ -106,6 +106,16 @@ class PairsFrameTest(unittest.TestCase):
             ev.ab_pairs_frame(d.assign(y=1), "p", group="test")
 
 
+    def test_label_case_and_unknown_labels(self):
+        d = pd.DataFrame({"test_id": [1, 2, 3, 4], "winner": ["A", "B", "Tie", "a"], "p": [0.8, 0.6, 0.5, 0.4]})
+        f = ev.ab_pairs_frame(d, "p", y="winner", a_wins="a")      # "A" == "a": not silently a B win
+        self.assertEqual(f.truth.tolist(), [1, 0, 0, 1, 1, 0])
+        f2 = ev.ab_pairs_frame(d, "p", y="winner")                 # default labels a / b / tie
+        self.assertEqual(f2.truth.tolist(), f.truth.tolist())
+        with self.assertRaises(ValueError):                         # "1"/"0" strings would all read as B won
+            ev.ab_pairs_frame(d.assign(winner=["1", "0", "1", "0"]), "p", y="winner")
+
+
 class MemorizationTest(unittest.TestCase):
     def test_items(self):
         pairs = _pairs(40)
@@ -165,6 +175,29 @@ class MemorizationTest(unittest.TestCase):
             ev.ab_memorization(llm, pairs, NAMED, NEUTRAL, n=None, max_calls=5)
         self.assertEqual(len(llm.calls), n0)                # checked before any call
         self.assertEqual(ev.ab_memorization(llm, pairs.head(3), NAMED, NEUTRAL)["durum"], "atlandi")
+
+    def test_items_gap_is_taste_not_memory(self):
+        pairs = _pairs(80)
+        win = _winners(pairs)
+        taste = FakeLLM(lambda s, u: next((w for w in win if f'"{w}"' in u), "none")
+                        if int(hashlib.sha256(u.encode()).hexdigest()[:8], 16) % 10 < 7
+                        else re.findall(r'^[AB]: "(.*)"$', u, re.M)[0])
+        # a model with taste and no memory (same answer in either context) beats the coin-flip controls ...
+        items = ev.ab_memorization_items(pairs, n=None, seed=0)
+        self.assertEqual(ev.memorization_audit(items, taste, B=300)["durum"], "uyari")
+        # ... while the named - neutral probe, which cancels taste, has nothing to flag
+        llm = FakeLLM(_ab_responder(win, skill=0.75))              # the responder only "remembers" on "Upworthy"
+        r = ev.ab_memorization(llm, pairs, "Headline tests from a public archive (Matias et al.).", NEUTRAL,
+                               n=None, B=300)
+        self.assertGreater(r["accuracy_neutral"], 0.6)
+        self.assertEqual((r["deger"], r["durum"]), (0.0, "tamam"))
+
+    def test_paraphrase_share(self):
+        pairs = _pairs(20)
+        llm = FakeLLM(_ab_responder(set()))
+        r = ev.ab_memorization(llm, pairs, NAMED, NEUTRAL, n=None, B=200, paraphrase=lambda t: t)
+        self.assertEqual(r["paraphrased_share"], 0.0)               # nothing rewritten: paraphrase_gap is not evidence
+        self.assertIn("yeniden yazıldı", r["ayrinti"])
 
 
 if __name__ == "__main__":
