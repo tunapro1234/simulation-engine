@@ -69,7 +69,8 @@ class TestRoundtableStrategy(unittest.TestCase):
         self.assertEqual(r2["rounds"], 1)
 
     def test_no_control_and_errors(self):
-        r = roundtable_strategy(personas(4), SCEN, llm=FakeLLM(responder), rounds=2, control="Nope", B=20)
+        with self.assertWarns(UserWarning):
+            r = roundtable_strategy(personas(4), SCEN, llm=FakeLLM(responder), rounds=2, control="Nope", B=20)
         self.assertEqual(r["effects"], [])
         self.assertIsNone(r["control"])
         self.assertTrue(any("Nope" in w for w in r["warnings"]))
@@ -109,6 +110,26 @@ class TestRoundtableStrategy(unittest.TestCase):
         self.assertTrue(all("X" not in x.text() for x in v))
         self.assertIn("city: Y", v[0].text())
         self.assertIn("hobby: tea", v[1].text())
+
+    def test_hide_persona_views_case_and_leftover_warning(self):
+        from simengine.sim import as_personas
+        v = hide_persona_fields(as_personas(personas(3)))           # PersonaViews rebuilt from their dict source
+        self.assertTrue(all("condition" not in x.text() for x in v))
+        self.assertEqual([x.pid for x in v], ["u0", "u1", "u2"])
+        talp = {"identity": {"persona_id": "t1"}, "traits": [{"key": "cond", "label": "Condition", "value": "X"}]}
+        self.assertNotIn("X", hide_persona_fields([talp])[0].text())
+        with self.assertWarns(UserWarning):
+            hide_persona_fields(["Ana, 30. condition: Discount"])
+
+    def test_warnings_surface(self):
+        def resp(system, user):       # u0 answers round 0 only
+            ids = re.findall(r"^### (\S+)\s*$", user, re.M)
+            t = int(re.search(r"round (\d+) of", user).group(1)) - 1
+            return json.dumps([{"id": p, "intent": 50, "remark": "ok"} for p in ids if not (t and p == "u0")])
+        r = roundtable_strategy(personas(3), SCEN, llm=FakeLLM(resp), rounds=2, B=20)
+        self.assertTrue(any(w.startswith("Story: 1 personas did not answer") for w in r["warnings"]))
+        with self.assertWarns(UserWarning):
+            roundtable_strategy(personas(3), SCEN, llm=FakeLLM(responder), rounds=1, control="Kontrol", B=20)
 
 
 class TestPrintEvents(unittest.TestCase):

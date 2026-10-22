@@ -11,7 +11,10 @@ the distribution closer to the real survey; round 0 is the independent measureme
 Strategy comparison at the table: `roundtable_strategy` runs one roundtable per condition on the same panel
 (condition fields hidden from the prompt) and returns condition x round x segment means, the paired effect of
 each condition vs the control table, and the paired round-0 vs last-round shift with bootstrap CIs.
+Not re-exported from `simengine.sim` yet; import from here (and the printer from `_stats`):
 
+    from simengine.sim.roundtable import roundtable_strategy, roundtable_strategy_frame
+    from simengine.sim._stats import print_events
     r = roundtable_strategy(personas, {"Control": "...", "Discount": "...", "Story": "..."}, llm=llm, rounds=3,
                             on_event=print_events)
     r["effects"]        # [{condition, round, segment, effect, low, high, n}] vs the Control table
@@ -20,6 +23,7 @@ each condition vs the control table, and the paired round-0 vs last-round shift 
 """
 from __future__ import annotations
 
+import warnings as _warnings
 from typing import Any, Iterable
 
 import numpy as np
@@ -27,7 +31,7 @@ import pandas as pd
 
 from ._stats import ALL, Emitter, bootstrap_ci, pick_quotes, summary_stats, to_jsonable, to_number
 from .panel import Usage, ask_panel
-from .personas import as_persona, as_personas, choose_lang
+from .personas import PersonaView, as_persona, as_personas, choose_lang
 from .strategy import _scenarios
 
 DEFAULT_QUESTION = {"en": "How likely are you to buy / sign up / adopt this (0 = certainly not, 100 = certainly yes)?",
@@ -189,28 +193,38 @@ _TRAIT_KEYS = ("label", "key", "name", "field")
 
 
 def _prune(x: Any, fields: set) -> Any:
-    """Drop keys named in `fields` at any depth; drop list items that are {label|key|name: <field>} dicts."""
+    """Drop keys named in `fields` (lower case; matched case-insensitively) at any depth; drop list items that
+    are {label|key|name|field: <field>} dicts."""
     if isinstance(x, dict):
-        return {k: _prune(v, fields) for k, v in x.items() if k not in fields}
+        return {k: _prune(v, fields) for k, v in x.items() if str(k).lower() not in fields}
     if isinstance(x, list):
         return [_prune(v, fields) for v in x
-                if not (isinstance(v, dict) and any(v.get(k) in fields for k in _TRAIT_KEYS))]
+                if not (isinstance(v, dict) and any(str(v.get(k)).lower() in fields for k in _TRAIT_KEYS
+                                                    if v.get(k) is not None))]
     return x
 
 
 def hide_persona_fields(personas: Iterable[Any], fields: Iterable[str] = ("condition",)) -> list:
     """Persona-like items -> PersonaViews whose prompt text no longer shows `fields` (dict keys at any depth,
-    traits with that label). Id, segment and source are kept from the original item."""
-    fields = set(fields or ())
-    out = []
+    traits with that label, case-insensitive). Id, segment and source are kept from the original item. A
+    PersonaView is rebuilt from its dict / to_dict() source; a field still visible in the text afterwards (plain
+    strings, text-only objects, a field written into free text) gives a warning."""
+    fields = {str(f).lower() for f in (fields or ())}
+    out, left = [], set()
     for i, x in enumerate(personas):
         v = as_persona(x, i)
-        d = x if isinstance(x, dict) else (x.to_dict() if hasattr(x, "to_dict") and callable(x.to_dict) else None)
+        src = x.source if isinstance(x, PersonaView) else x
+        d = src if isinstance(src, dict) else (src.to_dict() if callable(getattr(src, "to_dict", None)) else None)
         if fields and isinstance(d, dict):
             h = as_persona(_prune(d, fields), i)
             h.pid, h.segment, h.source = v.pid, v.segment, v.source
             v = h
+        low = v.text().lower()
+        left |= {f for f in fields if f"{f}:" in low or f"{f}=" in low}
         out.append(v)
+    if left:
+        _warnings.warn(f"persona text still shows {sorted(left)} after hide_fields (free text or a persona without a "
+                       "dict form); remove it before the run", stacklevel=2)
     return out
 
 
@@ -254,6 +268,7 @@ def roundtable_strategy(personas, scenarios, *, llm, control: str | None = "Cont
     warnings = []
     if control is not None and control not in ids:
         warnings.append(f"control {control!r} is not a condition; no effect table")
+        _warnings.warn(warnings[-1] + f" (conditions: {ids})", stacklevel=2)
     ctrl = control if control in ids else None
 
     runs = {}
@@ -263,6 +278,12 @@ def roundtable_strategy(personas, scenarios, *, llm, control: str | None = "Cont
                                    **roundtable_kw)
     last = n_rounds - 1
     iv = {c: [_intents(runs[c], t) for t in range(n_rounds)] for c in ids}
+    for c in ids:       # surface per-table problems (the herding note is repeated once below)
+        warnings += [f"{c}: {w}" for w in runs[c].get("warnings", []) if "herding" not in w]
+        carried = [p for p, a in ((runs[c].get("answers") or {}).get(str(last)) or {}).items() if a.get("carried")]
+        if carried and n_rounds > 1:
+            warnings.append(f"{c}: {len(carried)} personas did not answer the last round; their earlier answer "
+                            "is carried into shift / effects")
 
     table = [{"condition": c, "round": t, "segment": g, **summary_stats([iv[c][t].get(p) for p in gp])}
              for c in ids for t in range(n_rounds) for g, gp in groups.items()]
@@ -297,7 +318,8 @@ def roundtable_strategy(personas, scenarios, *, llm, control: str | None = "Cont
            "control": ctrl, "rounds": n_rounds, "scope": runs[ids[0]]["scope"], "n_personas": len(pids),
            "segments": seg, "hidden_fields": sorted(set(hide_fields or ())), "table": table, "effects": effects,
            "shift": shift, "ranking": {"round0": rank(0), "last": rank(last)}, "runs": runs,
-           "warnings": warnings + ["each condition is a separate table; round 0 is the independent measurement"],
+           "warnings": warnings + ["each condition is a separate table; round 0 is the independent measurement; a "
+                                   "falling sd across rounds can be herding"],
            "usage": usage}
     em.done(n=len(ids))
     return to_jsonable(out)
