@@ -84,8 +84,16 @@ def tavan_asimi(nokta, tekrar, yontemler, metrik):
                if asan else "hiçbir yöntem test-retest tavanını anlamlı aşmıyor"), len(asan))
 
 
-def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5):
+def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5, bernoulli_esik: float = 0.05):
+    """Homojenleşme / aşırı yayılım. İkili olasılık tahmininde sd 0/1 gerçeğinkiyle kıyaslanmaz: sd(p) / √(p̄(1−p̄))
+    yalnız neredeyse sabit tahmini (< bernoulli_esik) uyarır. Dağılımda entropi ve ayrışma oranları ayrıntıya eklenir."""
     y = yayilim.get(sutun)
+    if y and y.get("sd_bernoulli") is not None:
+        o = y["sd_bernoulli"]
+        return _k("dağılım çöküşü (Bernoulli sd oranı)", "uyari" if o < bernoulli_esik else "tamam",
+                  f"{sutun}: olasılık tahmini, sd(p) / √(p̄(1−p̄)) = {_f(o, 2)} "
+                  f"[{_f(y.get('sd_bernoulli_alt'), 2)}, {_f(y.get('sd_bernoulli_ust'), 2)}]; 0/1 gerçeğin sd'siyle kıyas "
+                  f"uygulanamaz (0 = sabit tahmin, 1 = kesin 0/1); <{_f(bernoulli_esik, 2)} neredeyse sabit tahmin", o)
     if not y or y.get("sd_orani") is None:
         if y and y.get("entropi_orani") is not None:
             e = y["entropi_orani"]
@@ -93,16 +101,47 @@ def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5):
                       f"entropi oranı {_f(e, 2)} (1 = insan kadar çeşitli)", e)
         return _k("dağılım çöküşü (sd oranı)", "atlandi", "hesaplanamadı")
     o = y["sd_orani"]
+    ek = ""
+    if y.get("entropi_olcut"):   # dağılım: entropi (ortalamaların oranı) ve hücreler arası ayrışma
+        ek = (f" · entropi oranı (ortalamaların oranı) {_f(y.get('entropi_orani'), 2)} "
+              f"[{_f(y.get('entropi_orani_alt'), 2)}, {_f(y.get('entropi_orani_ust'), 2)}]")
+        if y.get("ayrisma_orani") is not None:
+            ek += (f" · gruplar arası ayrışma oranı {_f(y['ayrisma_orani'], 2)} "
+                   f"[{_f(y.get('ayrisma_orani_alt'), 2)}, {_f(y.get('ayrisma_orani_ust'), 2)}]")
     # iki yönlü: <esik homojenleşme (LLM'in bilinen hastalığı), >ust aşırı yayılım (gürültüyü kişiye özgü sinyal sanmak)
     return _k("dağılım çöküşü (sd oranı)", "uyari" if o < esik or o > ust else "tamam",
               f"{sutun}: sd oranı {_f(o, 2)} [{_f(y.get('sd_orani_alt'), 2)}, {_f(y.get('sd_orani_ust'), 2)}]; "
-              f"<{esik:.1f} homojenleşme, >{ust:.1f} aşırı yayılım", o)
+              f"<{esik:.1f} homojenleşme, >{ust:.1f} aşırı yayılım" + ek, o)
 
 
-def dengesizlik(veri):
+# eşik 0,5'te etiketten okunan, sınıf payına duyarlı metrikler (kappa / dengeli doğruluk düzeltmeli)
+DOGRULUK_TURU = ("dogruluk", "macro_f1")
+
+
+def _ikili_olasilik(veri) -> bool:
+    for y_ in veri.yontemler:
+        p = pd.to_numeric(veri.df.get("tahmin_" + y_), errors="coerce").to_numpy(float)
+        p = p[np.isfinite(p)]
+        if len(p) and ((p > 0) & (p < 1)).any():
+            return True
+    return False
+
+
+def dengesizlik(veri, birincil: str | None = None):
+    """Sınıf dengesizliği uyarısı yalnız doğruluk türü metrik söz konusuyken. birincil verilirse: doğruluk/F1 değilse
+    'tamam' notu. Verilmezse ikili olasılık tahmininde 'tamam' notu (AUC, Brier, logloss, ECE sınıf payından
+    yanıltılmaz); etiket tahmininde ve çok sınıflıda en sık sınıf > %70 uyarı."""
     if veri.gorev not in ("ikili", "cok_sinif"):
         return None
     pay = veri.df["gercek"].astype(str).value_counts(normalize=True).iloc[0]
+    tablo = "; tablodaki doğruluk ve F1 (eşik 0,5) için kappa ve dengeli doğruluğa bak" if pay > 0.7 else ""
+    if birincil is not None and birincil not in DOGRULUK_TURU:
+        return _k("sınıf dengesizliği", "tamam",
+                  f"en sık sınıf payı %{100 * pay:.1f}; birincil metrik {birincil} doğruluk türü değil" + tablo, float(pay))
+    if birincil is None and veri.gorev == "ikili" and _ikili_olasilik(veri):
+        return _k("sınıf dengesizliği", "tamam",
+                  f"en sık sınıf payı %{100 * pay:.1f}; olasılık tahmini: AUC / Brier / logloss / ECE sınıf payından "
+                  "yanıltılmaz" + tablo, float(pay))
     return _k("sınıf dengesizliği", "uyari" if pay > 0.7 else "tamam",
               f"en sık sınıf payı %{100 * pay:.1f}" + ("; doğruluk yanıltıcı olabilir, kappa ve dengeli doğruluğa bak" if pay > 0.7 else ""),
               float(pay))

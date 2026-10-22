@@ -1,4 +1,14 @@
-"""Segment hatası, yanlılık, segment farkını yakalama, dağılım yayılımı (homojenleşme) ve örnekler."""
+"""Segment hatası, yanlılık, segment farkını yakalama, dağılım yayılımı (homojenleşme) ve örnekler.
+
+Yayılım (yayilim) ölçütleri, görev başına:
+    sürekli / ikili etiket   sd oranı = sd(tahmin) / sd(gerçek), madde içinde havuzlanır
+    ikili olasılık           sd(p) / √(p̄(1−p̄)) (Bernoulli sd'si; 0 = sabit tahmin, 1 = kesin 0/1): sd_bernoulli.
+                             0/1 gerçeğin sd'siyle kıyas anlamsız, sd_orani boş (uygulanamaz)
+    dağılım                  sd oranı (hücre içi şık yayılımı), entropi oranı = ort. H(tahmin) / ort. H(gerçek)
+                             (ortalamaların oranı; hücre başına oran H(gerçek) ≈ 0'da patlar), ayrışma oranı =
+                             madde içinde hücreler arası E[konum] sd'si, tahmin / gerçek; hepsi küme GA'lı
+    yayilim(veri, {"tahmin_x": (y, p, None)}, B=200, tohum=0)["tahmin_x"]["entropi_orani"]
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -150,15 +160,22 @@ def _guvenli(m, y, p, madde):
 
 
 # ------------------------------------------------------------------ yayılım
-def _yayilim_bir(veri, y, p, satir=None):
-    """Havuzlanmış sd oranı, entropi oranı, w1 (madde içinde)."""
+def olasilik_tahmini(p) -> bool:
+    """İkili tahmin olasılık mı (0/1 dışında sonlu değer var mı)."""
+    p = np.asarray(p, float)
+    p = p[np.isfinite(p)]
+    return bool(len(p) and ((p > 0) & (p < 1)).any())
+
+
+def _yayilim_bir(veri, y, p, satir=None, bernoulli: bool = False):
+    """Havuzlanmış sd oranı, entropi oranı (madde içinde). bernoulli=True (ikili olasılık): sd(p) / √(p̄(1−p̄))."""
     g, d = veri.gorev, veri.df
     madde = d["madde"].to_numpy() if "madde" in d else np.zeros(len(d), int)
     if satir is not None:
         y, p, madde = y[satir], p[satir], madde[satir]
     kod = pd.factorize(madde)[0]
     if g in ("surekli", "ikili"):
-        if g == "ikili":
+        if g == "ikili" and not bernoulli:
             p = (p > 0.5).astype(float)
         say = np.bincount(kod)
 
@@ -166,6 +183,9 @@ def _yayilim_bir(veri, y, p, satir=None):
             m = np.bincount(kod, x) / say
             return np.bincount(kod, (x - m[kod]) ** 2) / say
         vy, vp = var(y.astype(float)), var(p.astype(float))
+        if bernoulli:
+            pb = np.bincount(kod, p.astype(float)) / say
+            vy = pb * (1 - pb)
         oran = float(np.sqrt(vp.sum() / max(vy.sum(), 1e-12)))
         ent = None
         if g == "ikili":
@@ -187,32 +207,76 @@ def _yayilim_bir(veri, y, p, satir=None):
     if g == "dagilim":
         sy = np.array([_sd(v) for v in y]) ** 2
         sp = np.array([_sd(v) for v in p]) ** 2
-        hy = np.array([_entropi(v) for v in y])
-        hp = np.array([_entropi(v) for v in p])
-        return float(np.sqrt(sp.sum() / max(sy.sum(), 1e-12))), float(hp.sum() / max(hy.sum(), 1e-12))
+        return float(np.sqrt(sp.sum() / max(sy.sum(), 1e-12))), _oran_ort(_entropiler(p), _entropiler(y))
     return None, None
 
 
+def _entropiler(vs) -> np.ndarray:
+    return np.array([_entropi(v) for v in vs], float)
+
+
+def _oran_ort(pay, payda) -> float:
+    """Ortalamaların oranı (hücre başına oranların ortalaması değil: payda ≈ 0 hücrelerde patlamaz)."""
+    return float(np.mean(pay) / max(np.mean(payda), 1e-12)) if len(pay) else np.nan
+
+
+def _ayrisma(beklenen_p, beklenen_y, kod, satir=None) -> float | None:
+    """Madde içinde hücreler (gruplar) arası E[konum] sd'si, tahmin / gerçek (havuzlanmış; ≥2 hücreli maddeler)."""
+    if satir is not None:
+        beklenen_p, beklenen_y, kod = beklenen_p[satir], beklenen_y[satir], kod[satir]
+    kod = pd.factorize(kod)[0]
+    say = np.bincount(kod)
+    if not (say >= 2).any():
+        return None
+
+    def var(x):
+        m = np.bincount(kod, x) / say
+        return np.bincount(kod, (x - m[kod]) ** 2)
+    vy = var(beklenen_y)
+    return float(np.sqrt(var(beklenen_p).sum() / vy.sum())) if vy.sum() > 1e-12 else None
+
+
 def yayilim(veri, sutun_dizileri: dict, B: int, tohum: int) -> dict:
+    """Sütun başına yayılım ölçütleri (bkz. modül notu). Anahtarlar: sd_orani(+_alt/_ust), sd_olcut,
+    entropi_orani, w1; ikili olasılıkta sd_bernoulli(+_alt/_ust); dağılımda entropi_orani_alt/_ust, ayrisma_orani."""
     if veri.gorev == "ab":
         return {}
     out = {}
     orn = Orneklem(veri.kume, B=B, B_toplu=min(B, 100), tohum=tohum, iki_yon=veri.iki_yon)
+    madde = veri.df["madde"].to_numpy() if "madde" in veri.df else np.zeros(len(veri.df), int)
     for sutun, (y, p, maske) in sutun_dizileri.items():
         if maske is not None:
             continue
-        oran, ent = _yayilim_bir(veri, y, p)
+        bern = veri.gorev == "ikili" and olasilik_tahmini(p)
+        oran, ent = _yayilim_bir(veri, y, p, bernoulli=bern)
         tek = []
         if oran is not None:
             for b in range(orn.B_toplu):
                 ii, _ = orn.satirlar(b)
-                tek.append(_yayilim_bir(veri, y, p, ii)[0])
+                tek.append(_yayilim_bir(veri, y, p, ii, bernoulli=bern)[0])
         a, u = ga(np.array(tek)) if tek else (None, None)
         w1 = None
         if veri.gorev == "surekli":
-            madde = veri.df["madde"].to_numpy() if "madde" in veri.df else np.zeros(len(y))
             w1 = float(np.mean([wasserstein_distance(y[i], p[i]) for i in pd.Series(madde).groupby(madde).indices.values()]))
+        if bern:   # 0/1 gerçeğin sd'siyle kıyas uygulanamaz: Bernoulli sd'sine oran ayrı anahtarda
+            out[sutun] = {"sd_orani": None, "sd_orani_alt": None, "sd_orani_ust": None, "sd_olcut": "bernoulli",
+                          "sd_bernoulli": oran, "sd_bernoulli_alt": a, "sd_bernoulli_ust": u,
+                          "entropi_orani": ent, "w1": w1}
+            continue
         out[sutun] = {"sd_orani": oran, "sd_orani_alt": a, "sd_orani_ust": u, "entropi_orani": ent, "w1": w1}
+        if veri.gorev == "dagilim":
+            hy, hp = _entropiler(y), _entropiler(p)
+            ey, ep = np.array([_beklenen(v) for v in y]), np.array([_beklenen(v) for v in p])
+            te, ta = [], []
+            for b in range(orn.B_toplu):
+                ii, _ = orn.satirlar(b)
+                te.append(_oran_ort(hp[ii], hy[ii]))
+                ta.append(_ayrisma(ep, ey, madde, ii))
+            ea, eu = ga(np.array(te, float))
+            ayr = _ayrisma(ep, ey, madde)
+            aa, au = ga(np.array([np.nan if v is None else v for v in ta], float)) if ayr is not None else (None, None)
+            out[sutun].update({"entropi_olcut": "ortalamalarin_orani", "entropi_orani_alt": ea, "entropi_orani_ust": eu,
+                               "ayrisma_orani": ayr, "ayrisma_orani_alt": aa, "ayrisma_orani_ust": au})
     return out
 
 
