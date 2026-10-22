@@ -323,7 +323,7 @@ class Sugarscape:
         n = len(w)
         top = np.sort(w)[::-1][:max(1, n // 10)].sum() / w.sum() if n and w.sum() > 0 else np.nan
         row = dict(step=self.step_no, population=n, mean_wealth=float(w.mean()) if n else np.nan, gini=gini(w),
-                   skew=_skew(w), top10_share=float(top), starved=ev.get("starved", 0), aged=ev.get("aged", 0),
+                   skewness=_skew(w), top10_share=float(top), starved=ev.get("starved", 0), aged=ev.get("aged", 0),
                    births=ev.get("births", 0), conflicts=ev.get("conflicts", 0),
                    mean_vision=float(self.vision[self.alive].mean()) if n else np.nan,
                    mean_metabolism=float(self.metab[self.alive].mean()) if n else np.nan)
