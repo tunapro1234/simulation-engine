@@ -54,7 +54,8 @@ def cpc_distribution(H: float, pH: float, L: float, shape: Any = "-", num: int =
 
     With probability pH the option pays a lottery with expected value H, otherwise L. shape '-' (num 1): the lottery
     is H itself. 'Symm': num outcomes H - k/2 + i, Binomial(k = num - 1, 0.5) weights. 'R-skew' / 'L-skew':
-    outcomes H + c +- 2^i with weights 2^-i (i = 1..num, last weight doubled), c = -1 - num / 1 + num."""
+    outcomes H + c + 2^i (R-skew, c = -1 - num) or H + c - 2^i (L-skew, c = 1 + num) with weights 2^-i (i = 1..num,
+    last weight doubled). Equal outcomes are merged (the organisers keep a duplicate row when H == L)."""
     shape = SHAPES.get(shape, shape)
     num = int(num)
     if shape == "-" or num <= 1:
@@ -493,18 +494,24 @@ class Choices13k(_RiskyChoice):
         elif subset != "all":
             raise ValueError("subset must be 'peterson' or 'all'")
         sel = sel.reset_index(drop=True)
-        sel["problem"] = sel["row"]  # Problem ids repeat across feedback conditions; the row is the unit
+        # the row is the unit; the split and the bootstrap cluster on Problem (one gamble pair), which repeats across
+        # the two feedback conditions in subset 'all' (1,562 pairs). 'peterson' has one row per Problem, so splitting
+        # unique Problems in row order gives the same test set as splitting rows.
+        sel["problem"] = sel["Problem"].astype(int)
         sel["block"] = sel["Block"].astype(int)
         sel["y"] = sel["bRate"].astype(float)
         sel["se2"] = sel["bRate_std"].astype(float) ** 2 / sel["n"]
         seed, ts = int(self.options.get("seed", 0)), float(self.options.get("test_size", 0.1))
-        perm = np.random.default_rng(seed).permutation(len(sel))
-        n_te = int(round(ts * len(sel)))
-        te, tr = sel.iloc[np.sort(perm[:n_te])], sel.iloc[np.sort(perm[n_te:])]
+        ids = sel["problem"].unique()
+        perm = np.random.default_rng(seed).permutation(len(ids))
+        n_te = int(round(ts * len(ids)))
+        is_te = sel["problem"].isin(ids[perm[:n_te]]).to_numpy()
+        te, tr = sel[is_te], sel[~is_te]
         frac = float(self.options.get("train_frac", 1.0))
         if frac < 1:
             tr = tr.sample(frac=frac, random_state=seed)
-        meta = {"split": f"random {1 - ts:.0%}/{ts:.0%} of {len(sel)} problems, default_rng({seed}).permutation"
+        meta = {"split": f"random {1 - ts:.0%}/{ts:.0%} of {len(ids)} problems ({len(sel)} rows), "
+                         f"default_rng({seed}).permutation of unique Problem ids"
                          + (f"; train subsample {frac}" if frac < 1 else ""),
                 "subset": subset, "n_train": len(tr), "n_test": len(te),
                 "source": "choices13k (Peterson et al. 2021); no licence file in the repository"}
