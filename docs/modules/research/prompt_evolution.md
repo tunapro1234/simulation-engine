@@ -62,9 +62,39 @@ res.best.text; res.validation; res.test["winner"]; res.test_diff["winner-seed0"]
 - **`toy_problem(...)`** is an offline synthetic task: (units, score_fn, keywords, FakeLLM responder). It is used
   by the tests and the measurement below.
 
-## Measured numbers
+## Measured numbers (offline toy only)
 
-See the next commit.
+This is not evidence that any method improves a real prompt. The optimizer is the `toy_problem` FakeLLM responder.
+It adds, drops or swaps one keyword of the last text listed in the prompt (for APE: the most frequent demonstration
+outputs). The scorer is synthetic: 12 keywords with Zipf-like frequencies, a cap of 4 keywords per text and 5% label
+noise. The numbers check that the pipeline works (budget accounting, selection, the single test pass, CIs). They do
+not measure LLM optimisation quality. No real LLM was called.
+
+Command, from the repo root (script kept outside the repo; it calls `evolve` per arm with
+`baselines={"seed": "use kw05", "oracle": "use kw00 kw01 kw02 kw03"}`):
+`PYTHONPATH=. nice -n 19 python measure.py` (5 seeds, 300 units, 150/75/75 split). The means over 5 seeds:
+
+| arm | optimizer calls | train unit evals | winner train | winner val | winner test | seed test | oracle test | winner beats seed (Bonferroni CI), of 5 |
+|---|---|---|---|---|---|---|---|---|
+| opro (10 steps x 8) | 80 | 5460 | 0.627 | 0.621 | 0.579 | 0.091 | 0.611 | 5 |
+| opro, `show_scores=False` | 80 | 5460 | 0.627 | 0.621 | 0.579 | 0.091 | 0.611 | 5 |
+| ape (50 candidates) | 50 | 1534 | 0.587 | 0.621 | 0.573 | 0.091 | 0.611 | 5 |
+| ape, 2 resample rounds | 74.8 | 1926 | 0.619 | 0.608 | 0.600 | 0.091 | 0.611 | 5 |
+| promptbreeder (pop 10, 8 gen) | 59.6 | 4410 | 0.609 | 0.613 | 0.576 | 0.091 | 0.611 | 5 |
+
+Each arm took under 0.3 s on the AWS box. The two OPRO rows are identical because the toy responder never reads
+scores, so this ablation only checks the wiring. On a real LLM it is the paper's "no scores" ablation. On this toy
+every winner ends 0.01-0.04 below the oracle text on test, and validation runs above test by about 0.01-0.05.
+
+Literature numbers, not reproduced here (source: the papers):
+
+- OPRO reports training accuracy 5-20% above test accuracy on BBH (arXiv:2309.03409 §5.4).
+- OPRO's Table 4 headline numbers come from the instruction with the highest *test* accuracy.
+- APE reports that iterative resampling gives only marginal gains and uses plain APE by default (arXiv:2211.01910
+  §3.3).
+
+This module selects on validation and reads test once, so its test numbers are not comparable with test-selected
+headline numbers.
 
 ## Limitations
 
