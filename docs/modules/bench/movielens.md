@@ -151,8 +151,9 @@ parsed to a number, framed and scored.
 
 ## Measured numbers
 
-These are from runs on the local MovieLens-1M copy (22 Oct 2026, `nice -n 19`, `OMP_NUM_THREADS=4`). Every value is shown as `value [95% CI]`, n = 6,040 users. Command (Python, from the repository
-root):
+These are from runs on the local MovieLens-1M copy (22 Oct 2026, after the review changes to the tie order and the
+item-kNN neighbour count; `nice -n 19`, `OMP_NUM_THREADS=4`). Every value is shown as `value [95% CI]`, n = 6,040
+users, B = 1000. Command (Python, from the repository root):
 
 ```python
 from simengine.bench.tasks import movielens as ml
@@ -165,33 +166,46 @@ for target in ("rating", "next_item"):
             print(name, ml.full_ranking(data, task.scorer(data, name)))
 ```
 
-**Rating, test split** (202,451 test ratings; about 7 s end to end, 1.0 GB peak RSS):
+All four target × split runs plus full ranking took 34 s together, 1.1 GB peak RSS.
+
+**Rating, test split** (797,758 train / 202,451 test ratings):
 
 | baseline | RMSE | MAE |
 |---|---|---|
-| global_mean | 1.1464 [1.1332, 1.1600] | 0.9438 [0.9331, 0.9542] |
-| user_mean | 1.0743 [1.0641, 1.0848] | 0.8491 [0.8403, 0.8580] |
-| item_mean | 0.9897 [0.9785, 1.0006] | 0.7871 [0.7784, 0.7960] |
-| bias | 0.9210 [0.9119, 0.9300] | 0.7239 [0.7167, 0.7309] |
-| item_knn | **0.8827** [0.8747, 0.8902] | **0.6894** [0.6828, 0.6958] |
+| global_mean | 1.1464 [1.1333, 1.1598] | 0.9439 [0.9330, 0.9542] |
+| user_mean | 1.0742 [1.0641, 1.0846] | 0.8490 [0.8402, 0.8580] |
+| item_mean | 0.9894 [0.9784, 1.0003] | 0.7871 [0.7785, 0.7957] |
+| bias | 0.9209 [0.9116, 0.9298] | 0.7238 [0.7166, 0.7306] |
+| item_knn | **0.8825** [0.8744, 0.8899] | **0.6893** [0.6827, 0.6956] |
 
-Dev split with the final defaults (162,035 dev ratings): global_mean 1.1198, user_mean 1.0463, item_mean 0.9847,
-bias 0.9126 [0.9035, 0.9218], item_knn 0.8797 [0.8710, 0.8884].
+Dev split with the final defaults (162,035 dev ratings): global_mean 1.1200, user_mean 1.0463, item_mean 0.9854,
+bias 0.9129 [0.9039, 0.9224], item_knn 0.8800 [0.8716, 0.8889].
 
-**Next item, test split** (100 candidates; about 12 s, 0.9 GB peak RSS):
+**Next item, test split** (100 candidates):
 
-| baseline | hit@10 sampled (100 cand.) | NDCG@10 sampled | hit@10 full ranking (3,704 movies) | NDCG@10 full |
+| baseline | hit@10 sampled (100 cand.) | NDCG@10 sampled | hit@10 full ranking (3,703 movies) | NDCG@10 full |
 |---|---|---|---|---|
-| random | 0.0990 [0.0917, 0.1066] | 0.0448 [0.0412, 0.0484] | 0.0038 [0.0025, 0.0055] | 0.0021 [0.0012, 0.0032] |
-| popularity | 0.4392 [0.4271, 0.4522] | 0.2400 [0.2322, 0.2480] | 0.0353 [0.0311, 0.0401] | 0.0174 [0.0151, 0.0202] |
-| item_knn | **0.6561** [0.6447, 0.6681] | **0.3825** [0.3742, 0.3909] | **0.0715** [0.0656, 0.0785] | **0.0359** [0.0323, 0.0398] |
+| random | 0.0982 [0.0907, 0.1060] | 0.0452 [0.0416, 0.0491] | 0.0017 [0.0007, 0.0028] | 0.0007 [0.0003, 0.0013] |
+| popularity | 0.4551 [0.4422, 0.4680] | 0.2531 [0.2453, 0.2613] | 0.0412 [0.0369, 0.0462] | 0.0206 [0.0182, 0.0235] |
+| item_knn | **0.6689** [0.6569, 0.6811] | **0.3967** [0.3885, 0.4057] | **0.0805** [0.0738, 0.0873] | **0.0404** [0.0368, 0.0444] |
 
-Dev split with the final defaults (sampled hit@10): random 0.0960, popularity 0.4592 [0.4469, 0.4714], item_knn
-0.6839 [0.6720, 0.6960]. The dev split was used to choose `next_k`, so it is optimistic for item_knn.
+Dev split with the final defaults (sampled hit@10): random 0.1000, popularity 0.4570 [0.4440, 0.4696], item_knn
+0.6820 [0.6705, 0.6936]. The dev split was used to choose `next_k`, so it is optimistic for item_knn.
 
-The random row matches its expected values (hit@10 = 0.1 sampled, 10 / 3,704 ≈ 0.0027 full) within its CI. The
-order of the three baselines is the same under both protocols here. The absolute level is not: item_knn finds the
-next movie in its top 10 in 66% of users against 100 sampled candidates, but in 7% against the full catalogue.
+The sampled random row matches its expected value (0.1). The full-ranking random row is a single draw. Its
+expectation is 0.0028 at most (mean of 10 / unrated movies per user, less for the targets missing from train), at
+the upper end of its CI. The order of the three baselines is the same under both protocols here. The absolute
+level is not: item_knn finds the next movie in its top 10 for 67% of users against 100 sampled candidates, but for
+8% against the full catalogue.
+
+For reference, Kang & McAuley (SASRec, ICDM 2018, arXiv:1808.09781, Table III) report PopRec hit@10 0.4329 and
+NDCG@10 0.2377 on ML-1M. Their protocol has the same shape: leave-last-out, with the target ranked among 100
+randomly sampled negatives, so 101 items where this task uses 100. Their preprocessing differs too, so the numbers
+are close but not directly comparable.
+
+Before the review the split broke same-second ties by movie id and the rating item-kNN kept every neighbour tied
+with the k-th. Those runs gave rating RMSE bias 0.9210 / item_knn 0.8827 and next-item sampled hit@10 popularity
+0.4392 / item_knn 0.6561 (full ranking 0.0353 / 0.0715); they are superseded by the tables above.
 
 ## Limitations
 
