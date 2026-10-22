@@ -682,13 +682,14 @@ ev.seal("teslim/tahmin.csv", "final", registry="teslim/onkayit")      # records 
 
 ## 'Why' recognition and person-level distribution bootstrap (G6 #1, G5 #3)
 
-**`why_match(generated, candidates, truth_idx, *, encoder="tfidf", ids=None, seed=0)`** (`why.py`) asks whether a
+**`why_match(generated, candidates, truth_idx, *, encoder="tfidf", ids=None, groups=None, seed=0)`** (`why.py`) asks whether a
 generated reason is closer to the person's own real reason than to other people's. One row per unit; `candidates[i]`
 holds N real reasons, `truth_idx[i]` marks the person's own (one int is accepted, but shuffle positions). Each arm
 "chooses" the most similar candidate (cosine); ties are broken at random with `seed` and the reciprocal rank averages
 over tied positions, so an empty text scores chance rather than candidate 0. Output is an EvalFrame: `truth`,
-`pred_<arm>` (chosen index), `rr_<arm>`, `n_candidates`, `chance` (1/N), `unit`/`group` from `ids` (pass person ids
-when a person has several rows). Chance: accuracy 1/N, MRR H_N/N.
+`pred_<arm>` (chosen index), `rr_<arm>`, `n_candidates`, `chance` (1/N), `unit` from `ids` (repeats get a `#k`
+suffix) and `group` from `groups` (default `ids`; pass person ids when a person has several rows). Chance: accuracy
+1/N, MRR H_N/N. A constant `truth_idx` over 10+ rows warns: evaluate's majority baseline would then score 1.0.
 ```python
 f = ev.why_match({"persona": gen_p, "no_persona": gen_0, "swap": gen_s}, candidates, truth_idx, ids=person_ids)
 rep = ev.evaluate(f, task="multiclass", primary="accuracy", ours="persona", raw="no_persona")
@@ -700,7 +701,9 @@ product and rating fixed leaves only reason content, so a text cannot win by gue
 Draw and seal the candidate sets (with truth positions) before generating. The default encoder is word 1-2 gram +
 char_wb 2-5 gram TF-IDF fit on the candidate texts, in pure numpy with sklearn-compatible defaults (`TfidfEncoder`;
 fit it on a larger corpus and pass it as `encoder=` if wanted). `encoder="bge"` is not built in: pass an embedding
-callable.
+callable. TF-IDF rewards shared wording (a person's own vocabulary and style) as much as the reason itself, so
+report an embedding row next to it before reading a win as "the reason is right"; it has no stop-word list and
+no language-specific tokenizer (char n-grams carry Turkish suffixes).
 
 **`evaluate_distribution_persons(person_frame, segment_cols, items, pred_cols, *, B=1000, seed=0, metric="1-tvd",
 id_col="unit", options=None, hold_truth=False, alpha=0.05, min_n=1, pairs=None)`** (`persons.py`) scores segment x
@@ -710,7 +713,9 @@ item. The bootstrap draws people with replacement (clustered on `id_col`), rebui
 person-level arm from the same draw (paired across arms) and scores the mean metric over cells. Arms are fixed cell
 tables (`{(scheme, segment, item): vector}` or a DataFrame `scheme?, segment, item, pred|pred_<arm>`, e.g.
 `sim.distribution_frame`) or person-level columns `{item: column}` (probability vector or label per person).
-Metrics: `1-tvd`, `tvd`, `1-w1`, `w1`, or a callable.
+Metrics: `1-tvd`, `tvd`, `1-w1`, `w1`, or a callable (higher is better). Default option order is the observed
+answers, numeric when they are numbers; `w1` warns on alphabetical labels, pass `options={item: [ordered]}`. 3000
+people x 120 cells x B=1000 runs in ~2 s.
 
 1-TVD between a small segment's empirical distribution and any prediction is biased down, and the bootstrap repeats
 the noise, so the percentile CI sits below the point and can exclude it (the G5 rehearsal saw this). Each arm and each
