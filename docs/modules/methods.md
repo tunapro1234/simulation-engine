@@ -21,7 +21,7 @@ that combine an LLM prediction with a model learned from data.
 | `TfidfBinary`, `target_encode` | one text per row -> P(y=1): word 1-2 + char_wb 3-5 TF-IDF (+ extra / target-encoded columns) logistic with in-train C choice; smoothed OOF mean encoding | G4 rehearsal (first search query -> purchase, 30,365 training sessions) test AUC **0.666** [0.617, 0.714]; 500 sessions 0.579 |
 | `rct_effects`, `rct_transfer` | RCT condition (x segment) effects vs control within blocks, averaged over blocks, with SE; "same test in another market" transfer baseline | G1 rehearsal (11 messages, 32 -> 31 countries) transfer Spearman **0.845** [0.43, 1.00], noise ceiling 0.908; one country alone median 0.28 |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
-| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature` | multi-series demand forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon, rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
+| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature`; `forecast.panel_from_long`, `forecast.extrapolation_check` | multi-series forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon (level, log-ratio or logit-with-ceiling target; origin-time features), rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls, long `id, time, variable, value` table -> panel, extrapolation warning | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 | `wave_persistence`, `pooled_shrunk`, `same_regime`, `subgroup_mixture`, `mixture_reweight`, `role_swap`, `transition_backtest`, `merge_frames` (`waves.py`) | repeated surveys: past waves -> next wave's segment x question distributions; last-wave copy, k-wave pool shrunk to the population, same-regime pool, party-ID mixture with role swap across a regime switch, per-year backtest over past switch years | D6 rehearsal (yearly opinion survey, D -> R president, one run): copying last year 0.1315 test TVD (approval 0.295), role-mirror baseline 0.0839, team 0.0788; on dev the same-regime 4-wave pool beat the preregistered method, 0.0990 vs 0.1007 |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
@@ -767,6 +767,51 @@ Cautions:
 - `seasonal_naive` was the worst rung on M5 weekly data (0.600). It wins only where the season really repeats
   (the synthetic test).
 
+
+### Growth and saturating targets, origin-time features [prova-d7]
+
+The D7 task was adoption per 100 people for 361 country x technology series from a fixed 1997 origin, 1-5
+years ahead. A level-target tree cannot predict past the levels it was trained on (dev 1.776 MAE, behind a
+constant-growth rule at 1.731). A log-growth target fixed dev, but at the test origin it took the highest
+mobile level (42) to 150 in 2002: dev targets were all low, so dev could not show it. The team switched to a
+logit target with a ceiling of 100 (test MAE 3.73 -> 3.11, one run, `SONUC-MAIN.md`).
+
+```python
+from simengine.methods import forecast as F
+
+# 'country, year, variable, value' -> one series per (country, target); every variable becomes a column
+panel = F.panel_from_long(long_df, id="country", time="year", var="variable", value="value",
+                          targets=["cell", "internet"])
+# columns: series ("<country>:<target>"), country, variable, year, y, cell, internet, pc, ...
+
+fc = F.DirectForecaster("lightgbm", horizons=5, id_col="series", time_col="year", static=["variable"],
+                        target="logit", upper=100.0,                 # predictions stay in (0, 100)
+                        origin_features=["cell", "internet", "pc"],  # read at the origin, not the target year
+                        check_range=0.25)                            # warn on extrapolation at predict()
+fr = fc.fit(panel, 1997).predict(panel, 1997)
+fc.range_check_            # lo, hi, pred_min, pred_max, n_above, n_below, share_out, ok
+F.extrapolation_check(fr, dev_backtest["truth"], margin=0.25)        # or against the dev target range
+```
+
+- `target="level"` (default, unchanged): y[T+h]. `"log_ratio"`: log((y[T+h] + log_offset) / (y[T] +
+  log_offset)), mapped back as (y[T] + c) * exp(z) - c; rows with a non-positive ratio are dropped and a series
+  with a non-positive base stays flat (`log_offset=1` for counts with zeros). `"logit"`: the change
+  logit(y[T+h] / upper) - logit(y[T] / upper) (shares clipped to `[logit_eps, 1 - logit_eps]`), mapped back as
+  upper * sigmoid(logit(y[T] / upper) + z), so no prediction can pass `upper`. Observed y above `upper` raises
+  a warning (D7: mobile subscriptions can exceed 100 per 100; pick the ceiling from origin-time knowledge).
+  Non-level targets train with the "regression" objective (Tweedie needs a non-negative target).
+- `origin_features` columns are read at the origin T as `{c}_at_origin` (another technology's level, an
+  income group), unlike `exog`, which is read at the target time and so needs known-in-advance values. In
+  `fit` / `predict` their values after the origin are masked, so they cannot leak (a column also listed in
+  `exog` is left unmasked). `make_features(..., origin_features=)` gives the same columns.
+- `check_range=` / `extrapolation_check`: predictions above hi + margin x (hi - lo) or below lo - margin x
+  (hi - lo) of the training (or dev) target range raise a `UserWarning`. It only flags; look at the
+  out-of-range rows and judge plausibility (the playbook trap: compare the test-origin prediction
+  distribution with the dev target range).
+- `panel_from_long` is one pivot (D7's first row-by-row `.loc` version took 2+ minutes). Duplicate
+  (id, time, variable) rows raise; series whose target is never observed are dropped (`dropna_series`).
+  Missing cells inside the panel still count as `fill_value` (0.0) in the forecasters; pass
+  `fill_value=float("nan")` when missing means unknown rather than zero.
 
 ## Repeated surveys: next-wave distributions (`waves.py`) [prova-d6]
 
