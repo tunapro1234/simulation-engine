@@ -738,9 +738,12 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
   flag say so; the card's baseline row gets a note. `report["bilgi_duzeyi"]` = `{"B", "B_ustte", "rozet_tabani"}`.
   Other task types are unchanged.
 - **Registered vs post hoc.** When pre-registration text exists (seal descriptions, `prereg=` text files / registry
-  texts), each `compare=` row's a and b names are looked up in it: a row counts as registered when one text names both
-  (b None: a alone) or contains the row's own label. Two-character names (`L3`, `T3`) match without the `pred_`
-  prefix here, since both have to occur together. A row that is not found gets `tur="posthoc"`, `kayit="sonradan"`, a
+  texts), each `compare=` row's a and b names are looked up in it: a row counts as registered when one paragraph
+  (split at blank lines and headings) names both (b None: a alone) or a text contains the row's own label. A whole
+  ONKAYIT.md names every arm somewhere, so a and b in different paragraphs (ours in the arms list, b only in the
+  baseline list) do not count. Two-character names (`L3`, `T3`) match without the `pred_` prefix here, since both
+  have to occur together. To mark a row registered whatever the wording, give it a label that the pre-registration
+  uses (`compare=[("L3", "T3", "C3")]` with "C3: L3 − T3" in ONKAYIT.md). A row that is not found gets `tur="posthoc"`, `kayit="sonradan"`, a
   "post hoc (not in the pre-registration)" label suffix, `kind: "posthoc"` in `summary()["comparisons"]`, a
   "sonradan ·" prefix on the dashboard and a card flag. Without any text the rows stay as before (`tur="kayitli"`,
   no `kayit` key). `degerlendir(kiyaslar=)` also takes `(a, b, label, posthoc)` or `{"a", "b", "label", "posthoc"}`
@@ -750,7 +753,9 @@ No new `evaluate()` arguments: these rules run on the inputs the report already 
   strongest one, and the card flags it: register against the strongest single baseline, not a weaker combination.
 - **Shuffle-control scope.** When ours is constant across units within every item (an arm without person
   information, for example a direct item-level guess), the shuffle control is not built: the audit row is
-  `atlandi` with "predictions constant within item (no person information)". On multiclass tasks the control is
+  `atlandi` with "predictions constant within item (no person information)". The same skip applies to group-level
+  rows without an item column (`aggregate_by=` over conditions or countries, no `item`): a shuffle would only permute
+  the groups' predictions, a permutation null rather than a persona check. On multiclass tasks the control is
   labelled a *prediction* shuffle, not a persona swap (audit "tahmin karıştırma (persona takası değil)"); pass a real
   swap arm via `compare=(ours, swap, "persona swap")`.
 - **Filled share.** Numeric `filled_<method>` columns (from `sim.distribution_frame`: the share of a cell's answers

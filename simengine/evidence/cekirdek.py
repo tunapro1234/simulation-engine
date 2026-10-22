@@ -194,15 +194,32 @@ def _onkayit_metinleri(onkayit: list | None, metinler: list | None) -> tuple[lis
     return gecerli, gec
 
 
+def _paragraflar(t: str) -> list[str]:
+    """Metni paragraflara böler (boş satır ya da başlık satırı ayırır). Bütün ONKAYIT.md her kolun adını bir yerde
+    geçirir; a ile b'nin aynı paragrafta geçmesi istenir (G7: 'llm3' bir paragrafta, 'position' taban listesinde)."""
+    out, cur = [], []
+    for ln in str(t).splitlines():
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            if cur:
+                out.append("\n".join(cur))
+            cur = [ln] if ln.strip() else []
+            continue
+        cur.append(ln)
+    if cur:
+        out.append("\n".join(cur))
+    return out
+
+
 def _kiyas_kaydi(adlar: list[str], et_: str | None, metinler: list[str]) -> bool:
-    """Karşılaştırma ön kayıtta mı: aynı metinde a ve b adları (b yoksa yalnız a) ya da kullanıcı etiketi geçiyor.
-    İki ad birlikte arandığı için 2 harfli adlar ('L3', 'T3') ön eksiz de eşleşir; tek harfli adlar ön ek ister."""
+    """Karşılaştırma ön kayıtta mı: aynı paragrafta a ve b adları (b yoksa yalnız a) ya da metinde kullanıcı etiketi
+    geçiyor. İki ad birlikte arandığı için 2 harfli adlar ('L3', 'T3') ön eksiz de eşleşir; tek harfli adlar ön ek ister."""
     import re as _re
     kaliplar = [_re.compile(r"(?<![A-Za-z0-9_])(?:pred_|tahmin_)?" + _re.escape(a) + r"(?![A-Za-z0-9_])")
                 if len(a) == 2 else _ad_kalibi(a) for a in adlar if a]
     et_k = (_re.compile(r"(?<![A-Za-z0-9_])" + _re.escape(et_.strip()) + r"(?![A-Za-z0-9_])")
             if et_ and len(et_.strip()) >= 2 else None)
-    return any((kaliplar and all(k.search(t) for k in kaliplar)) or (et_k is not None and et_k.search(t))
+    return any((et_k is not None and et_k.search(t))
+               or (kaliplar and any(all(k.search(p) for k in kaliplar) for p in _paragraflar(t)))
                for t in metinler)
 
 
@@ -461,9 +478,9 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     if tahmin_gorevi:
         gorev = "surekli"
         birincil = birincil or "wmape"
-    if birincil == "yanlilik":
-        raise ValueError("bias (yanlilik) is a signed diagnostic, not a primary metric: use wmape/mae and read bias "
-                         "from the metric table")
+    if birincil in ISARETLI_METRIKLER:   # işaretli: "küçük iyi" sıralaması büyük negatif sapmayı kazandırırdı
+        raise ValueError(f"{'bias (yanlilik)' if birincil == 'yanlilik' else birincil} is a signed diagnostic, not a "
+                         "primary metric: use wmape/mae (or auc/brier) and read it from the metric table")
     veri = hazirla(df, gorev, yontemler, siniflar)
     d = veri.df
     blok_bilgi = _blok_kur(veri, blok, tahmin_gorevi)
@@ -533,9 +550,13 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 kalib_sutun.setdefault(ON_EK + y_, []).append(c)
     kontrol_sutun = {}
     sabit_kontrol = []   # madde içinde sabit tahmin: karıştırma kişi bilgisini sınamaz, atlanır
+    grup_kontrol = []    # grup düzeyi, madde yok: karıştırma yalnız grupları permüte eder, atlanır
     for y_ in ([] if tahmin_gorevi else dict.fromkeys([bizim] + ([ham] if ham else []))):
         if _madde_ici_sabit(veri, ON_EK + y_):
             sabit_kontrol.append(ON_EK + y_)
+            continue
+        if duzey == "grup" and not madde_var:   # satırlar grup ortalaması (aggregate_by), madde yok: karıştırma
+            grup_kontrol.append(ON_EK + y_)     # grupların tahminini birbirine taşır, persona takası değil
             continue
         c = f"kontrol_karistir_{y_}"
         d[c] = merdiven.karistir(veri, ON_EK + y_, tohum + 1)
@@ -804,6 +825,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                     "ayrinti": "atlandı: tahmin her maddede birimler arasında sabit (kişi bilgisi yok); karıştırma "
                                "bizimle aynı sonucu verirdi (skipped: predictions constant within item, no person "
                                f"information); {takas_ipucu}"})
+    elif bc in grup_kontrol:
+        den.append({"kontrol": "persona karıştırma (birey bilgisi kullanılıyor mu)", "durum": "atlandi", "deger": None,
+                    "uygulanamaz": True,
+                    "ayrinti": "atlandı: satırlar grup ortalaması (aggregate_by), madde yok; karıştırma grupların "
+                               "tahminini birbirine taşır, kişi bilgisini sınamaz (skipped: group-level rows without "
+                               f"item, a shuffle would permute groups, not persons); {takas_ipucu}"})
     if "madde_ici_kor" in nokta.get(bc, {}) and bc in kontrol_sutun:
         # karıştırma kontrolü yoksa (tahmin görevi) bizim − bizim = 0 anlamsız satırı yazılmaz
         mm = {m.ad: m for m in metrikler}["madde_ici_kor"]
@@ -838,7 +865,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     dolgu_den, dolgu = _dolgu_denetimi(veri, etiket)
     den.extend(dolgu_den)
     den.append(denetim.cokus(yay, bc))
-    dz = denetim.dengesizlik(veri)
+    dz = denetim.dengesizlik(veri, birincil=birincil)
     if dz:
         den.append(dz)
     llm_yok = ezber_llm is False

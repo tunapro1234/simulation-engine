@@ -130,6 +130,20 @@ class ShuffleScope(unittest.TestCase):
         d = next(x for x in r["denetim"] if x["kontrol"].startswith("persona karıştırma"))
         self.assertNotEqual(d["durum"], "atlandi")
 
+    def test_group_level_without_item_skipped(self):
+        # G1 shape: aggregate_by=condition, no item column -> rows are conditions; a shuffle permutes conditions
+        rng = np.random.default_rng(5)
+        cond = np.repeat([f"m{i}" for i in range(11)], 20)
+        eff = {f"m{i}": rng.normal() for i in range(11)}
+        df = pd.DataFrame({"cond": cond, "unit": np.arange(len(cond)),
+                           "truth": [eff[c] + rng.normal(0, 1) for c in cond],
+                           "pred_ours": [eff[c] + rng.normal(0, 0.5) for c in cond]})
+        r = _quiet(ev.evaluate, df, ours="ours", task="continuous", primary="spearman", aggregate_by="cond", **FAST)
+        self.assertNotIn("kontrol_karistir_ours", r["sonuclar"])
+        d = next(x for x in r["denetim"] if x["kontrol"].startswith("persona karıştırma"))
+        self.assertEqual(d["durum"], "atlandi")
+        self.assertIn("group-level rows without item", d["ayrinti"])
+
     def test_multiclass_labelled_prediction_shuffle(self):
         rng = np.random.default_rng(3)
         n_item, n = 20, 10
@@ -169,6 +183,13 @@ class RegisteredCompare(unittest.TestCase):
         self.assertEqual(kinds, ["registered", "posthoc"])
         self.assertIn("sonradan · late add", ev.dashboard_html([r]))
         self.assertTrue(any(e.startswith("sonradan karşılaştırma") for e in r["kanit_kart"]["etiketler"]))
+
+    def test_names_in_different_paragraphs_are_posthoc(self):
+        # G7 shape: every arm is named somewhere in ONKAYIT.md; only a and b in one paragraph count as registered
+        self.pre.write_text("# Arms\n\nours: ours (primary)\n\n## Baselines\n- t1 (other markets); t2 (history)\n\n"
+                            "## Comparisons\n1. ours − t2, paired\n")
+        r = self._eval(prereg=str(self.pre), compare=[("ours", "t2"), ("ours", "t1")])
+        self.assertEqual([k["kayit"] for k in r["kayitli_karsilastirmalar"]], ["kayitli", "sonradan"])
 
     def test_label_match_counts_as_registered(self):
         r = self._eval(prereg=str(self.pre), compare=[("ours", "t1", "C1")])
