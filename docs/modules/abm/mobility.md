@@ -47,7 +47,8 @@ Data layout: `<root>/yjmob100k/yjmob100k-dataset1.csv.gz` (Zenodo record 1083626
 
 **Split (`yjmob`).** HuMob days 1-60 are history and days 61-75 are predicted, which is `d = 0..59 -> 60..74` in the
 file. `split="dev"` gives `0..44 -> 45..59` and drops rows with `d >= 60` while reading. Users with a 999 cell are
-dropped (none in the Zenodo file). `users` people are drawn from the pool with `default_rng(seed)`. The pool is
+dropped. The local Zenodo copy has none, and no duplicate `(uid, d, t)` rows: 100,000 users (uid 0-99,999), and all
+20,000 users with uid >= 80,000 have rows on days 61-75 (checked 22 Oct 2026). `users` people are drawn from the pool with `default_rng(seed)`. The pool is
 `all` or `humob_test` (uid >= 80,000, the people HuMob 2023 task 1 masked). The table for `global_slot_mode` is
 counted over the history days of every user in the file, not only the sample. It uses no future rows, and duplicate
 rows count.
@@ -98,11 +99,17 @@ Exploration does not reject cells the person already visited.
   5.889002930255253; humob25 GEO-BLEU 0.07556369896234784.
 - The batched matcher equals a literal greedy matcher on tie-heavy random sequences.
 - The baselines keep query order and are seeded.
-- The task runs end to end on a synthetic CSV.
+- The task runs end to end on a synthetic CSV, and its metrics refuse predictions that are not cell codes.
+- Unequal-length GEO-BLEU (brevity penalty, 2025 normalisation) equals the literal greedy matcher; DTW has an exact
+  case where the 2023 free start gives 0 and standard DTW 4.
+- Markov follows a deterministic chain and restarts each day at the slot mode; EPR starts each day at one of the
+  person's observed first-of-day cells; every predictor accepts an empty query.
 
 A one-off script run against the downloaded reference code on 150 random users x 3 days gave a maximum absolute
 difference of 1.1e-16 (GEO-BLEU) and 1.8e-15 (DTW) for both variants. It also gave 0 on 200 unequal-length pairs for
-`geobleu` / `dtw` against `calc_geobleu_orig` / `calc_dtw_orig`.
+`geobleu` / `dtw` against `calc_geobleu_orig` / `calc_dtw_orig`. A review re-check the same day gave 0 on 300 more
+unequal pairs (N = 3 and 5, both DTW rules) and at most 5.7e-14 for `user_scores` against `calc_geobleu_single` /
+`calc_dtw_single` on 60 users with 1-9 rows per day.
 
 **Pipeline check against a published number.** The HuMob 2023 README reports an organiser baseline: each of the
 first 10,000 users stays at the centre of their days 1-60 cells, scored on days 61-75, giving GEO-BLEU 0.04195 and
@@ -116,7 +123,8 @@ These are 2,000 users drawn with `default_rng(0)`, history d 0-59, test d 60-74.
 history and 464,032 test rows; `humob_test` has 1,674,256 and 436,511. Values are the mean over users with a 95%
 user-bootstrap CI (B = 1000). GEO-BLEU is higher-better and DTW (km) lower-better. All are from one run on 22 Oct 2026.
 Loading took 74-100 s and all baselines about 30 s. Scoring both variants took about 50 s. Peak RSS was 6.2 GB
-(the full CSV is read before sampling).
+(the full CSV is read before sampling). A second run of the same script on 22 Oct 2026 (review) reproduced every
+pool-`all` value in the table to the printed digits.
 
 Command (from the repo root, data copy under `<data-root>/yjmob100k/`):
 
@@ -175,17 +183,23 @@ The final 2023 ranking is published only as an image, so no final winner score i
 
 - The per-user slot mode is the bar to clear. On the HuMob test pool it scores 0.316 GEO-BLEU, level with the
   0.316 that a top-3 transformer (GeoFormer) reported for its final submission. Its DTW is much worse (45.9 vs
-  26.2). A window of 2 slots trades GEO-BLEU (-0.02) for DTW (-11 km).
+  26.2). A window of 2 slots trades GEO-BLEU (-0.02) for humob23 DTW (-11 km); on pool `all` the standard
+  (humob25) DTW barely moves (77.1 -> 76.7).
 - The comparison is not like for like. We score 2,000 sampled users and the challenge scored all 20,000. The
   challenge also allowed training on the other 80,000 users' days 61-75, which a model like GeoFormer can use and
   our baselines do not. Read it as "the simple baseline is in the same range", not as a ranking.
+- The humob23 DTW lets the prediction start at any step of the true day for free (see Definitions), so it rewards a
+  prediction that stays near where the day ends. Several DTW gaps below hold only under that rule; check the humob25
+  (standard DTW) column before reading a DTW difference.
 - First-order Markov loses GEO-BLEU to the slot mode. Our reading, not measured separately: the chain has no time of
-  day, and greedy decoding tends to settle on a self-loop, which keeps DTW low and GEO-BLEU lower.
+  day, and greedy decoding tends to settle on a self-loop, which keeps DTW low and GEO-BLEU lower. Its DTW edge over
+  the slot mode (44.0 vs 51.6) exists only under humob23; with standard DTW it is far worse (115.7 vs 77.1).
 - EPR as a trajectory predictor is far behind every per-user baseline (about half the slot-mode GEO-BLEU, twice
   the DTW). By construction (Song et al.) it targets the statistics of mobility, such as S(t) growth and Zipf
   visit frequencies, not the time of day; those statistics were not checked here. It is here as
   a simulator for scenario and synthetic-population work and as an honest comparison, not as a forecaster.
-  Power-law waiting helps its DTW (-11 km) and leaves GEO-BLEU unchanged.
+  Power-law waiting lowers its humob23 DTW (-11 km) and leaves humob23 GEO-BLEU unchanged; under humob25 it raises
+  GEO-BLEU (0.066 vs 0.055) and does not lower DTW (121.4 vs 119.7).
 
 ## Limitations
 
