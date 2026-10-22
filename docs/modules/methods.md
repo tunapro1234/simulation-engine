@@ -198,6 +198,10 @@ dev stack. PPI++ lives in `simengine.evidence`.
   "level from category, deviation from LLM" + data scored test WAPE 0.478, against 0.477 for category + data
   **[llmabm, M2 table]**, i.e. no gain. For OpinionQA groups, neighbour deviations at alpha = 1 were worse than
   copying Overall **[dongu]**. Expect `alpha_` near 0 unless the LLM has item-specific signal.
+  The distribution recipe "population + beta * (LLM segment - LLM population)" is one call:
+  `ShrunkDeviation(distribution=True).fit(base=pop, llm=llm_seg[train], y=true_seg[train], ref=llm_pop)`, with
+  `base` the known overall distribution, `ref` the LLM's own overall distribution and beta = `alpha_` chosen on
+  the train cells (pass `alphas=np.linspace(0, 1.5, 16)` to allow beta > 1).
 - **`ridge_to_prior` / `select_lambda`**: ridge toward a prior coefficient vector, with lambda chosen on held-out
   rows from (0.3, 1, 3, 10, 30, 100, 1e9). This is the makro "+data" step. The best M2 test WAPE was 0.469
   (LLM expert prior + data), against 0.477 for category + data. A shuffled-LLM placebo reproduced about 85% of
@@ -208,8 +212,12 @@ dev stack. PPI++ lives in `simengine.evidence`.
   the column.
 - **`DevStack`**: logistic regression on logits (binary) or log-probabilities (multiclass), or ridge
   (continuous), over several methods' dev predictions. `dev_pred_` holds honest 5-fold cross-fit dev predictions.
-  **`BinaryCalibrator`** uses Platt scaling, or isotonic regression from 1000 dev rows (intent kit `kalibre`). No
-  separate accuracy is claimed for these two; they are the plumbing that stops a weak LLM arm from hurting.
+  **`BinaryCalibrator`** uses Platt scaling, or isotonic regression from 1000 dev rows (intent kit `kalibre`).
+  `method="ratio"` only rescales the level (p * base_rate / mean(p), clipped to [0, 1]) and keeps the ranking; use
+  it for a rate/funnel question or a small dev set. With `monotone=True` (default) a Platt slope <= 0 falls back
+  to the ratio method with a warning (`fallback_`), and Platt on fewer than 200 dev rows warns. In the G4
+  rehearsal, 6.6% of n = 50 Platt fits had slope <= 0 and turned test AUC 0.624 into 0.376. No separate accuracy
+  is claimed for these two; they are the plumbing that stops a weak LLM arm from hurting.
 
 ## Digital twin (`twin.py`)
 
