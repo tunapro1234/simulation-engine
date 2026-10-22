@@ -56,6 +56,8 @@ def _user_metric(name):
         p = frame[col].to_numpy(float)
         if np.isnan(p).any():
             raise ValueError(f"{col}: NaN predictions")
+        if ((p < 0) | (p >= M.NC) | (p != np.round(p))).any():
+            raise ValueError(f"{col}: predictions must be integer cell codes 0..{M.NC - 1} (mobility.to_cell)")
         truth = frame["truth"].to_numpy(np.int64)
         if name == "accuracy":
             per = pd.Series(p.astype(np.int64) == truth).groupby(frame["uid"].to_numpy()).mean().to_numpy()

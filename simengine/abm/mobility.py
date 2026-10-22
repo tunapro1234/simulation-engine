@@ -323,6 +323,8 @@ class _History:
 def _by_slot(qd, qt, o):
     """Groups of sorted-query positions by absolute slot d * 48 + t (each user at most once per group)."""
     s = (qd * SLOTS + qt)[o]
+    if not len(s):
+        return []
     order = np.argsort(s, kind="stable")
     ss = s[order]
     cut = np.flatnonzero(np.r_[True, ss[1:] != ss[:-1], True])
@@ -344,7 +346,7 @@ class MarkovMobility:
         self.train_ = train
         h = self.h_ = _History(train)
         key = h.tr_u * NC + h.tr_from
-        code = key * NC + h.tr_to                        # < N * NC^2, fits int64 up to ~5.7M users
+        code = key * NC + h.tr_to                        # < N * NC^2, fits int64 up to ~5.7e9 users
         uq, n = np.unique(code, return_counts=True)
         self.k_, self.to_, self.cum_ = uq // NC, uq % NC, np.cumsum(n.astype(float))
         st = np.flatnonzero(np.r_[True, self.k_[1:] != self.k_[:-1]])
@@ -396,7 +398,8 @@ class EPRMobility:
     alpha, r_min, r_max : exploration jump length P(dr) ~ dr^(-1-alpha) in cells (paper: alpha = 0.55, cutoff
         ~100 km = 200 cells), random direction; a jump leaving the grid is redrawn (up to 10 times, then clipped).
     waiting : 'empirical' (move between two consecutive records with the user's history change rate) or
-        'powerlaw' (waiting time in slots ~ dt^(-1-beta_wait), 1 .. wait_max slots; paper beta = 0.8, cutoff 17 h).
+        'powerlaw' (waiting time ~ dt^(-1-beta_wait) drawn on [1, wait_max] slots and floored, so 1 .. wait_max - 1
+        whole slots; paper beta = 0.8, cutoff 17 h = 34 slots).
     day_reset : start each day from one of the user's observed first-of-day cells (TALP port).
     Returns of a simulated new cell use its simulated visit count; history counts stay fixed (TALP port).
     Users without history get the global slot mode of the history. Exploration does not reject cells the user
