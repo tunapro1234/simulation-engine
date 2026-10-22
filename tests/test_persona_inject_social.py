@@ -270,6 +270,85 @@ class TestLeakage(unittest.TestCase):
         self.assertEqual(attach_norms(ppl, [Q])[0]["norms"]["q0"], {"no": 2, "yes": 1})
 
 
+class TestEdgeCases(unittest.TestCase):
+    def test_k_must_be_positive(self):
+        for name in ("peer_messages", "neighbor_activity", "asch_majority", "news_feed"):
+            for k in (0, -1, 1.5, True):
+                with self.assertRaises(ValueError, msg=(name, k)):
+                    pi.get_injector(name, k=k)
+        self.assertEqual(len(pi.get_injector("peer_messages", k=None)(person(k=9), Q).meta["shown"]), 9)
+
+    def test_time_order_when_all_shown(self):
+        ppl = person(neighbors=[nb(0, t=5), nb(1, t=1), nb(2, t=9)])
+        for kw in ({"k": None}, {"k": 10}, {"k": 2, "select": "random"}):
+            p = pi.get_injector("peer_messages", **kw)(ppl, Q)
+            times = [{"n0": 5, "n1": 1, "n2": 9}[i] for i in p.meta["shown"]]
+            self.assertEqual(times, sorted(times), kw)          # "oldest first" holds for every k / select
+
+    def test_blank_and_nan_values_skipped(self):
+        nan = float("nan")
+        ppl = person(state={"q0": nan}, text="",
+                     neighbors=[nb(0), {"id": "a", "message": nan, "answers": {"q0": nan}, "action": ""},
+                                {"id": "b", "message": "  ", "answers": {"q0": ""}}, nb(1, "no")],
+                     norms={"q0": {"yes": 3, "no": nan}}, media=[{"text": nan}, "real story"])
+        texts = "\n".join(every_text(pi.get_injector(n)(ppl, Q)) for n in NAMES)
+        self.assertNotIn("nan", texts)
+        self.assertNotIn("Your initial belief", texts)
+        p = pi.get_injector("asch_majority")(ppl, Q)
+        self.assertEqual(sorted(p.meta["confederates"]), ["no", "yes"])
+        self.assertIn('approximately 100% chose "yes".',
+                      pi.get_injector("descriptive_norm")(ppl, Q).system)
+        with self.assertRaises(pi.MissingPersonField):
+            pi.get_injector("descriptive_norm")(person(norms={"q0": nan}), Q)
+
+    def test_pandas_na(self):
+        try:
+            import pandas as pd
+        except ImportError:
+            self.skipTest("pandas not installed")
+        ppl = person(fields={"age": 30, "city": pd.NA}, state=pd.NA,
+                     neighbors=[nb(0), {"id": "a", "message": pd.NA, "answers": {"q0": pd.NA}}])
+        for n in NAMES:
+            self.assertNotIn("<NA>", every_text(pi.get_injector(n, **({"persona": True} if n == "asch_majority"
+                                                                          else {}))(ppl, Q)), n)
+        out = attach_norms([{"id": "a", "answers": {"q0": pd.NA}}, {"id": "b", "answers": {"q0": "yes"}}], [Q])
+        self.assertEqual(out[0]["norms"], {"q0": {"yes": 1}})
+        self.assertEqual(out[1]["norms"], {})
+
+    def test_own_action_and_message_not_shown(self):
+        # an ABM step writes the person's own action / message onto the person dict (attach_neighbors reads them);
+        # for the person themself that can be the target answer, so it is never a persona attribute
+        flat = {"id": "x", "age": 30, "action": "LEAK_adopted the app", "message": "LEAK_I adopted it",
+                "label": "LEAK_label", "time": 7, "neighbors": [nb(0)], "norms": {"q0": {"yes": 1}}, "media": ["m"]}
+        for name in NAMES:
+            txt = every_text(pi.get_injector(name, **({"persona": True} if name == "asch_majority" else {}))(flat, Q))
+            self.assertIn("age: 30", txt, name)
+            self.assertNotIn("LEAK", txt, name)
+            self.assertNotIn("time: 7", txt, name)
+
+    def test_bridge_validation(self):
+        with self.assertRaises(ValueError):
+            attach_neighbors([{"id": "a"}, {"id": "a"}], [("a", "a")])
+        with self.assertRaises(ValueError):
+            attach_norms([{"id": 1}, {"id": "1"}], [Q])
+        for bad in (-0.1, 1.5, 70):
+            with self.assertRaises(ValueError, msg=bad):
+                prevalence_item(bad, "the town", "fell ill")
+
+    def test_attach_norms_matches_brute_force(self):
+        import random
+        rng = random.Random(0)
+        ppl = [{"id": f"p{i}", "fields": {"g": rng.choice("ab")},
+                "answers": {"q0": rng.choice(OPTS + [None]), "qn": rng.choice([1, 2, 5, None])}} for i in range(40)]
+        out = attach_norms(ppl, [Q, QN], by="g")
+        for p, o in zip(ppl, out):
+            peers = [x for x in ppl if x["id"] != p["id"] and x["fields"]["g"] == p["fields"]["g"]]
+            ans = [x["answers"]["q0"] for x in peers if x["answers"]["q0"] is not None]
+            nums = [x["answers"]["qn"] for x in peers if x["answers"]["qn"] is not None]
+            self.assertEqual(o["norms"].get("q0"), {a: ans.count(a) for a in set(ans)} or None)
+            self.assertAlmostEqual(o["norms"].get("qn"), sum(nums) / len(nums))
+
+
 class TestBridges(unittest.TestCase):
     PEOPLE = [{"id": "a", "label": "Ann", "message": "hi from a", "answers": {"q0": "yes"}},
               {"id": "b", "message": "hi from b", "answers": {"q0": "no"}},
