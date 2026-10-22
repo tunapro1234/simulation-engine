@@ -15,7 +15,7 @@ that combine an LLM prediction with a model learned from data.
 | `ShrunkDeviation`, `ridge_to_prior`, `select_lambda`, `LLMFeatureGBDT`, `DevStack`, `BinaryCalibrator` | ways of letting an LLM prediction into a data model, tuned on dev | the LLM term mostly adds ~0 once a strong data baseline exists; tuning keeps it from hurting |
 | `TwinStack`, `pooled_logistic_oof`, `column_correlation`, ... | person-level digital twin: matrix completion + kNN + optional LLM column, ridge-stacked per column | Twin-2K-500 fair LLM-free baseline **0.342** corr; LLM adds +0.006 |
 | `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout` | conditional multinomial logit for conjoint / discrete choice | 0.509 new-person accuracy on camera conjoint (HB 0.519, HB not ported) |
-| `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank | 26.94 vs **31.60** exact next action on OPeRA |
+| `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, `next_action.sessions` / `funnel`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank; step table -> session table (first-k prefix, outcome) and per-step funnel | 26.94 vs **31.60** exact next action on OPeRA |
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
@@ -308,6 +308,26 @@ fit.weights, fit.train_sse, fit.val_rmse, fit.unidentified_pairs, fit.weight_ran
 
 - **Fit.** `fit_mixture_weights(type_behavior, human_target, *, grid_step=0.02, val=None)` searches the whole
   simplex grid, as the source does, and minimises the SSE on the targets in `human_target.index`. The grid is
+**Session level: conversion / abandonment from the first steps.** `next_action.sessions` and `next_action.funnel`
+turn the step table into session rows without building candidates (not re-exported from `simengine.methods`;
+import the module):
+
+```python
+from simengine.methods import next_action as na
+S = na.sessions(steps, outcome_key="purchase", prefix_k=3, text_col="query")   # one row per session
+S = S[S.reached_k]                         # honest "from the first 3 steps" task: sessions still open at k
+F = na.funnel(steps, outcome_key="purchase")   # per step index: reached, continue / abandon / convert rates
+```
+
+`outcome_key` is the conversion action value, a per-step flag column, or a callable on the ordered session rows
+returning a label or `(label, position)`. `sessions` columns: `prefix` (list), `prefix_text`, `prefix_len`,
+`reached_k`, `n_steps`, `outcome` (`labels`, default purchase / abandon), `converted`, `outcome_step` and, with
+`text_col`, the distinct prefix texts. The prefix is cut before the outcome step, so it never holds the outcome
+action or anything after it. `n_steps` and `outcome_step` come from the full session: they are labels, not
+features. A prefix shorter than k already reveals an early end, hence the `reached_k` filter. In `funnel` a session
+leaves at its conversion step, and `continued[i] == reached[i + 1]`. Nothing measured yet; these are data
+helpers (G4 rehearsal: ~15 lines of pandas written by hand).
+
   vectorised and keeps the source's lexicographic order, so ties resolve the same way. Six types at 2% steps are
   3,478,761 points and take about 0.6 s. `method="slsqp"` (scipy) fits continuous weights for libraries too large
   for the grid; past `max_grid` points the grid raises and points you there.

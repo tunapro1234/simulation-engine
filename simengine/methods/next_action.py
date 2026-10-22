@@ -20,10 +20,15 @@ Inputs (English names; research aliases accepted):
          action taken), optional ``user``, ``page``.  (aliases: session_id, adim, user_id, sayfa, hk)
   candidates: one row per (ex, ``key``) with optional ``y`` (1 = taken; computed from ``action`` if absent) and
          any feature columns.  (alias: k -> key)
+
+Session level (no candidates needed): ``sessions(steps, outcome_key="purchase", prefix_k=3)`` turns the step
+table into one row per session (first-k action prefix, outcome label, length, optional query text) for "will this
+session convert / be abandoned, judged from its first steps"; ``funnel(steps, outcome_key="purchase")`` gives per
+step index how many sessions reach it and the continue / abandon / convert rates.
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Callable, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -215,3 +220,136 @@ def hit_at_k(cands: pd.DataFrame, scores, ks: Sequence[int] = (1, 5, 10)) -> dic
     r = c[c["y"] == 1].groupby("ex")["_r"].min()
     n = c["ex"].nunique()
     return {f"hit@{k}": float((r <= k).sum() / n) for k in ks}
+
+
+# ---- session level: step table -> session table / funnel ------------------------------------------------------
+
+OutcomeKey = Union[str, Callable[[pd.DataFrame], Any]]
+
+
+def _ordered_steps(steps: pd.DataFrame, session_col: str, order_col: str, action_col: str) -> pd.DataFrame:
+    al = {k: v for k, v in STEP_ALIASES.items() if v in (session_col, order_col, action_col)}
+    s = rename_aliases(steps, al)
+    missing = [c for c in (session_col, order_col, action_col) if c not in s.columns]
+    if missing:
+        raise KeyError(f"steps lacks column(s) {missing}")
+    s = s[s[session_col].notna()].sort_values([session_col, order_col], kind="mergesort").reset_index(drop=True)
+    s["_pos"] = s.groupby(session_col, sort=False).cumcount()
+    return s
+
+
+def _session_outcomes(s: pd.DataFrame, session_col: str, action_col: str, outcome_key: OutcomeKey,
+                      labels: tuple) -> pd.DataFrame:
+    """Per session: n_steps, outcome, converted (bool), at (0-based position of the outcome step, -1 = none)."""
+    pos_label, neg_label = labels
+    g = s.groupby(session_col, sort=False)
+    n = g.size()
+    if callable(outcome_key):
+        lab, conv, at = [], [], []
+        for _, grp in g:
+            r = outcome_key(grp.drop(columns="_pos"))
+            lb, a = r if isinstance(r, tuple) else (r, None)
+            c = bool(lb == pos_label)
+            if a is None:
+                a = len(grp) - 1 if c else -1          # converted without a position: the last step is the outcome
+            a = int(a)
+            if not -1 <= a < len(grp):
+                raise ValueError(f"outcome position {a} outside session of {len(grp)} steps")
+            lab.append(lb)
+            conv.append(c)
+            at.append(a)
+        o = pd.DataFrame({"outcome": lab, "converted": conv, "at": at}, index=n.index)
+    else:
+        if outcome_key in s.columns:                   # a per-step flag column (truthy = conversion step)
+            hit = s[outcome_key].fillna(0).astype(bool)
+        else:                                          # an action value (e.g. "purchase")
+            hit = s[action_col] == outcome_key
+        first = s["_pos"].where(hit).groupby(s[session_col], sort=False).min().reindex(n.index)
+        conv = first.notna()
+        o = pd.DataFrame({"outcome": np.where(conv, pos_label, neg_label), "converted": conv.to_numpy(),
+                          "at": first.fillna(-1).astype(int).to_numpy()}, index=n.index)
+    o["n_steps"] = n.to_numpy()
+    return o
+
+
+def sessions(steps: pd.DataFrame, *, outcome_key: OutcomeKey, prefix_k: int = 3, session_col: str = "session",
+             order_col: str = "step", action_col: str = "action", text_col: str | None = None,
+             labels: tuple = ("purchase", "abandon"), sep: str = " > ", text_sep: str = " | ") -> pd.DataFrame:
+    """One row per session from a step table, for predicting the session outcome from its first steps.
+
+    ``outcome_key``:
+      - str naming a column of ``steps``: per-step flag, the first truthy step is the conversion step;
+      - other str: the action value that marks conversion (e.g. ``"purchase"``), first occurrence counts;
+      - callable(session_steps_ordered) -> label, or (label, position) with the 0-based position of the outcome
+        step (``-1`` / ``None`` = no outcome step; a ``labels[0]`` label without a position means the last step).
+    Sessions with a conversion step get ``labels[0]``, the rest ``labels[1]`` (callables return their own label).
+
+    Columns: ``session_col``, ``prefix`` (list of the first actions), ``prefix_text`` (joined with ``sep``),
+    ``prefix_len``, ``reached_k`` (prefix_len == prefix_k), ``n_steps``, ``outcome``, ``converted`` (0/1),
+    ``outcome_step`` (0-based position, <NA> if none) and, with ``text_col``, ``text``: the distinct non-empty
+    texts (e.g. search queries) of the prefix steps in order, joined with ``text_sep``.
+
+    Leakage: the prefix is the first ``prefix_k`` steps **cut before the outcome step**, so it never contains the
+    outcome action or anything after it; ``text`` uses the same steps. ``n_steps``, ``outcome_step`` and
+    ``outcome`` are computed from the full session: they are labels / descriptors, not features. A prefix shorter
+    than ``prefix_k`` itself reveals that the session ended (or converted) early, so for an honest "from the first
+    k steps" task keep ``df[df.reached_k]`` (the sessions still open after k steps) or report the two groups apart.
+    """
+    if prefix_k < 1:
+        raise ValueError("prefix_k must be >= 1")
+    s = _ordered_steps(steps, session_col, order_col, action_col)
+    o = _session_outcomes(s, session_col, action_col, outcome_key, labels)
+    cut = pd.Series(np.where(o["at"] >= 0, np.minimum(prefix_k, o["at"]), prefix_k), index=o.index)
+    pre = s[s["_pos"].to_numpy() < cut.reindex(s[session_col]).to_numpy()]
+    gp = pre.groupby(session_col, sort=False)
+    acts = gp[action_col].agg(list).reindex(o.index)
+    acts = [a if isinstance(a, list) else [] for a in acts]
+    out = pd.DataFrame({session_col: o.index.to_numpy(), "prefix": acts,
+                        "prefix_text": [sep.join(map(str, a)) for a in acts],
+                        "prefix_len": [len(a) for a in acts]})
+    out["reached_k"] = out["prefix_len"] == prefix_k
+    out["n_steps"] = o["n_steps"].to_numpy()
+    out["outcome"] = o["outcome"].to_numpy()
+    out["converted"] = o["converted"].astype(int).to_numpy()
+    out["outcome_step"] = pd.array([a if a >= 0 else pd.NA for a in o["at"]], dtype="Int64")
+    if text_col is not None:
+        def _join(v):
+            seen, keep = set(), []
+            for t in v:
+                if isinstance(t, str) and t.strip() and t not in seen:
+                    seen.add(t)
+                    keep.append(t)
+            return text_sep.join(keep)
+        tx = gp[text_col].agg(_join).reindex(o.index).fillna("")
+        out["text"] = tx.to_numpy()
+    return out
+
+
+def funnel(steps: pd.DataFrame, *, outcome_key: OutcomeKey, session_col: str = "session", order_col: str = "step",
+           action_col: str = "action", labels: tuple = ("purchase", "abandon"),
+           max_steps: int | None = None) -> pd.DataFrame:
+    """Per-step funnel: row i = sessions that reach their i-th step (0-based ``step_index``) still unconverted.
+
+    Of the ``reached`` sessions at step i, ``converted`` have their conversion step there, ``abandoned`` end there
+    without converting and ``continued`` go on to step i + 1 (so ``continued[i] == reached[i + 1]``). A session
+    leaves the funnel at its conversion step; steps after it are ignored. Rates are over ``reached``;
+    ``reach_rate`` is over all sessions. ``outcome_key`` / ``labels`` as in ``sessions``. ``max_steps`` keeps the
+    first rows only (the counts are unchanged)."""
+    s = _ordered_steps(steps, session_col, order_col, action_col)
+    o = _session_outcomes(s, session_col, action_col, outcome_key, labels)
+    conv = o["converted"].to_numpy(bool)
+    at, n = o["at"].to_numpy(), o["n_steps"].to_numpy()
+    depth = np.where(conv, at + 1, n)                  # steps spent in the funnel
+    m = int(depth.max()) if len(depth) else 0
+    idx = np.arange(m)
+    reached = (depth[None, :] > idx[:, None]).sum(axis=1)
+    converted = np.bincount(at[conv], minlength=m)[:m]
+    abandoned = np.bincount(n[~conv] - 1, minlength=m)[:m]
+    f = pd.DataFrame({"step_index": idx, "reached": reached, "continued": reached - converted - abandoned,
+                      "abandoned": abandoned, "converted": converted})
+    den = np.maximum(f["reached"].to_numpy(), 1)
+    f["reach_rate"] = f["reached"] / max(len(o), 1)
+    f["continue_rate"] = f["continued"] / den
+    f["abandon_rate"] = f["abandoned"] / den
+    f["convert_rate"] = f["converted"] / den
+    return f if max_steps is None else f.head(max_steps).reset_index(drop=True)

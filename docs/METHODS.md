@@ -100,6 +100,8 @@ for repeat respondents hierarchical Bayes is much better (0.715 vs 0.482), and H
 **Next action** (`Markov2Baseline`, `NextActionRanker`). Markov-2 transitions plus a LightGBM lambdarank over
 candidate actions. On OPeRA it reached 31.60% exact against 13.67% for a zero-shot Haiku persona agent (that one on an n=300 subsample). With
 user-disjoint splits the two learned models could not be separated (29.57 vs 28.11).
+For session outcomes (convert or abandon, judged from the first k steps) `next_action.sessions` builds the
+leak-free session table (prefix cut before the outcome step) and `next_action.funnel` the per-step funnel.
 
 ## Agent-based models (`simengine.abm`)
 
