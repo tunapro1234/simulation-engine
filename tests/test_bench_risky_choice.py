@@ -142,13 +142,14 @@ def _c13k_files(root, n=60, seed=0):
     os.makedirs(d)
     rows, probs = [], {}
     for i in range(n):
-        ha, la, hb, lb = rng.integers(0, 40), rng.integers(-20, 0), rng.integers(0, 50), rng.integers(-30, 5)
-        pha, phb = rng.choice([0.1, 0.5, 0.9]), rng.choice([0.2, 0.6, 1.0])
-        shape, num = (0, 1) if i % 3 else (1, 3)
+        if i % 2 == 0:  # as in the real file, a Problem (gamble pair) appears without and with feedback
+            ha, la, hb, lb = rng.integers(0, 40), rng.integers(-20, 0), rng.integers(0, 50), rng.integers(-30, 5)
+            pha, phb = rng.choice([0.1, 0.5, 0.9]), rng.choice([0.2, 0.6, 1.0])
+            shape, num = (0, 1) if i % 3 else (1, 3)
         b = R.cpc_distribution(hb, phb, lb, shape, num)
         evd = (pha * ha + (1 - pha) * la) - (phb * hb + (1 - phb) * lb)
         rate = float(np.clip(1 / (1 + np.exp(0.2 * evd)) + rng.normal(0, 0.05), 0, 1))
-        rows.append({"Problem": i // 2, "Feedback": bool(i % 4), "n": 15, "Block": 1 + i % 5, "Ha": ha, "pHa": pha,
+        rows.append({"Problem": i // 2, "Feedback": bool(i % 2), "n": 15, "Block": 1 + i % 5, "Ha": ha, "pHa": pha,
                      "La": la, "Hb": hb, "pHb": phb, "Lb": lb, "LotShapeB": shape, "LotNumB": num,
                      "Amb": i % 7 == 0, "Corr": [0, 1, -1][i % 3], "bRate": rate, "bRate_std": 0.3})
         probs[str(i)] = {"A": [[float(pha), float(ha)], [float(1 - pha), float(la)]],
@@ -224,8 +225,11 @@ class TestTasks(unittest.TestCase):
                 os.environ.pop(base.ENV_DATA)
             else:
                 os.environ[base.ENV_DATA] = old
-        self.assertEqual(len(data.test), 6)
+        self.assertEqual(len(data.test), 6)  # 3 of 30 Problems, both feedback conditions of each
         self.assertEqual(len(data.train), 27)
+        self.assertTrue(set(data.test.problem).isdisjoint(task.load(self.root).train.problem))
+        self.assertTrue((data.test.groupby("problem").size() == 2).all())
+        self.assertEqual(task.frame(data, {})["group"].nunique(), 3)
         preds = task.baselines(data)
         self.assertIn("beast", preds)
         self.assertEqual(len(preds["beast_sd"]), 6)
