@@ -14,7 +14,7 @@ from .api import (MULTIPLIER_MAX_ROWS, audit_prompts, chain_paths, correlation_a
                   VERSION, Resampler, answer_hit, badge, baseline_ladder, bootstrap_metrics, canonical_bytes, card,
                   card_dict, card_markdown, chain, ci, compute_metrics, dashboard, dashboard_html, ece, evaluate,
                   grade, hit_at_k, jensen_shannon, ks_distance, memorization_audit, metric_family, p_value,
-                  paired_ci, panel_cost, prepare, recalibrate, reliability, sample_multiplier, save_json, seal,
+                  paired_ci, paired_diff, panel_cost, prepare, recalibrate, reliability, sample_multiplier, save_json, seal,
                   shuffle_control, split_audit, summary, to_internal, tvd, verify, verify_chain, wasserstein_ordinal,
                   worth_humans, worth_theory_curve)
 from .extras import (coefficient_recovery, completion_from_frame, completion_row, published_findings,
@@ -25,7 +25,7 @@ __all__ = [
     "worth_humans", "worth_theory_curve", "sample_multiplier",
     "prepare", "to_internal", "compute_metrics", "metric_family", "hit_at_k", "ece", "tvd", "wasserstein_ordinal",
     "jensen_shannon", "ks_distance",
-    "Resampler", "ci", "p_value", "bootstrap_metrics", "paired_ci",
+    "Resampler", "ci", "p_value", "bootstrap_metrics", "paired_ci", "paired_diff",
     "baseline_ladder", "shuffle_control", "recalibrate", "reliability",
     "split_audit", "memorization_audit", "answer_hit", "correlation_audit", "audit_prompts",
     "seal", "verify", "verify_chain", "grade", "chain", "chain_paths", "canonical_bytes",

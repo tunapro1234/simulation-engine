@@ -11,12 +11,12 @@ import warnings
 from pathlib import Path
 from unittest import mock
 
-from simengine.llm import (AGENT_ENV, SPEND_LOG_ENV, TSV_COLUMNS, Claude, ClaudeCode, CostLedger, EmptyResponseError,
+from simengine.llm import (AGENT_ENV, SPEND_LOG_ENV, TAG_PREFIX_ENV, TSV_COLUMNS, Claude, ClaudeCode, CostLedger, EmptyResponseError,
                            FakeLLM, LLMError, ThinkingBudgetWarning, looks_like_refusal)
 from simengine.llm.ledger import tsv_line, tsv_model
 from tests.test_llm import FakeClient, FakeRun, envelope, ok_message, tmpdir
 
-CLEAN_ENV = {SPEND_LOG_ENV: "", AGENT_ENV: ""}
+CLEAN_ENV = {SPEND_LOG_ENV: "", AGENT_ENV: "", TAG_PREFIX_ENV: ""}
 
 
 def rehearsal_line(model, inp, out, usd, tag, agent, prefix=""):

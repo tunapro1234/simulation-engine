@@ -17,7 +17,8 @@ downloads a model by surprise. Control arms (no_persona, persona_swap) run by de
 Numeric: a number in [min, max] (and an optional one-sentence reason); a value outside the range is unparsed.
 `free_text=False` (per question or for the whole survey) drops the free-text field, which is most of the output.
 Soft refusals are re-asked once with a research-forecast framing and reported apart from parse failures
-(`refused`, `unparsed`, `refusal_rate`, `refusals` in the result).
+(`refused` / `unparsed`: int counts; `refused_ids` / `unparsed_ids`: id lists; `refusal_rate`, `refusals`).
+Every batch of an arm goes out in one parallel `llm.map` (`parallel=`, default the backend's own).
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ import pandas as pd
 
 from ._stats import (ALL, Emitter, bootstrap_ci, bootstrap_distribution, field_name, pick_quotes, to_jsonable,
                      to_number)
-from .panel import Usage, ask_panel
+from .panel import Usage, _collect, _panel_max_tokens, ask_many, build_prompts
 from .personas import as_personas, choose_lang, control_personas, control_plan, normalize_controls
 from .ssr import SSR, anchor_sets
 
@@ -182,28 +183,45 @@ def _stim_groups(personas, context: str, stim: dict | None, mode: str):
 
 def _arm(llm, personas, questions, lang, batch, group_size, context, tag, usage, *, arm: str = "persona",
          stim: dict | None = None, stimulus_batching: str = "group", info: dict | None = None,
-         ask_kw: dict | None = None) -> dict:
+         ask_kw: dict | None = None, llm_tag: str | None = None, parallel: int = 4) -> dict:
     """Run one arm (main or control) -> {pid: {question_id: raw answer dict}}. `info` collects this arm's
-    refusal / unparsed counts."""
+    refusal / unparsed counts.
+
+    All batches of the arm (every question group x every stimulus group) go into ONE plan, sent through one
+    `ask_many` (one `llm.map`) per question group and max_tokens value, so per-person stimuli run in parallel
+    instead of one stimulus group at a time. Prompts, max_tokens (hence cache keys), answers and usage are the
+    same as asking each stimulus group with its own `ask_panel` call."""
     ans: dict[str, dict] = {p.pid: {} for p in personas}
     refused: set = set()
     bad = {q["id"]: 0 for q in questions}
     before = (usage.first_calls, usage.refused_calls, usage.recovered_calls)
     errors: list = []
+    llm_tag = llm_tag if llm_tag is not None else f"survey:{arm}"
+    groups = []                                     # (g, question group)
+    calls: dict[tuple, list] = {}                   # (g, max_tokens) -> plan entries, in plan order
     for g in range(0, len(questions), group_size):
         group = questions[g:g + group_size]
+        groups.append((g, group))
         for ctx, ps, inline in _stim_groups(personas, context, stim, stimulus_batching):
             task, fields = _task_fields(group, ctx, lang, inline_stimulus=bool(inline))
-            r = ask_panel(llm, ps, task, fields, batch=batch, lang=lang, usage=usage, tag=f"{tag}:{g}",
-                          llm_tag=f"survey:{arm}", context=inline, context_label="Shown to this person",
-                          refused_ids=refused, errors=errors, **(ask_kw or {}))
-            for pid, x in r.items():
-                for q in group:
-                    a = _parse_answer(q, x, lang)
-                    if a is False:
-                        bad[q["id"]] += 1
-                    elif a is not None:
-                        ans[pid][q["id"]] = a
+            plan = build_prompts(ps, task, fields, batch=batch, context=inline, lang=lang,
+                                 context_label="Shown to this person")
+            if plan:
+                calls.setdefault((g, _panel_max_tokens(plan, fields)), []).extend(plan)
+    got: dict[int, dict] = {g: {} for g, _ in groups}
+    for (g, mt), plan in calls.items():
+        st: list = []
+        rs = ask_many(llm, [p for p, _ in plan], max_tokens=mt, usage=usage, tag=f"{tag}:{g}", llm_tag=llm_tag,
+                      parallel=parallel, statuses=st, errors=errors, **(ask_kw or {}))
+        _collect(plan, rs, st, got[g], usage, refused)
+    for g, group in groups:
+        for pid, x in got[g].items():
+            for q in group:
+                a = _parse_answer(q, x, lang)
+                if a is False:
+                    bad[q["id"]] += 1
+                elif a is not None:
+                    ans[pid][q["id"]] = a
     if info is not None:
         first = usage.first_calls - before[0]
         rc = usage.refused_calls - before[1]
@@ -211,6 +229,17 @@ def _arm(llm, personas, questions, lang, batch, group_size, context, tag, usage,
                      "refusal_rate": round(rc / first, 4) if first else 0.0, "refused_ids": refused,
                      "unparsed_items": bad, "errors": errors})
     return {pid: c for pid, c in ans.items() if c}
+
+
+def _resolve_parallel(llm, parallel) -> int:
+    """survey's parallel: the argument, else the backend's own `parallel` attribute, else 4 (ask_panel's default)."""
+    if parallel is None:
+        parallel = getattr(llm, "parallel", None)
+    try:
+        parallel = int(parallel)
+    except (TypeError, ValueError):
+        return 4
+    return max(1, parallel)
 
 
 def _apply_ssr(arms: dict, questions, ssr, warnings: list):
@@ -365,7 +394,7 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
            batch: int = 8, question_group: int = 6, controls=None, ssr=None, B: int = 1000, on_event=None,
            stimulus_col: str | None = None, stimulus_batching: str = "group", free_text: bool = True,
            refusal_retry: bool = True, cache_refusals: bool = False, empty_retry: bool = True,
-           empty_retry_kw: dict | None = None) -> dict:
+           empty_retry_kw: dict | None = None, parallel: int | None = None, tag: str | None = None) -> dict:
     """Simulated survey. `questions`: a list of question dicts, one dict, or one question string (with
     `options` it becomes a choice question, without them a 5-point Likert one). Returns a JSON-safe dict:
     per question the arm summaries (persona + controls), segment breakdown and quotes; raw answers; control
@@ -375,12 +404,18 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
     stimulus_col: name of a persona field / table column holding each persona's own stimulus (e.g. the message
         or condition it saw); `context` (a string) is then still shown to everyone.
     stimulus_batching: "group" (default) batches only personas with the same stimulus, which goes into the
-        shared context block; "inline" mixes stimuli in one batch and shows each under its person.
+        shared context block; "inline" mixes stimuli in one batch and shows each under its person. Either way
+        every batch of an arm (all stimulus groups) goes out in one parallel `llm.map`, not one group at a time.
+    parallel: threads for that map. None (default) uses the backend's own `parallel` attribute (e.g.
+        `Claude(parallel=16)`), or 4 when the backend has none.
+    tag: a ledger-tag label for this survey; panel calls are then tagged f"{tag}:survey:{arm}" (default
+        "survey:{arm}"). A backend tag/prefix is joined on top (see `simengine.sim.panel`).
     free_text: default for Likert/numeric questions; False drops the free-text field (fewer output tokens,
         no SSR). A question dict's own "free_text" wins.
-    refusal_retry / cache_refusals: see `ask_panel`. The result reports `refused` (personas lost to a refusal
-        that persisted after the reframed re-ask), `unparsed` (personas unanswered for any other reason),
-        `refusal_rate` (main arm, first pass) and per-arm detail in `refusals`.
+    refusal_retry / cache_refusals: see `ask_panel`. The result reports `refused` (int: the number of
+        main-arm personas lost to a refusal that persisted after the reframed re-ask), `unparsed` (int: the
+        number of main-arm personas unanswered for any other reason), their id lists `refused_ids` and
+        `unparsed_ids` (persona order), `refusal_rate` (main arm, first pass) and per-arm detail in `refusals`.
     empty_retry / empty_retry_kw: see `ask_many`. A batch whose reply stays empty (EmptyResponseError) or fails
         with another LLMError counts as unparsed (usage `empty_calls` / `error_calls`, plus a warning); the survey
         raises only when no persona in the main arm got an answer."""
@@ -399,12 +434,17 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
         ps = [_without_field(p, stimulus_col) for p in ps]
     ask_kw = {"refusal_retry": refusal_retry, "cache_refusals": cache_refusals, "empty_retry": empty_retry,
               "empty_retry_kw": empty_retry_kw}
-    opts = {"stim": stim, "stimulus_batching": stimulus_batching, "ask_kw": ask_kw}
+    opts = {"stim": stim, "stimulus_batching": stimulus_batching, "ask_kw": ask_kw,
+            "parallel": _resolve_parallel(llm, parallel)}
+
+    def arm_tag(arm: str) -> str:
+        return f"{tag}:survey:{arm}" if tag else f"survey:{arm}"
+
     info: dict[str, dict] = {"persona": {}}
 
     em.stage("persona", n=len(ps))
     arms = {"persona": _arm(llm, ps, qs, lang, batch, question_group, shared, "survey", usage, arm="persona",
-                            info=info["persona"], **opts)}
+                            info=info["persona"], llm_tag=arm_tag("persona"), **opts)}
     q0 = qs[0]
     for pid, c in arms["persona"].items():
         a = c.get(q0["id"]) or {}
@@ -417,7 +457,7 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
         em.stage(arm, n=len(cp), calls=plan[arm]["calls"])
         info[arm] = {}
         arms[arm] = _arm(llm, cp, qs, lang, plan[arm]["batch"], question_group, shared, f"survey:{arm}",
-                         usage, arm=arm, info=info[arm], **opts) if cp else {}
+                         usage, arm=arm, info=info[arm], llm_tag=arm_tag(arm), **opts) if cp else {}
     _apply_ssr(arms, qs, ssr, warnings)
 
     main = arms["persona"]
@@ -429,8 +469,9 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
                         f"re-ask) and {usage.error_calls} failed calls; their personas count as unparsed. Last: "
                         f"{usage.last_error}. For empty replies pass thinking='off' or a larger max_tokens.")
     missing = [p.pid for p in ps if p.pid not in main]
-    n_refused = sum(1 for p in missing if p in mi["refused_ids"])
-    n_unparsed = len(missing) - n_refused
+    refused_ids = [p for p in missing if p in mi["refused_ids"]]
+    unparsed_ids = [p for p in missing if p not in mi["refused_ids"]]
+    n_refused, n_unparsed = len(refused_ids), len(unparsed_ids)
     if missing:
         warnings.append(f"{len(missing)} personas unanswered ({n_refused} refused after the reframed re-ask, "
                         f"{n_unparsed} unparsed or missing)")
@@ -482,7 +523,8 @@ def survey(personas, questions, options=None, *, llm, context: str | dict = "", 
            "questions": results, "answers": main,
            "controls": {"arms": ctrl, "plan": plan, "answers": {k: v for k, v in arms.items() if k != "persona"}},
            "segments": seg, "warnings": warnings, "usage": usage.as_dict(),
-           "refused": n_refused, "unparsed": n_unparsed, "refusal_rate": mi["refusal_rate"],
+           "refused": n_refused, "unparsed": n_unparsed, "refused_ids": refused_ids, "unparsed_ids": unparsed_ids,
+           "refusal_rate": mi["refusal_rate"],
            "unparsed_items": bad_items, "refusals": refusals}
     if stim is not None:
         out["stimuli"] = {p.pid: stim.get(p.pid) for p in ps}

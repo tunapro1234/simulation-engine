@@ -45,6 +45,7 @@ class ClaudeCode(CachedBackend):
     calls). For thousands of short calls use `Claude` (API): every `claude -p` call carries a large
     tool/system context (see docs/modules/llm.md).
     `max_tokens` is accepted for protocol compatibility but the CLI does not take it.
+    tag / tag_prefix / per-call tag= combine as for `Claude` (TSV tag = "<tag_prefix><tag>:<call tag>").
     """
 
     def __init__(self, model: str = "claude-haiku-5-5", *, timeout: float = 300.0, language: str = "English",
@@ -52,9 +53,10 @@ class ClaudeCode(CachedBackend):
                  max_calls: int | None = None, budget_usd: float | None = None, use_system_prompt: bool = True,
                  extra_args: Sequence[str] = (), max_attempts: int = 3, error_wait: float = 10.0,
                  parallel: int = 4, tag: str = "", runner: Callable[..., Any] | None = None,
-                 sleep: Callable[[float], None] = time.sleep, spend_log=None, agent: str | None = None):
+                 sleep: Callable[[float], None] = time.sleep, spend_log=None, agent: str | None = None,
+                 tag_prefix: str | None = None):
         super().__init__(cache_dir=cache_dir, ledger=ledger, budget_usd=budget_usd, tag=tag, parallel=parallel,
-                         spend_log=spend_log, agent=agent)
+                         spend_log=spend_log, agent=agent, tag_prefix=tag_prefix)
         self.model = model
         self.timeout = timeout
         self.language = language
@@ -124,7 +126,7 @@ class ClaudeCode(CachedBackend):
 
     # ------------------------------------------------------------ LLM protocol
     def complete(self, system: str, user: str, *, max_tokens: int = 256, **kw: Any) -> LLMResponse:
-        tag = kw.pop("tag", self.tag)
+        tag = self._call_tag(kw)
         validate = kw.pop("validate", None)
         cache_if = kw.pop("cache_if", None)
         sample = kw.pop("sample", 0)

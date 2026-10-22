@@ -36,6 +36,10 @@ the first 401 or spend-limit error, and it does not send `temperature`, which Ha
 - **Shared spend log.** `export SIMENGINE_SPEND_LOG=<path>` and `SIMENGINE_AGENT=<name>` make every real call append
   one tab-separated line (time, agent, model, input, output, usd, tag) next to the JSONL ledger; or pass
   `Claude(..., spend_log=..., agent=...)`. Give each step a `tag=` so the cost splits by step.
+- **Run prefix on the tag.** `export SIMENGINE_SPEND_TAG_PREFIX=prova-d3/` (or `Claude(..., tag_prefix="prova-d3/")`)
+  puts the prefix in front of every TSV tag. The backend's own `tag=` and the call's tag are joined:
+  `Claude(tag="L1", tag_prefix="d3/")` + `complete(..., tag="prior")` logs `d3/L1:prior`; `survey(..., tag="dev")`
+  logs `d3/L1:dev:survey:persona`. Before this, a call tag silently replaced the backend tag (D3 #3).
 
 ## 1. Read the brief and name the task (10 min)
 
@@ -48,6 +52,7 @@ Decide which of these the brief is really asking for, because the measured answe
 | the same, but with no past tests | `ab` | `LLMDirectAB` with a big model, then `EarlyTestBayes` | 2.27x traffic saving at 100 impressions per arm (prior calibrated on 20 tests) |
 | "what will each customer do?" with history | `binary` / `continuous` | persistence, decayed frequency, LightGBM | LLM personas stayed below the history model |
 | "predict answers of people in **new** countries/groups" from survey data in other groups (no earlier wave) | `continuous` / `binary` | `methods.GroupTransfer` (group-level ridge + person deviation, optional LLM group prior) scored with `methods.oof_predict(..., group=...)` | D2 rehearsal, group-held-out CV Spearman: person-only 0.197, two-stage 0.257, + LLM prior 0.295-0.311, oracle 0.344; one dataset, no CI |
+| "predict member ratings for **new** items/films with no ratings" (cold start) and the item-level residual | `continuous` | `methods.GroupTransfer(group=item)` on `methods.item_holdout_features(ratings, ...)` (member stats + SVD taste rebuilt without each fold's items), `oof_predict(..., folds=res.folds)`; ladder rung `methods.MFBaseline`. Score: `evaluate(offset_col="member_mean", aggregate_by=item, noise_ceiling="variance_components")` | D3 rehearsal, one run, 300 dev films, film residual Spearman: label-free member mean 0.839, audience composition 0.845, stack with the LLM title prior and persona panel 0.895; split-half ceiling 0.987 (the rehearsal's own script). The LLM gain was title recognition (named 0.779 vs blind 0.169); no CI here |
 | "how will adoption / a cascade evolve?" | `continuous` | curves + `abm.AdoptionABCAnalogy` with the Bass control | ABM 8.48 vs Bass control 9.73 MAE |
 | "tell us why / give us voices" | qualitative | `sim.survey` / `sim.ab_test` panel with controls | use quotes, not the panel's numbers |
 
@@ -92,7 +97,14 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
   `--prereg`. A `se.research.seal` chain (`.prereg/chain.jsonl`) is read too. Memorisation of public surveys is not
   ruled out: for numeric aggregates (0-100 country means) use `se.correlation_audit(truth, named, blind, llm=...)`
   (named vs blind prompt, Spearman), or `memorization_audit(..., tolerance=, relative=True)` instead of the ±0.02
-  exact hit.
+  exact hit. `correlation_audit` checks `max_calls` (default 500) against the planned total (arms × keys ×
+  samples) before the first call and names the number to pass: 300 keys × 2 arms needs `max_calls=600`. Save the
+  result (`se.evidence.save_json(audit, "runs/audit.json")`) for step 5.
+- **Licensed data: the seal registry holds a full copy of the predictions** (`<sha>.csv.gz`). Keep the registry
+  git-ignored (`.onkayit` and `.prereg` are in this repo's `.gitignore`; add them to your team repo's too) or outside
+  the repo, or seal without the copy: `se.seal(pred, "test", registry="runs/.onkayit", store_copy=False)` (chain record
+  only) or `archive_dir="<outside the repo>"` (the chain keeps only the file name). CLI: `simengine seal pred.csv
+  "test" --registry runs/.onkayit --no-copy`. `evaluate(prereg=)` and `verify_chain` need only the chain.
 - **With a learner:** stack the LLM output with the learner (`ABStack`, `TwinStack`, `DevStack`). Also build the
   stack without the LLM column. On Twin that fair LLM-free stack was what turned a claimed +0.071 into +0.006.
 - **As a prior in a small test:** `EarlyTestBayes` after `calibrate_prior` on past tests. The gain disappears at
@@ -104,21 +116,26 @@ as `baselines_oof` in step 5, not as `unlabeled_baselines`.
   - `from_table` stops on empty or duplicated ids with the counts; `id_col=None` uses row numbers.
   - **Soft refusals.** Haiku refused 59 of 150 survey batches in plain text in D2. `survey` / `ask_panel` now detect
     a refusal (`se.looks_like_refusal`), keep it out of the cache and re-ask once with a research-forecast framing.
-    Read `res["refused"]`, `res["unparsed"]` and `res["refusal_rate"]` and put them on the card: the missing
-    personas are not missing at random. For your own direct calls, `llm.complete(..., cache_if=lambda t: not
+    Read `res["refused"]`, `res["unparsed"]` (counts, ints) and `res["refusal_rate"]` and put them on the card: the
+    missing personas are not missing at random. The ids are in `res["refused_ids"]` / `res["unparsed_ids"]`. For your own direct calls, `llm.complete(..., cache_if=lambda t: not
     se.looks_like_refusal(t))`.
   - **Numeric / slider questions:** `{"id": "pol", "text": ..., "kind": "numeric", "min": 0, "max": 100}`; out of
     range counts as unparsed, never clipped. `free_text=False` drops the answer sentence (most of the output tokens;
     SSR is then skipped).
   - **Per-person stimulus** (each person saw a different message): `survey(panel, qs, llm=llm,
     stimulus_col="condName")` or `context={pid: text}`; personas are batched by stimulus.
-  - The ledger tag per arm is `survey:persona` / `survey:no_persona` / `survey:persona_swap`.
+  - **Many stimuli** (e.g. 900 films × 10 personas): all stimulus groups of an arm go out in one `llm.map`, with
+    `parallel=` threads (default: the backend's `parallel`, e.g. `Claude(parallel=16)`, else 4). In D3 the old
+    group-by-group loop ran at about 1 call/s; no hand-rolled `ThreadPoolExecutor` is needed now. Smoke-test 2
+    stimuli first.
+  - The ledger tag per arm is `survey:persona` / `survey:no_persona` / `survey:persona_swap`; `survey(..., tag="dev")`
+    makes it `dev:survey:<arm>` so dev and test runs split in the spend log.
 
 Skip discussion rounds and agent societies for accuracy: neither moved the result measurably.
 
 ## 4b. Trap check before you seal (10 min)
 
-Every item below cost a rehearsal team time or a wrong claim in the two blind rehearsals (22 Oct). `tr`/`te` are the
+Every item below cost a rehearsal team time or a wrong claim in the three blind rehearsals (22 Oct). `tr`/`te` are the
 train and test inputs, `FEATS` the columns your model uses, `G` the group column (country, store, wave).
 
 1. **Post-response columns.** Columns asked after the stimulus (trust, identity, follow-ups) make CV look great and
@@ -152,18 +169,49 @@ train and test inputs, `FEATS` the columns your model uses, `G` the group column
 10. **Background jobs.** Save the PID when you start a long job (`cmd > log/x.log 2>&1 & echo $! > log/x.pid`) and
     wait on `kill -0 "$(cat log/x.pid)"`, not `pgrep -f` (it matches your own shell). Never pipe a long job into
     `| tail` (the log and the exit code are lost). Before you submit, stop your own leftover PIDs.
+11. **Features rebuilt inside folds** (member stats, SVD taste vectors computed without the fold's items). The OOF
+    split must be the same folds: `oof_predict(model, dev, ..., group=item, folds=res.folds)`; its own GroupKFold
+    leaves items that shared the SVD basis in training (D3: dev about 0.03 optimistic, ridge proxy 0.865 → 0.835,
+    one run). Align each fold's SVD basis (`item_holdout_features(align="full")` / `procrustes_align`), and make
+    absolute counts relative (`user_n_pct`, not `user_n`): a fold sees fewer ratings than the full train set.
+    `GroupTransfer`'s default composition averages every numeric column, so pass `composition=[...]` if unaligned
+    fold columns are in the table.
 
-Two rehearsal facts to calibrate expectations: the team with the plain kit took 63 min, the simengine-only team
+Rehearsal facts to calibrate expectations: the team with the plain kit took 63 min, the simengine-only team
 37 min; the kit team's CV estimate matched the test (0.308 → 0.306), the simengine team's was optimistic
 (0.311 → 0.283, inside the card's CI). The optimism is consistent with trap 4 (USA was ~20 % of the pooled CV rows and
 absent from test), but that was not proven. Both teams beat the demographic GBM baseline at person level
 (+0.066 [0.026, 0.101] and +0.042 [0.006, 0.084]); neither did at country level or on sharing.
+In D3 (new-film cold start, simengine `018b1a2`, one run) the simengine-only team submitted in 19 min. On the test
+films, graded by the rehearsal referee: film residual Spearman 0.897 [0.871, 0.917] against the hidden baseline's 0.567
+(+0.330 [0.255, 0.411]); noise ceiling 0.956. Its own LLM-free arms were close behind (audience composition 0.880,
+the one-line member-mean baseline 0.856), and its registered claim "the LLM adds over the LLM-free stack" went from
++0.050 [0.028, 0.075] on dev to +0.017 [−0.001, 0.035] on test, so its drop condition was met (borderline). Build your strongest LLM-free baseline
+yourself, and write "passed on dev", not "passed".
 
 ## 5. Evidence card (15 min)
 
 ```bash
 simengine evaluate data/frame.csv --ours stack --raw llm --task binary --primary auc \
     --unlabeled-baselines persistence --prereg .onkayit --out runs/evidence --lang en
+```
+
+Group residual task (D3 shape) with the memorization audit, the blind arm and the registered drop conditions:
+
+```bash
+simengine evaluate data/dev_pairs.csv --ours ours --task continuous --primary spearman \
+    --aggregate-by movie_id --offset-col member_mean --noise-ceiling variance_components \
+    --baselines-oof T3 --unlabeled-baselines T0b --memorization runs/audit.json --blind-col ours_blind \
+    --compare P1:L1 --compare "P2::c: P2 ≈ 0" --out runs/dev-evidence --lang en
+```
+
+```python
+rep = se.evaluate(dev, ours="ours", task="continuous", primary="spearman", aggregate_by="movie_id",
+                  offset_col="member_mean", noise_ceiling="variance_components", baselines_oof=["T3"],
+                  unlabeled_baselines=["T0b"], memorization=audit, blind_col="pred_ours_blind",
+                  compare=[("P1", "L1"), ("P2", None, "c: P2 ≈ 0")])
+se.paired_diff(dev, "P1", "P_nopersona", metric="spearman", aggregate_by="movie_id",
+               offset_col="member_mean")         # any other pair on the frame, same group bootstrap
 ```
 
 Always pass `--primary` with the metric you pre-registered in step 2. Without it, `evaluate` grades on the task
@@ -178,6 +226,18 @@ flip with the metric, so grade on the one you registered. `--prereg` must be the
   `high confidence` of +0.310 before the fix). Every `pred_` column is on the ladder.
 - **Ceiling.** `--ceiling-col pred_oracle --ceiling-label "oracle"` (`ceiling_col=`) uses a model/oracle ceiling
   instead of the human retest; the gap closed is computed from it and the card names the ceiling type.
+- **Memorization.** Pass the step-4 audit (`memorization=audit` / `--memorization runs/audit.json`); without it the
+  card says the audit was skipped and flags "not proven: leakage/memorization" (D3 #8). When the audit warns and ours
+  uses an LLM, the badge reason says the gain may come from recognition (`--ours-no-llm` / `ours_uses_llm=False`
+  when it does not). `blind_col=` adds ours − blind and warns when the blind arm keeps less than half of the gain.
+- **Residuals and the noise ceiling.** `offset_col=` subtracts a per-row offset (the member's training mean) from
+  truth and predictions before `aggregate_by`, so the card scores the group residual directly.
+  `noise_ceiling="variance_components"` (older name `"split_half"`; with `aggregate_by`, spearman/pearson/r2) gives
+  the sampling-noise ceiling of the group means over all scored groups (one-row groups included), so "gap closed" is computed without a human retest.
+- **Registered comparisons.** `compare=[("P1", "L1"), ("P2", None, "label")]` / `--compare P1:L1` put each
+  pre-registered drop condition on the card as a paired difference with its CI (`None`: against 0);
+  `se.paired_diff(frame, a, b, aggregate_by=..., offset_col=...)` for any other pair (a report only holds its
+  registered pairs).
 - **Group level.** `--aggregate-by country` (`aggregate_by=` or `se.evaluate_aggregate(frame, by=...)`) averages
   truth and predictions per group and bootstraps over groups, e.g. a 20-country Spearman. Run it as a second report.
 - **Large tables.** In a single-item frame above 2,000 rows the PPI++ multiplier is computed on a fixed-seed

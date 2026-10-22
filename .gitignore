@@ -26,7 +26,10 @@ persona_methods/
 beebench_b01/
 *_backstories.json
 *personas_sample.json
-.onkayit/
+# seal registries (se.seal -> .onkayit/, se.research.seal -> .prereg/): they can hold full prediction copies;
+# no trailing slash so a symlinked registry is ignored too
+.onkayit
+.prereg
 *-evidence/
 /simengine-demo/
 /evidence/

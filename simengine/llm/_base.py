@@ -10,7 +10,7 @@ from ..types import LLMResponse
 from .cache import DiskCache, cache_key
 from .errors import BudgetExceeded
 from .jsonx import complete_json
-from .ledger import CostLedger
+from .ledger import CostLedger, compose_tag
 from .parallel import parallel_map
 
 
@@ -21,19 +21,17 @@ class CachedBackend:
 
     def __init__(self, *, cache_dir: str | os.PathLike | None = None, ledger: CostLedger | str | os.PathLike | None = None,
                  budget_usd: float | None = None, tag: str = "", parallel: int = 4,
-                 spend_log: str | os.PathLike | None = None, agent: str | None = None):
+                 spend_log: str | os.PathLike | None = None, agent: str | None = None,
+                 tag_prefix: str | None = None):
         self.cache = DiskCache(cache_dir) if cache_dir is not None else None
         if isinstance(ledger, CostLedger):
-            if spend_log is not None or agent is not None:
-                raise ValueError("spend_log/agent configure the default ledger; with ledger=CostLedger(...) pass "
-                                 "tsv_path=/agent= to that CostLedger instead")
+            if spend_log is not None or agent is not None or tag_prefix is not None:
+                raise ValueError("spend_log/agent/tag_prefix configure the default ledger; with ledger=CostLedger(...) "
+                                 "pass tsv_path=/agent=/tag_prefix= to that CostLedger instead")
             self.ledger = ledger
-        elif ledger is not None:
-            self.ledger = CostLedger(ledger, tsv_path=spend_log, agent=agent)
-        elif cache_dir is not None:
-            self.ledger = CostLedger(Path(cache_dir) / "ledger.jsonl", tsv_path=spend_log, agent=agent)
         else:
-            self.ledger = CostLedger(None, tsv_path=spend_log, agent=agent)
+            path = ledger if ledger is not None else (Path(cache_dir) / "ledger.jsonl" if cache_dir is not None else None)
+            self.ledger = CostLedger(path, tsv_path=spend_log, agent=agent, tag_prefix=tag_prefix)
         self.budget_usd = budget_usd
         self.tag = tag
         self.parallel = parallel
@@ -62,6 +60,20 @@ class CachedBackend:
         tot = self.ledger.total()
         if tot >= self.budget_usd:
             raise BudgetExceeded(f"cost ledger total ${tot:.4f} >= budget ${self.budget_usd:.4f}; no new call made")
+
+    def _call_tag(self, kw: dict) -> str:
+        """Pop `tag` from a complete() kwargs dict and combine it with the instance tag (`compose_tag`).
+        The ledger then prepends its tag_prefix to the TSV column."""
+        return compose_tag(self.tag, kw.pop("tag", None))
+
+    @property
+    def tag_prefix(self) -> str:
+        """The ledger's tag prefix (from tag_prefix= or env SIMENGINE_SPEND_TAG_PREFIX)."""
+        return getattr(self.ledger, "tag_prefix", "") or ""
+
+    def full_tag(self, call_tag: str | None = None) -> str:
+        """The tag a real call with `tag=call_tag` writes to the shared TSV: prefix + compose_tag(...)."""
+        return self.tag_prefix + compose_tag(self.tag, call_tag)
 
     def _key(self, key_model: str, system: str, user: str, params: dict) -> str:
         return cache_key(key_model, system, user, params)

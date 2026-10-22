@@ -18,6 +18,7 @@ that combine an LLM prediction with a model learned from data.
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank | 26.94 vs **31.60** exact next action on OPeRA |
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
+| `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -29,6 +30,7 @@ that combine an LLM prediction with a model learned from data.
 - **[makro]** = `uretim/makro/RAPOR.md`, **[llmabm]** = `uretim/makro/llmabm/RAPOR.md`
 - **[dongu]** = `uretim/dongu/GUNLUK.md` (OpinionQA group loop)
 - **[prova-d2]** = `uretim/prova/d2/NOTLAR.md` and `SIMENGINE-EKSIK.md` (blind rehearsal: new-country survey answers; code `kod/cv.py`, `cv_biz3.py`, `tahmin.py`)
+- **[prova-d3]** = `uretim/prova/d3/SIMENGINE-EKSIK.md` (blind rehearsal: new-film ratings, item cold start; code `kod/ozellik.py`, `kod/model.py`)
 
 Every number below comes from those files. This port re-measured nothing. The tests
 (`tests/test_methods_*.py`) only check behaviour on synthetic data.
@@ -371,12 +373,31 @@ gt.predict(test[feats + ["country"]])          # person-level
 gt.predict_groups(test[feats + ["country"]])   # stage A level per new country (rate for binary targets)
 ```
 
-`oof_predict(model, df, *, features, target, group=None, n_splits=5, seed=0, method="predict")`
+`oof_predict(model, df, *, features, target, group=None, n_splits=None, seed=0, method="predict", folds=None)`
 - `model`: any object with `fit(X, y)` / `predict(X)` (sklearn estimator, simengine baseline, `GroupTransfer`) or a
   zero-argument factory. It is cloned (or deep-copied) per fold. If `fit` / `predict` accept `groups=`, the fold's
   group labels are passed, which is how `GroupTransfer` gets the groups.
-- `group` given: `GroupKFold(n_splits)`, deterministic as in the D2 code, so `seed` is unused. Fewer groups than
+- `group` given: `GroupKFold(n_splits)` (`n_splits` defaults to 5), deterministic as in the D2 code, so `seed` is unused. Fewer groups than
   `n_splits` raises `ValueError`. Without `group`: `KFold(shuffle=True, random_state=seed)`.
+- `folds=`: precomputed folds, used **exactly** instead of `GroupKFold` / `KFold`. Accepted: a column name of `df`,
+  a Series of fold ids aligned with `df.index` (by index), a 1-D array of fold ids (one per row), or an iterable of
+  `(train_idx, test_idx)` positional pairs (what an sklearn `split` yields). Fold id `-1` = always trained on,
+  never predicted (sklearn `PredefinedSplit`); NaN = row left out. `group=` still goes to models that take
+  `groups=` (`GroupTransfer` keeps getting the item / country labels), and a `UserWarning` flags folds where a
+  group is in both train and test. `n_splits` together with `folds` must equal the number of folds, else
+  `ValueError`. `.attrs["fold_ids"]` lists the fold labels in the order of `.attrs["fold"]`.
+
+  Why it matters: when features are rebuilt inside folds (SVD taste vectors, member mean / count, genre affinity;
+  `item_holdout_features` below), the model must be scored with the **same** folds. A fresh `GroupKFold` puts rows
+  whose features were built while the held-out items were still in the data into training, and dev comes out
+  optimistic. In the D3 rehearsal (`uretim/prova/d3/SIMENGINE-EKSIK.md` #9, one run, no CI) the referee's ridge
+  proxy dropped from 0.865 to 0.835 on dev once the OOF split matched the feature folds, i.e. about 0.03 of
+  optimism.
+  ```python
+  res = M.item_holdout_features(ratings, user_col="user_id", item_col="movie_id", items=movies, svd_rank=16, cap=200)
+  oof = M.oof_predict(M.GroupTransfer("movie_id", group_features=movies), res.dev,
+                      features=res.features + ["movie_id"], target="residual", group="movie_id", folds=res.folds)
+  ```
 - `method="predict_proba"` keeps the positive-class column of a two-column output (sklearn classifiers). simengine
   binary baselines already return P(y=1) from `predict`.
 - It returns a float Series aligned with `df.index`. Rows with a missing target (or group) are not trained on and
@@ -413,6 +434,14 @@ alphas=logspace(-1, 3, 20), clip=(0.02, 0.98), seed=0)`: a port of `iki_asama` i
   prior = llm_prior.set_index("country")          # index "1", "2", ... while df.country holds ints 1, 2, ...
   M.GroupTransfer("country", group_features=prior)  # warns "matched ... as strings" and still uses the prior
   ```
+- **Composition with fold-built features.** The default `composition=None` averages *every* numeric person feature
+  per group. If some columns are rebuilt per fold (SVD taste vectors, member statistics), their per-group means
+  are only comparable across folds when the bases agree: SVD factors have arbitrary sign and rotation per fit, so
+  align each fold to one reference basis (`item_holdout_features(align="full")` does it with orthogonal
+  Procrustes) or leave those columns out with an explicit list, e.g.
+  `GroupTransfer("movie_id", composition=["user_mean", "user_n_pct", "age"])`. Prefer relative counts
+  (`user_n_pct`) over absolute ones (`user_n`): holding out popular items shifts absolute counts between folds and
+  test. No warning is raised for this; it is a documented trap.
 - Differences from the research code: composition is computed from the rows passed to `fit` / `predict`, while
   the port pooled train and test inputs. The values are the same when whole groups are passed. NaN fill uses
   training-group means instead of all-group means, and the binary output is clipped.
@@ -446,6 +475,90 @@ D2 fit it on about 34 groups per fold, so keep group features few.
 - The D2 numbers come from one dataset and one CV split and have no bootstrap CI. `tests/test_methods_transfer.py`
   only checks that, on synthetic groups with a real composition effect, `GroupTransfer` beats a global mean and
   a person-only ridge in group-held-out CV (and that the prior helps when it carries signal).
+
+## Item cold start (`coldstart.py`)
+
+Task shape: members rated many items; some **new** items have no rating at all. Predict member x new-item ratings and
+the item-level residual (the item's mean rating minus the mean of its raters' own means). Treat the item as the
+group: `GroupTransfer(group=item)` learns the item level from the audience composition (who rated it) plus item
+metadata, and a person model adds the member x item deviation. The dev table must imitate the test condition: the
+dev items' ratings must not be in the member features.
+
+```python
+import simengine.methods as M
+# ratings: user_id, movie_id, rating; movies: indexed by movie_id, 0/1 genre columns (+ year...); users: indexed by user_id
+res = M.item_holdout_features(ratings, user_col="user_id", item_col="movie_id", items=movies,
+                              genre_cols=genre_cols, users=users[["age", "female"]],
+                              n_splits=5, seed=0, svd_rank=16, cap=200, min_item_ratings=100)
+dev = res.dev                                   # held-out ratings + features built without their items + "fold"
+feats = res.features + ["movie_id"]
+gt = M.GroupTransfer("movie_id", group_features=movies[genre_cols])
+oof = M.oof_predict(gt, dev, features=feats, target="residual", group="movie_id", folds=res.folds)
+mf = M.oof_predict(M.MFBaseline("user_id", "movie_id"), dev, features=["user_id", "movie_id"], target="rating",
+                   group="movie_id", folds=res.folds)          # ladder rung: member level + item prior
+test_X = res.transform(test_pairs)               # test features from all ratings, same SVD basis as dev
+final = gt.fit(dev[feats], dev.residual).predict(test_X[feats])
+```
+
+`item_holdout_features(ratings, *, user_col="user_id", item_col="item_id", rating_col="rating", folds=None,
+n_splits=None, seed=0, svd_rank=16, cap=None, min_item_ratings=1, items=None, genre_cols=None, users=None,
+align="full", align_scale=True, affinity_shrink=5.0, svd_prefix="svd_")`: a port of `build` / `user_stats` / `align` in
+`kod/ozellik.py` **[prova-d3]**.
+- Folds: items with at least `min_item_ratings` ratings are dealt with `default_rng(seed).permutation(n) %
+  n_splits` over the sorted item ids (the port: 5 folds, items with >= 100 ratings). Or pass `folds=` as a Series
+  item id -> fold id (not together with `n_splits`).
+- For fold k, the fold's items' ratings are removed and, from the remaining ratings, it recomputes per member:
+  `user_mean`, `user_n`, `user_sd` (NaN -> 1.0), `user_n_pct` (percentile rank of the count), the genre affinity
+  (sum of residuals per genre / (genre count + `affinity_shrink`)) and an SVD taste vector of rank `svd_rank` from
+  the member x item residual matrix (`randomized_svd`, `random_state=0`, factors `U*S`). The pair feature
+  `affinity` is the member's mean affinity over the item's genres. `users` columns are joined as they are.
+- `cap`: at most `cap` held-out ratings per item, sampled with a per-item seed (the port used 200 to mirror the test
+  items' audience size). Members whose ratings were all on the fold's items have no fold statistics, so their
+  rows are dropped, as in the port.
+- `align="full"`: each fold's SVD basis is rotated onto the full-train basis by orthogonal Procrustes on the common
+  members, so fold vectors are comparable with each other and with `transform` (test). The rotation is fitted on
+  the full basis, which saw the held-out items. That `svd_rank x svd_rank` rotation is the only held-out
+  information in a fold's features: norms and inner products of the fold's vectors do not depend on it (a test
+  checks this). `align=None` skips it.
+- `align_scale=True` (default, with `align="full"`): after the rotation each fold's SVD vectors are multiplied by
+  one scalar, ||full vectors|| / ||fold vectors|| on the common members (`procrustes_align(scale=True)`, factor in
+  `res.scales[k]`). A fold's SVD sees only about (n_splits - 1)/n_splits of the ratings, so its `U*S` vectors are
+  about sqrt of that smaller; with rotation only, the sd of `svd_0..2` in `dev` was 0.89 of the `transform()` sd on
+  synthetic data (300 members, 100 items, 5 folds), and a model fitted on `dev` overweights the SVD part at test
+  time. Scaled, the ratio is about 0.98 on the same data. The scalar is the only other number fitted on the full
+  basis. `align_scale=False` = the port's rotation only. Like the `user_n` vs `user_n_pct` note: features built
+  on fewer ratings must be brought to the test-time scale.
+  ```python
+  res = item_holdout_features(ratings, n_splits=5, svd_rank=16)          # rotated + rescaled (default)
+  res.scales                                                             # {fold: factor}, about 1.1 for 5 folds
+  ```
+- Returns `ItemHoldout`: `dev` (ids, rating, `residual` = rating - fold `user_mean`, `fold`, features), `folds`
+  (= `dev["fold"]`, pass it to `oof_predict(folds=...)`), `item_folds`, `members` (full-train member features),
+  `features` (suggested inputs; `user_n_pct` rather than the absolute `user_n`), `svd_cols`, `rotations`, `scales`, and
+  `transform(pairs)` for test pairs.
+- `procrustes_align(frame, ref, cols, *, scale=False)` is the alignment step on its own (rotation in
+  `.attrs["rotation"]`; `scale=True` also rescales by the norm ratio, in `.attrs["scale"]`).
+
+`MFBaseline(user_col="user_id", item_col="item_id", *, rank=16, reg=10.0, reg_bias=5.0, n_iter=10, item_prior=None,
+seed=0)`: biased matrix factorisation `mu + b_u + b_i + p_u . q_i` fitted by alternating least squares, with
+`fit(X, y)` / `predict(X)` on a frame of (member, item) columns, so it drops into `oof_predict`. `rank=0` = biases
+only. The defaults are generic starting values, not tuned on any rehearsal. An unseen item gets `mu + b_u +
+item_prior_` (the unweighted mean item bias, or `item_prior=`), an unseen member `mu + b_i`, both unseen `mu +
+item_prior_`. In pure item cold start every dev / test item is unseen, so MF is a member-level rung: it shows how
+much the item side (composition, metadata, LLM prior) adds, not a competitor for the new items. On warm pairs (a
+random 80/20 split of the synthetic test data) it beats the member mean and the biases-only model.
+
+**What was measured.** The D3 rehearsal (`uretim/prova/d3/SIMENGINE-EKSIK.md` #1 and #9, one run, no CI) built this
+dev table by hand and used `GroupTransfer("movie_id")` as the backbone. Its only reported dev number for the recipe
+is the ~0.03 optimism above (referee's ridge proxy, 0.865 -> 0.835) when the OOF split did not match the feature folds. This
+port re-measured nothing. `tests/test_methods_coldstart.py` only checks, on synthetic ratings with a taste
+structure (selection on taste, item quality tied to taste), that a held-out item's ratings do not change its fold's
+features, that Procrustes alignment brings fold vectors to the full basis, and that `GroupTransfer(group=item)` on
+these features beats the member-mean baseline (pair RMSE, item-level residual Spearman > 0.5).
+
+**When it does not help.** When the audience of a new item is not known in advance (no raters at all), the
+composition is empty and only item metadata remains (`composition=()`). Sparse members (few ratings outside the
+fold) get noisy statistics; the SVD rank must stay below the number of items per fold.
 
 ## Not ported / gaps
 

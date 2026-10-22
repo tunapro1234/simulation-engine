@@ -208,9 +208,19 @@ def correlation_audit(truth, named, blind, *, llm=None, system: str = BEST_GUESS
     Returns the dict `evaluate(memorization=...)` reads: durum ("uyari" when the paired bootstrap CI of
     Spearman(named) − Spearman(blind) lies above `margin`, else "tamam"), ayrinti, deger (the difference), alt, ust,
     plus spearman_named / spearman_blind with CIs, MAE of each arm, n, n_unparsed_named / n_unparsed_blind.
+    max_calls: checked BEFORE any call against the planned total (prompt arms x keys x samples; cached replies
+    are counted, since the LLM backend has no public cache probe); the error names the number needed.
     Typical use: a few dozen country means, named vs blind prompt, Spearman with the truth."""
     t = {k: _sayi_cek(v) for k, v in _sozluk(truth).items()}
     keys = [k for k, v in t.items() if np.isfinite(v)]
+    # çağrı sınırı ÇAĞRIDAN ÖNCE: iki kolun toplamı baştan bilinir (önbellek isabetleri dahil; simengine.llm önbelleği
+    # yoklamak için açık bir API vermiyor, bu yüzden isabetler düşülmez)
+    planned = sum(len(keys) * samples for arm in (named, blind) if isinstance(arm, str))
+    if planned > max_calls:
+        n_arms = sum(isinstance(arm, str) for arm in (named, blind))
+        raise ValueError(f"correlation_audit needs {planned} calls ({n_arms} prompt arm(s) x {len(keys)} keys x "
+                         f"{samples} sample(s)) > max_calls {max_calls}; pass max_calls={planned} (cached replies are "
+                         "counted too: a re-run from the cache is free) or use fewer keys / samples. No call was made.")
     sayac = [0]
     hata: list = []
     a_n = _sor(named, keys, llm, system, max_tokens, samples, max_calls, sayac, thinking, hata)

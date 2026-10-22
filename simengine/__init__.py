@@ -8,6 +8,7 @@
     report = se.evidence.evaluate(frame, ours="score", task="continuous")
     se.evidence.card(report, "card.md"); se.evidence.dashboard([report], "pano.html")
     se.seal(predictions, "before truth")                 # one seal: = se.evidence.seal, writes .onkayit/zincir.jsonl
+    se.paired_diff(report, "P1", "L1")                   # paired difference of any two arms, same resamples
 
 Subpackages are imported lazily on first attribute access, so `import simengine` stays fast and optional
 dependencies (anthropic, lightgbm, sentence-transformers) are only needed by the parts that use them.
@@ -35,6 +36,7 @@ _ENTRY_POINTS = {
     "EmptyResponseError": ("llm", "EmptyResponseError"),
     "ThinkingBudgetWarning": ("llm", "ThinkingBudgetWarning"),
     "looks_like_refusal": ("llm", "looks_like_refusal"),
+    "compose_tag": ("llm", "compose_tag"),
     # persona
     "Persona": ("persona", "Persona"),
     "AudienceSpec": ("persona", "AudienceSpec"),
@@ -49,6 +51,10 @@ _ENTRY_POINTS = {
     # methods
     "GroupTransfer": ("methods", "GroupTransfer"),
     "oof_predict": ("methods", "oof_predict"),
+    "item_holdout_features": ("methods", "item_holdout_features"),
+    "ItemHoldout": ("methods", "ItemHoldout"),
+    "MFBaseline": ("methods", "MFBaseline"),
+    "procrustes_align": ("methods", "procrustes_align"),
     # evidence
     "evaluate": ("evidence", "evaluate"),
     "card": ("evidence", "card"),
@@ -59,6 +65,7 @@ _ENTRY_POINTS = {
     "correlation_audit": ("evidence", "correlation_audit"),
     "memorization_audit": ("evidence", "memorization_audit"),
     "chain": ("evidence", "chain"),
+    "paired_diff": ("evidence", "paired_diff"),
     # research
     "Loop": ("research", "Loop"),
     "Space": ("research", "Space"),

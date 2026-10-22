@@ -10,6 +10,11 @@ Optional shared spend log (TSV, the research fleet's `harcama.log` layout, see `
 `HarcamaLedger` in the D2 rehearsal): `tsv_path=` (or env SIMENGINE_SPEND_LOG) appends one tab-separated
 line per real call, columns `TSV_COLUMNS`, no header, under flock. `agent=` (or env SIMENGINE_AGENT)
 fills the agent column. The JSONL ledger stays the budget authority; the TSV is write-only.
+
+Tags. A backend builds each row's tag with `compose_tag(instance_tag, call_tag)`; `tag_prefix=` (or env
+SIMENGINE_SPEND_TAG_PREFIX) is then prepended verbatim, so the TSV tag column is
+`<prefix><instance tag>:<call tag>`. The JSONL row keeps `tag` without the prefix (as before) and gets a
+`tag_prefix` field when the prefix is not empty.
 """
 from __future__ import annotations
 
@@ -29,9 +34,33 @@ except ImportError:  # pragma: no cover
 
 SPEND_LOG_ENV = "SIMENGINE_SPEND_LOG"
 AGENT_ENV = "SIMENGINE_AGENT"
+TAG_PREFIX_ENV = "SIMENGINE_SPEND_TAG_PREFIX"
 DEFAULT_AGENT = "simengine"
 # column layout of the shared TSV spend log (one line per real call, no header)
 TSV_COLUMNS = ("time", "agent", "model", "input_tokens", "output_tokens", "usd", "tag")
+
+
+def compose_tag(instance_tag: str | None = "", call_tag: str | None = None) -> str:
+    """Combine a backend's own tag with a per-call tag (the prefix is added later by the ledger).
+
+    - no call tag (None) or an empty one -> the instance tag;
+    - no instance tag -> the call tag unchanged (the old behaviour);
+    - otherwise always "<instance tag>:<call tag>". The call tag is never inspected, so a call tag that happens to
+      start with "<instance tag>:" is still prefixed (no guessing; simengine.sim passes its raw call tag to
+      simengine backends and lets them compose it here).
+
+        compose_tag("", "survey:persona")          -> "survey:persona"
+        compose_tag("L1", "survey:persona")        -> "L1:survey:persona"
+        compose_tag("survey", "survey:persona")    -> "survey:survey:persona"
+        compose_tag("L1", None)                    -> "L1"
+    """
+    base = "" if instance_tag is None else str(instance_tag)
+    call = "" if call_tag is None else str(call_tag)
+    if not base:
+        return call
+    if not call:
+        return base
+    return f"{base}:{call}"
 
 
 def _tsv_field(v) -> str:
@@ -74,16 +103,20 @@ class CostLedger:
     tsv_path / agent default to the env vars SIMENGINE_SPEND_LOG / SIMENGINE_AGENT (agent falls back to
     "simengine"). tsv_path=False disables the TSV even when the env var is set. A failed TSV write
     warns once and never fails the call (the spend is already in the JSONL ledger).
+    tag_prefix (None = env SIMENGINE_SPEND_TAG_PREFIX, else "") is prepended to the TSV tag column and stored as
+    the JSONL field `tag_prefix` when not empty; tag_prefix="" ignores the env var.
     """
 
     def __init__(self, path: str | os.PathLike | None = None, *, tsv_path: str | os.PathLike | bool | None = None,
-                 agent: str | None = None, tag_prefix: str = ""):
+                 agent: str | None = None, tag_prefix: str | None = None):
         self.path = Path(path) if path is not None else None
         if tsv_path is None:
             tsv_path = os.environ.get(SPEND_LOG_ENV, "").strip() or None
         self.tsv_path = Path(os.path.expanduser(str(tsv_path))) if tsv_path not in (None, False, "") else None
         self.agent = agent if agent else (os.environ.get(AGENT_ENV, "").strip() or DEFAULT_AGENT)
-        self.tag_prefix = tag_prefix
+        if tag_prefix is None:
+            tag_prefix = os.environ.get(TAG_PREFIX_ENV, "").strip()
+        self.tag_prefix = str(tag_prefix)
         self._tsv_warned = False
         self._lock = threading.Lock()
         self._mem: list[dict] = []
@@ -97,6 +130,8 @@ class CostLedger:
                "output_tokens": int(output_tokens), "cache_read_tokens": int(cache_read_tokens),
                "cache_write_tokens": int(cache_write_tokens), "cost_usd": round(float(cost_usd), 8), "tag": tag,
                **extra}
+        if self.tag_prefix:
+            row["tag_prefix"] = self.tag_prefix
         line = json.dumps(row, ensure_ascii=False, default=str) + "\n"
         with self._lock:
             if self.path is None:
@@ -172,4 +207,5 @@ class CostLedger:
         return out
 
 
-__all__ = ["CostLedger", "TSV_COLUMNS", "SPEND_LOG_ENV", "AGENT_ENV", "tsv_line", "tsv_model"]
+__all__ = ["CostLedger", "TSV_COLUMNS", "SPEND_LOG_ENV", "AGENT_ENV", "TAG_PREFIX_ENV", "compose_tag", "tsv_line",
+           "tsv_model"]

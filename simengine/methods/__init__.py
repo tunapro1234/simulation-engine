@@ -9,6 +9,7 @@ from .baselines import (ConstantBaseline, ItemMarginal, KNNBaseline, LightGBMBas
                         MajorityBaseline, PersistenceBaseline, SegmentRate, TextKNNRegressor, basket_tensor,
                         decayed_frequency, infer_kind, overall_copy, persistence, personal_frequency, popularity,
                         segment_distributions, tifu_knn, uniform_distribution, weighted_distribution)
+from .coldstart import ItemHoldout, MFBaseline, item_holdout_features, procrustes_align
 from .bayes_prior import (EarlyTestBayes, calibrate_prior, early_lor, equivalent_multiplier, posterior_lor,
                           simulate_saving, simulate_saving_calibrated, true_lor)
 from .conjoint import MNL, evaluate_mnl, null_scores, person_holdout
@@ -51,5 +52,7 @@ __all__ = [
     "CR_GAMES", "CR_HUMAN_LEFT", "ENGEL_DICTATOR", "THEORY_TYPES", "HUMANIZING_PREFIX", "HORTON_GPT4O_WEIGHTS",
     # group transfer + out-of-fold helper
     "GroupTransfer", "oof_predict",
+    # item cold start
+    "item_holdout_features", "ItemHoldout", "MFBaseline", "procrustes_align",
     "lightgbm_available",
 ]

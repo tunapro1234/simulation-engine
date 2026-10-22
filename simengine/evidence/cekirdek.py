@@ -116,6 +116,156 @@ def _f(x, b=3):
     return "—" if x is None or not np.isfinite(x) else f"{x:.{b}f}".replace(".", ",")
 
 
+GURULTU_METRIK = ("spearman", "pearson", "r2")
+
+
+def _kor(a, b, sira: bool) -> float:
+    m = np.isfinite(a) & np.isfinite(b)
+    if m.sum() < 3:
+        return np.nan
+    a, b = a[m], b[m]
+    if sira:
+        from scipy.stats import rankdata
+        a, b = rankdata(a), rankdata(b)
+    if a.std() == 0 or b.std() == 0:
+        return np.nan
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _sb_tavan(r: float, r2: bool) -> float:
+    """Yarı korelasyonu → Spearman-Brown güvenilirliği → tavan (√güvenilirlik; r2'de güvenilirliğin kendisi)."""
+    if not np.isfinite(r) or r <= 0:
+        return np.nan
+    sb = 2 * r / (1 + r)
+    return float(sb if r2 else np.sqrt(sb))
+
+
+SPEARMAN_MC = 400   # örneklem gürültüsü tavanı: Spearman dönüşümü için Monte Carlo tekrar sayısı
+
+
+def _vb_guvenilirlik(m, e) -> float:
+    """Varyans bileşenleri: güvenilirlik = 1 − ort(s²_g/n_g) / var(grup ortalamaları), küçük örneklem düzeltmesiyle
+    (normal kuramda E[1/var̂] = (G−1)/((G−3)·var), oran (G−3)/(G−1) ile düzeltilir). En az 4 grup gerekir."""
+    m, e = np.asarray(m, float), np.asarray(e, float)
+    G = len(m)
+    if G < 4:
+        return np.nan
+    v = float(np.var(m, ddof=1))
+    if not np.isfinite(v) or v <= 0:
+        return np.nan
+    return 1.0 - float(np.mean(e)) / v * (G - 3) / (G - 1)
+
+
+def _vb_tavan(rel: float, r2: bool, spearman_orani: float = 1.0) -> float:
+    """Güvenilirlik → tavan: r2'de güvenilirlik, korelasyonda √güvenilirlik × spearman_orani (Pearson'da 1)."""
+    if not np.isfinite(rel) or rel <= 0:
+        return np.nan
+    return float(rel if r2 else min(1.0, np.sqrt(rel) * spearman_orani))
+
+
+def _spearman_mc(rel: float, v: float, noise_sd, tohum) -> float:
+    """Normal modelde gerçek değer t ~ N(0, rel·v), gözlenen ortalama m_g = t_g + N(0, gürültü_g²) iken beklenen
+    Spearman(t, m) (Monte Carlo, sabit tohum). Grup boyları farklıysa (ör. tek satırlı gruplar) gürültü
+    heteroskedastiktir ve sıra korelasyonu normal kuramın (6/π)·asin(ρ/2) değerinden ayrılır; bu yüzden simüle edilir."""
+    from scipy.stats import rankdata
+    rng = np.random.default_rng([abs(int(tohum or 0)), 7741])
+    G = len(noise_sd)
+    t = rng.normal(0.0, np.sqrt(rel * v), (SPEARMAN_MC, G))
+    mm = t + rng.normal(0.0, 1.0, (SPEARMAN_MC, G)) * np.asarray(noise_sd, float)[None, :]
+    rt, rm = rankdata(t, axis=1), rankdata(mm, axis=1)
+    rt -= rt.mean(1, keepdims=True)
+    rm -= rm.mean(1, keepdims=True)
+    return float(np.mean((rt * rm).sum(1) / np.sqrt((rt ** 2).sum(1) * (rm ** 2).sum(1))))
+
+
+def _gurultu_tavani(veri, ty: dict, birincil: str, orn) -> dict:
+    """Örneklem gürültüsü tavanı (varyans bileşenleri, puanlanan TÜM gruplar üzerinden). Grup ortalaması m_g'nin
+    gürültü varyansı s²_g / n_g (s²_g grup içi varyans, ddof=1; tek satırlı gruplarda havuzlanmış iç varyans);
+    güvenilirlik = 1 − ort(s²_g/n_g) / var(m_g) · (G−3)/(G−1) ≈ var(gerçek değer) / var(m_g). Tavan: Pearson
+    √güvenilirlik, r2 güvenilirlik, Spearman normal modelde beklenen Spearman(gerçek, gözlenen ortalama) (Monte Carlo,
+    gerçek grup boylarıyla; _spearman_mc), tekrarlarda √güvenilirlik ile aynı oranda ölçeklenir. Bootstrap tekrarı b aynı
+    küme yeniden örneğinde yeniden hesaplanır (bizim yöntemle eşleşik). Split-half (R rastgele grup içi bölme,
+    Spearman-Brown) yalnız çapraz denetim olarak raporlanır: küçük/tek sayılı gruplarda (1'e 2 bölme) ve tek satırlı
+    grupları dışarıda bıraktığı için aşağı yanlıdır, tavan olarak kullanılmaz."""
+    if birincil not in GURULTU_METRIK:
+        raise NotImplementedError(
+            f"noise_ceiling (sampling noise) is defined for correlation-type primary metrics {GURULTU_METRIK}; "
+            f"the primary metric is {birincil!r}. For error metrics (mae, rmse) a sampling-noise floor is not "
+            "implemented: pass primary='spearman' / 'pearson' / 'r2', or use retest / ceiling_col.")
+    poz = veri.df[ty["sutun"]].to_numpy(int)
+    sira, r2 = birincil == "spearman", birincil == "r2"
+    # ---- varyans bileşenleri (tavan)
+    m = pd.to_numeric(veri.df["gercek"], errors="coerce").to_numpy(float)
+    n = np.asarray(ty["n"], float)[poz]
+    s2 = np.asarray(ty["s2"], float)[poz]
+    cok = n >= 2
+    df_ = (n[cok] - 1).sum()
+    havuz = float(((n[cok] - 1) * s2[cok]).sum() / df_) if df_ > 0 else np.nan
+    s2e = np.where(cok, s2, havuz)
+    e = s2e / np.where(n > 0, n, np.nan)
+    rel = _vb_guvenilirlik(m, e)
+    oran = 1.0
+    if sira and np.isfinite(rel) and rel > 0 and np.isfinite(havuz):
+        # Spearman tavanı: modelde beklenen Spearman / √güvenilirlik; tekrarlarda aynı oran kullanılır
+        oran = _spearman_mc(rel, float(np.var(m, ddof=1)), np.sqrt(havuz / n), ty.get("tohum")) / np.sqrt(rel)
+    tav = _vb_tavan(rel, r2, oran)
+    # ---- split-half çapraz denetimi (raporlanır, kullanılmaz)
+    A, Bm = np.asarray(ty["A"], float)[:, poz], np.asarray(ty["B"], float)[:, poz]
+    R = A.shape[0]
+    rs = np.array([_kor(A[s], Bm[s], sira) for s in range(R)])
+    r = float(np.nanmean(rs)) if np.isfinite(rs).any() else np.nan
+    her = np.array([_sb_tavan(x, r2) for x in rs])
+    gecerli = np.isfinite(A) & np.isfinite(Bm)
+    n_tek = int((n == 1).sum())
+    olcek = "guvenilirlik" if r2 else ("spearman_mc" if sira else "karekok_guvenilirlik")
+    out = {"yontem": "varyans_bilesenleri", "korelasyon": "spearman" if sira else "pearson",
+           "guvenilirlik": rel if np.isfinite(rel) else None,
+           "spearman_orani": oran if sira else None,
+           "tavan": tav if np.isfinite(tav) else None, "olcek": olcek,
+           "n_grup": int(len(poz)), "n_satir": int(len(poz)), "n_tek_satir": n_tek,
+           "ic_varyans_havuz": havuz if np.isfinite(havuz) else None,
+           "ortalama_grup_boyu": ty.get("ortalama_grup_boyu"), "tohum": ty.get("tohum"),
+           # split-half çapraz denetimi
+           "R": int(R), "yari_korelasyon": r,
+           "spearman_brown": (2 * r / (1 + r)) if np.isfinite(r) and r > -1 else None,
+           "yari_tavan": _sb_tavan(r, r2) if np.isfinite(_sb_tavan(r, r2)) else None,
+           "n_grup_yari": int(gecerli[0].sum()) if R else 0,
+           "bolme_yayilimi": [float(x) for x in np.nanpercentile(her, [2.5, 97.5])] if np.isfinite(her).sum() >= 10 else None}
+    notlar = []
+    if n_tek:
+        notlar.append(f"{n_tek} tek satırlı grup puanlandı: gürültüleri havuzlanmış iç varyansla (s² = {_f(havuz)}) "
+                      "alındı; split-half denetimi bu grupları dışarıda bırakır")
+    if not np.isfinite(havuz):
+        notlar.append("en az 2 satırlı grup yok: grup içi varyans tahmin edilemedi")
+    if not np.isfinite(tav):
+        notlar.append(f"güvenilirlik {_f(rel)} ≤ 0 ya da hesaplanamadı (en az 4 grup ve 2 satırlı grup gerekir)")
+        out["not"] = "; ".join(notlar)
+        return out
+    if notlar:
+        out["not"] = "; ".join(notlar)
+    rep_ = np.full(orn.B_toplu, np.nan)
+    for b in range(orn.B_toplu):
+        idx, _ = orn.satirlar(b)
+        rep_[b] = _vb_tavan(_vb_guvenilirlik(m[idx], e[idx]), r2, oran)
+    out["_tekrar"] = rep_
+    return out
+
+
+def _gurultu_tavan_asimi(nokta, tekrar, yontemler, M):
+    """Örneklem gürültüsü tavanını anlamlı aşan yöntem: gürültülü grup ortalamasına beklenenden yakın, sızıntı işareti."""
+    asan = []
+    for s in yontemler:
+        if M.ad in tekrar.get(s, {}) and M.ad in tekrar.get("tavan", {}):
+            a, _ = ga(M.yon * (tekrar[s][M.ad] - tekrar["tavan"][M.ad]))
+            if np.isfinite(a) and a > 0:
+                asan.append(s)
+    return {"kontrol": "örneklem gürültüsü tavanını aşan yöntem (sızıntı işareti)", "durum": "uyari" if asan else "tamam",
+            "deger": len(asan),
+            "ayrinti": (f"örneklem gürültüsü tavanını anlamlı aşan: {asan}; gerçek grup değerini bilen bir tahmin edici bile "
+                        "gürültülü ortalamayla bu kadar uyuşmaz: tahminde aynı satırların gerçeği (sızıntı) olabilir"
+                        if asan else "hiçbir yöntem örneklem gürültüsü tavanını anlamlı aşmıyor")}
+
+
 def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | None = None,
                 yontemler: list[str] | None = None, bizim: str | None = None, ham: str | None = None,
                 etiketler: dict | None = None, birincil: str | None = None, B: int = 1000,
@@ -127,7 +277,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 duzey: str | None = None, girdi_kaynagi: str | None = None,
                 etiketsiz_tabanlar: list[str] | None = None, oof_tabanlar: list[str] | None = None,
                 tavan_sutun: str | None = None, tavan_etiket: str | None = None,
-                carpan_en_fazla: int | None = 2000) -> dict:
+                carpan_en_fazla: int | None = 2000, tavan_yarim: dict | None = None, kor: str | None = None,
+                kiyaslar: list | None = None, ezber_llm: bool | None = None) -> dict:
     """bizim/ham: tahmin_ ön eki olmadan yöntem adı. bizim verilmezse SON yöntem (önceden belirlenmeli;
     en iyiyi sonradan seçmek iyimser yanlılık yaratır, denetimde işaretlenir).
 
@@ -136,7 +287,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     taban yokken en güçlüsü rastgele/marjinal ise kart "yalnız basit tabanlar" der.
     tavan_sutun: df'deki model/oracle tavan sütunu (tahmin_ ön eksiz); verilirse insan tekrar tavanının yerine geçer.
     carpan_en_fazla: tek maddeli (kitle ortalaması) çarpan bu kadar satırdan büyükse sabit tohumlu alt örneklemde
-    hesaplanır (None: alt örneklem yok)."""
+    hesaplanır (None: alt örneklem yok).
+    tavan_yarim: örneklem gürültüsü tavanı girdisi {"n", "s2": grup boyu / iç varyans, "A", "B": R × n yarı
+    ortalamaları (split-half denetimi), "sutun": satır no sütunu, "R"}; api.evaluate(noise_ceiling=...) kurar. kor: kör (adsız) kol; bizim − kör eşleşik satırı.
+    kiyaslar: [(a, b | None, etiket)] kayıtlı eşleşik karşılaştırmalar (düşme koşulları). ezber_llm: bizim yöntem LLM
+    kolu içeriyor mu (None: ezber sonucu verildiyse evet sayılır); ezber uyarısında rozet gerekçesine ek düşer."""
     if gercek_yok(df):
         return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
                         etiketler=etiketler, birincil=birincil, onkayit=onkayit, sinirlar=sinirlar, duzey=duzey,
@@ -217,6 +372,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         tavan_metrik = list(metrikler)  # model tavanı bir tahmindir: her metrik anlamlı
         if "tekrar" in d:
             veri.notlar.append("tavan: model/oracle sütunu kullanıldı; 'tekrar' (insan test-retest) tavanı yok sayıldı")
+    elif tavan_yarim is not None:
+        tavan_turu = "orneklem_gurultusu"
+        turler["tavan"], etiket["tavan"] = "tavan", "Örneklem gürültüsü tavanı (varyans bileşenleri)"
+        tavan_metrik = []
+        if "tekrar" in d:
+            veri.notlar.append("tavan: örneklem gürültüsü (varyans bileşenleri) kullanıldı; 'tekrar' (insan test-retest) tavanı yok sayıldı")
     elif "tekrar" in d:
         girdiler["tavan"] = _diz(veri, "tekrar")
         tavan_turu = "insan_tekrar"
@@ -224,7 +385,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         tavan_metrik = [m for m in metrikler if m.tavan]
     else:
         tavan_metrik = []
-    tavan_adi = "model/oracle tavanı" if tavan_turu == "model" else "insan tavanı"
+    tavan_adi = {"model": "model/oracle tavanı", "orneklem_gurultusu": "örneklem gürültüsü tavanı"}.get(tavan_turu, "insan tavanı")
 
     # ---- bootstrap (eşleşik)
     madde_kod = pd.factorize(d["madde"])[0] if madde_var else None
@@ -236,6 +397,20 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         nokta.update(n2)
         tekrar.update(t2)
         girdiler.update(tavan_girdi)
+    gurultu = None
+    if tavan_turu == "orneklem_gurultusu":
+        gurultu = _gurultu_tavani(veri, tavan_yarim, birincil, orn)
+        if gurultu["tavan"] is not None:
+            nokta["tavan"] = {birincil: gurultu["tavan"]}
+            tekrar["tavan"] = {birincil: gurultu.pop("_tekrar")}
+            girdiler["tavan"] = (None, None, None)
+            if gurultu.get("not"):
+                veri.notlar.append(f"örneklem gürültüsü tavanı: {gurultu['not']}")
+        else:
+            gurultu.pop("_tekrar", None)
+            turler.pop("tavan")
+            etiket.pop("tavan")
+            veri.notlar.append(f"örneklem gürültüsü tavanı tanımsız: {gurultu['not']}")
 
     sonuclar = {}
     for c in turler:
@@ -380,7 +555,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     # ---- segment, yayılım, örnekler
     sec = [c for c in dict.fromkeys([bc] + ([ON_EK + ham] if ham else []) + ([en_iyi_b] if en_iyi_b else [])) if c]
     seg_diz = {c: girdiler[c] for c in sec}
-    if "tavan" in girdiler and (M.tavan or tavan_turu == "model"):
+    if "tavan" in girdiler and (M.tavan or tavan_turu == "model") and tavan_turu != "orneklem_gurultusu":
         seg_diz["tavan"] = girdiler["tavan"]
     w = np.ones(len(d)) if agirlik is None else agirlik
     segment = analiz.segment_analizi(veri, seg_diz, M, w, B=min(B, 500), tohum=tohum) if veri.segmentler else {}
@@ -418,6 +593,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                                   "genlik kalibrasyonu gerekebilir")})
     if tavan_turu == "model":
         den.append(_model_tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
+    elif tavan_turu == "orneklem_gurultusu":
+        den.append(_gurultu_tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
     else:
         den.append(denetim.tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
     if yalniz_basit:
@@ -443,6 +620,76 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                                   if sira[0] == bc and len(sira) >= 4 else ""), "deger": len(veri.yontemler)})
     for n_ in veri.notlar:
         den.append({"kontrol": "girdi notu", "durum": "uyari" if "düşürüldü" in n_ else "tamam", "ayrinti": n_, "deger": None})
+
+    # ---- kayıtlı karşılaştırmalar (düşme koşulları) ve kör kol
+    n_kume = int(veri.kume.max()) + 1
+
+    def _cozum(ad):
+        if ad is None:
+            return None
+        for c in (ad, ON_EK + ad):
+            if c in nokta and birincil in nokta[c]:
+                return c
+        raise ValueError(f"comparison column {ad!r} is not an evaluated column (pred_<name>, or a ladder column such "
+                         f"as taban_marjinal)")
+
+    def _kiyas(a, b, et_, tur_):
+        if b is None:
+            r_ = tekrar[a][birincil]
+            f_, (al_, us_), p_ = deg(a), ga(r_), p_degeri(r_)
+        else:
+            f_, al_, us_, p_ = fark(a, b)
+        yf, ya, yu = M.yon * f_, (M.yon * al_ if M.yon > 0 else -us_), (M.yon * us_ if M.yon > 0 else -al_)
+        if b is None:  # tek kol: değerin kendisi 0'a karşı (ham ölçek)
+            ya, yu = al_, us_
+        if not (np.isfinite(ya) and np.isfinite(yu)):
+            sonuc = "GA yok"
+        elif ya > 0:
+            sonuc = "A iyi (GA 0'ın üstünde)" if b is not None else "0'ın üstünde"
+        elif yu < 0:
+            sonuc = "B iyi (GA 0'ın altında)" if b is not None else "0'ın altında"
+        else:
+            sonuc = "belirsiz (GA 0'ı içeriyor)"
+        return {"a": a, "b": b, "etiket": et_, "tur": tur_, "metrik": birincil, "fark": f_, "alt": al_, "ust": us_,
+                "p": p_, "a_iyi": None if b is None else bool(yf > 0), "n": n_kume, "sonuc": sonuc}
+
+    kayitli = []
+    kor_ozet = None
+    if kor is not None:
+        kc = _cozum(kor)
+        if kc == bc:
+            raise ValueError("blind_col is ours")
+        kayitli.append(_kiyas(bc, kc, f"{etiket[bc]} − {etiket.get(kc, kc)} (kör kol: ad/başlık yok)", "kor"))
+        kor_ozet = {"sutun": kc, "fark": kayitli[-1]["fark"], "alt": kayitli[-1]["alt"], "ust": kayitli[-1]["ust"],
+                    "kazanc": None, "kor_kazanc": None, "korunan_pay": None, "kayip_cogu": False}
+        if en_iyi_b:
+            kaz, kkaz = M.yon * (deg(bc) - deg(en_iyi_b)), M.yon * (deg(kc) - deg(en_iyi_b))
+            kor_ozet.update({"taban": en_iyi_b, "kazanc": kaz, "kor_kazanc": kkaz})
+            if np.isfinite(kaz) and kaz > 0 and np.isfinite(kkaz):
+                kor_ozet["korunan_pay"] = kkaz / kaz
+                kor_ozet["kayip_cogu"] = bool(kkaz / kaz < 0.5)
+        if kor_ozet["kayip_cogu"]:
+            den.append({"kontrol": "kör kol (tanıma kontrolü)", "durum": "uyari", "deger": kor_ozet["korunan_pay"],
+                        "ayrinti": f"kör kol en güçlü tabana göre kazancın yalnız %{100 * kor_ozet['korunan_pay']:.0f}'ini "
+                                   f"koruyor (bizim − kör {_f(kor_ozet['fark'])} [{_f(kor_ozet['alt'])}, {_f(kor_ozet['ust'])}]): "
+                                   "kazancın çoğu ad/başlık bilgisinden, tanıma ya da ezber olabilir"})
+        elif kor_ozet["korunan_pay"] is not None:
+            den.append({"kontrol": "kör kol (tanıma kontrolü)", "durum": "tamam", "deger": kor_ozet["korunan_pay"],
+                        "ayrinti": f"kör kol kazancın %{100 * kor_ozet['korunan_pay']:.0f}'ini koruyor"})
+    for a_, b_, et_ in kiyaslar or []:
+        ac, bc_ = _cozum(a_), _cozum(b_)
+        kayitli.append(_kiyas(ac, bc_, et_ or (f"{etiket.get(ac, ac)} − {etiket.get(bc_, bc_)}" if bc_ else
+                                               f"{etiket.get(ac, ac)} (0'a karşı)"), "kayitli"))
+    ezber_d = next((x for x in den if str(x.get("kontrol", "")).startswith("ezber testi")), None)
+    ezber_uyari = None
+    nedenler = []
+    if ezber_d and ezber_d.get("durum") == "uyari" and (ezber_llm if ezber_llm is not None else bool(ezber_json)):
+        nedenler.append("ezber_denetimi")
+    if kor_ozet and kor_ozet["kayip_cogu"]:
+        nedenler.append("kor_kol")
+    if nedenler:
+        ezber_uyari = {"nedenler": nedenler, "ezber_ayrinti": (ezber_d or {}).get("ayrinti") if "ezber_denetimi" in nedenler else None,
+                       "kor_korunan_pay": (kor_ozet or {}).get("korunan_pay")}
 
     # ---- etkin örneklem çarpanı
     orneklem = None
@@ -483,7 +730,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         "Maddeler sabit kabul edilir: GA yeni kişilere genellemeyi ölçer, yeni sorulara değil.",
         "Baseline'lar ve kalibrasyon çapraz uydurmalıdır (aynı grubun satırı kendi eşlemesini görmez).",
     ]
-    if manset["tavan"] and tavan_turu == "model":
+    if manset["tavan"] and tavan_turu == "orneklem_gurultusu":
+        sinir.append("Tavan örneklem gürültüsü tavanıdır (varyans bileşenleri): puanlanan tüm gruplarda güvenilirlik = "
+                     "1 − ort(grup içi varyans / grup boyu) / var(grup ortalamaları); tavan = √güvenilirlik (Spearman'da "
+                     "normal kuramla (6/π)·asin(√güvenilirlik/2), r2'de güvenilirlik). Gürültülü grup ortalamasını gerçek "
+                     "grup değerinden ayıran tek şey grup içi örneklemdir; tavanı anlamlı aşmak sızıntıya işaret eder.")
+    elif manset["tavan"] and tavan_turu == "model":
         sinir.append("Tavan bir model/oracle tahminidir (insan test-retest değil): ulaşılabilir bir üst sınır değil, "
                      "kıyas noktasıdır; kapanan boşluk bu tavana göredir ve tavanı aşmak sızıntı anlamına gelmez.")
     elif manset["tavan"]:
@@ -516,6 +768,14 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         "denetim": den, "ornekler": orn_ler, "onkayit": onkayit or [], "sinirlar": sinir,
         "tabanlar": taban_ozet, "tavan_turu": tavan_turu,
     }
+    if gurultu is not None:
+        ozet["gurultu_tavani"] = gurultu
+    if kayitli:
+        ozet["kayitli_karsilastirmalar"] = kayitli
+    if kor_ozet is not None:
+        ozet["kor_kol"] = kor_ozet
+    if ezber_uyari is not None:
+        ozet["ezber_uyarisi"] = ezber_uyari
     ozet = _temiz(ozet)
     ozet["kanit_kart"] = _temiz(_kart.kart(ozet, muhur=(onkayit or [None])[-1]))  # sahne kart.py ile aynı şema
     return ozet

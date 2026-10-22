@@ -17,7 +17,12 @@ An empty reply (`EmptyResponseError`: thinking used the whole max_tokens) is re-
 max_tokens; a batch that still has no reply (empty, or another `LLMError` slot) is counted in `Usage.missing`
 (and `Usage.empty_calls` / `Usage.error_calls`) instead of aborting the run. Only when no prompt got any reply
 is the first error raised. `ask_many()` is the same call path for the other runners (distribution, prediction, A/B).
-The ledger tag of every call is `llm_tag` (default: `tag`), prefixed with the backend's own tag if it has one.
+The ledger tag of every call is `llm_tag` (default: `tag`), joined to the backend's own tag if it has one:
+simengine's backends get `llm.map(tag=<llm_tag>)` and combine it with their own tag via `simengine.llm.compose_tag`
+("<backend tag>:<llm_tag>", the backend tag appears exactly once); any other backend with a `.tag` gets
+`llm.map(tag="<backend tag>:<llm_tag>")`. simengine's ledger then prepends its `tag_prefix` (env
+SIMENGINE_SPEND_TAG_PREFIX) to the TSV tag column. Example:
+`Claude(tag="L1", tag_prefix="d3/")` + survey(tag="dev") writes "d3/L1:dev:survey:persona".
 
 `schema_responder()` is a deterministic offline responder for `FakeLLM` (port of sahne `SahteKaynak`): it reads
 ids and field specs back out of the prompt and fills values by hashing. Dry runs only, never a measurement.
@@ -226,8 +231,16 @@ def build_prompts(personas: list[PersonaView], task: str, fields: dict, *, batch
 
 
 def _ledger_tag(llm, tag: str) -> str:
+    """The tag passed to `llm.map`. A simengine backend (CachedBackend) composes '<backend tag>:<tag>' itself with
+    `compose_tag`, so it gets the raw call tag (no prefix guessing). Any other backend with a string `.tag` gets
+    '<backend tag>:<tag>' composed here (or either alone)."""
+    from ..llm._base import CachedBackend
+    if isinstance(llm, CachedBackend):
+        return tag
     base = getattr(llm, "tag", "") or ""
-    return f"{base}:{tag}" if base and isinstance(base, str) and tag else (tag or base)
+    if not isinstance(base, str):
+        base = ""
+    return f"{base}:{tag}" if base and tag else (tag or base)
 
 
 def _absorb(ids: list[str], text, out: dict, usage: Usage) -> None:
@@ -352,7 +365,8 @@ def ask_panel(llm, personas: list[PersonaView], task: str, fields: dict, *, batc
     """Ask every persona the same task in batched prompts. Returns {pid: {field: value}}.
     `fields`: {"score": "int 1-10", "reason": "str", "choice": "one of A|B"}; `context`: {pid: extra text}.
 
-    llm_tag: ledger tag passed to `llm.map(tag=...)` (default `tag`; prefixed with the backend's own tag).
+    llm_tag: ledger tag passed to `llm.map(tag=...)` (default `tag`; joined to the backend's own tag, see the
+        module docstring).
     refusal_retry: re-ask a refused batch once with `reframe` (default REFRAME_NOTE) in system and user prompt.
     cache_refusals: False (default) passes `cache_if=cache_ok`: the backend returns a refusal without writing it
         to the disk cache (no extra call), so a rerun asks again. True leaves the refusal cached (a rerun replays
@@ -366,14 +380,25 @@ def ask_panel(llm, personas: list[PersonaView], task: str, fields: dict, *, batc
     if not plan:
         return {}
     if max_tokens is None:
-        max_tokens = min(16000, 300 + max(len(ids) for _, ids in plan) * (40 + 90 * len(fields)))
+        max_tokens = _panel_max_tokens(plan, fields)
     st: list = []
     rs = ask_many(llm, [p for p, _ in plan], max_tokens=max_tokens, usage=usage, tag=tag,
                   llm_tag=llm_tag if llm_tag is not None else tag, parallel=parallel, refusal_retry=refusal_retry,
                   cache_refusals=cache_refusals, reframe=reframe, empty_retry=empty_retry,
                   empty_retry_kw=empty_retry_kw, statuses=st, errors=errors)
     out: dict[str, dict] = {}
-    for (_, ids), r, c in zip(plan, rs, st):
+    _collect(plan, rs, st, out, usage, refused_ids)
+    return out
+
+
+def _panel_max_tokens(plan, fields: dict) -> int:
+    """ask_panel's default max_tokens for one plan: room for the largest batch's answers."""
+    return min(16000, 300 + max(len(ids) for _, ids in plan) * (40 + 90 * len(fields)))
+
+
+def _collect(plan, replies: list, statuses: list, out: dict, usage: Usage, refused_ids: set | None = None) -> None:
+    """Fold `ask_many` replies for a panel plan into `out` ({pid: fields}) and count missing / refused ids."""
+    for (_, ids), r, c in zip(plan, replies, statuses):
         if r is not None:
             _absorb(ids, r.text, out, usage)
         elif c == "refused":
@@ -382,7 +407,6 @@ def ask_panel(llm, personas: list[PersonaView], task: str, fields: dict, *, batc
                 refused_ids.update(ids)
         else:                      # empty / error: no reply for this batch
             usage.missing += len(ids)
-    return out
 
 
 # ---------------------------------------------------------------- offline dry-run responder

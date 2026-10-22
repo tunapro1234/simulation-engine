@@ -128,6 +128,23 @@ res = sim.survey(panel, ["Would you share this post?"], llm=llm, stimulus_col="c
                  context="You are scrolling your social media feed.")
 ```
 
+**Many stimuli run in parallel (D3 rehearsal #4).** Before this fix, `stimulus_batching="group"` sent one
+`ask_panel` per stimulus group and waited for each one. With one batch per stimulus (one film per batch), the
+run was in effect single-threaded: in the D3 rehearsal (one run), 900 films × 3 arms went at about 1 call/s.
+Now `survey` builds one plan per arm from every batch of every stimulus group and sends it through one
+`ask_many` (one `llm.map`). Batches are split only by question group (`question_group=`) and by `max_tokens`
+value, because `max_tokens` is part of the cache key. Groups of different sizes get different `max_tokens`.
+Prompts, `max_tokens`, answers, refusal, empty-reply and error handling and `usage` are the same as in the
+serial version. A test checks this against the old loop. The reframed re-ask and the empty-reply re-ask are
+also one map each. `parallel=` sets the thread count. The default, None, uses the backend's own `parallel`
+attribute (`Claude(parallel=16)`), or 4 when the backend has none. Before this fix it was always 4.
+
+```python
+llm = se.llm.Claude(model="claude-haiku-5-5", thinking="off", parallel=16, cache_dir=".cache")
+res = sim.survey(panel, [q], llm=llm, stimulus_col="film", batch=10)      # 16 threads, one map per arm
+res = sim.survey(panel, [q], llm=llm, stimulus_col="film", parallel=8)    # override
+```
+
 **Soft refusals.** In the rehearsal, Haiku 5.5 answered 59 of 150 survey batches with a plain-text refusal
 ("I can't produce this as a survey dataset ..."). These had `stop_reason` end_turn and no error. Without the
 fix, 137 of 602 personas went unanswered and the refusals were cached. Now `ask_panel` treats a reply with no
@@ -141,8 +158,9 @@ The survey result reports refusals and parse failures separately:
 
 | key | meaning |
 |---|---|
-| `refused` | main-arm personas left unanswered because their batch was still refused after the re-ask |
-| `unparsed` | main-arm personas left unanswered for any other reason (no JSON, missing id, ...) |
+| `refused` | int: number of main-arm personas left unanswered because their batch was still refused after the re-ask |
+| `unparsed` | int: number of main-arm personas left unanswered for any other reason (no JSON, missing id, empty or failed call) |
+| `refused_ids`, `unparsed_ids` | the same personas as id lists, in panel order (`len(res["refused_ids"]) == res["refused"]`) |
 | `refusal_rate` | share of main-arm first-pass batches that were refused |
 | `unparsed_items` | persona × question answers that were present but invalid (e.g. out of range) |
 | `refusals` | per arm: `calls`, `refused_calls`, `recovered_calls`, `refusal_rate`, `refused_personas` |
@@ -183,9 +201,19 @@ replies = sim.ask_many(llm, prompts, max_tokens=300, statuses=statuses)   # None
 ```
 
 **Cost per arm.** `ask_panel` passes `tag=` to `llm.map`. `survey` uses `survey:persona`,
-`survey:no_persona` and `survey:persona_swap`. If the backend has its own `tag`, the two are joined as
-`<backend tag>:survey:<arm>`. Other runners use their `ask_panel` tag, for example `strategy:<scenario>`.
-`ask_panel(..., llm_tag=...)` overrides it.
+`survey:no_persona` and `survey:persona_swap`. `survey(..., tag="dev")` makes them `dev:survey:<arm>`, so the
+dev and test runs and the named and unnamed arms can be told apart in the shared spend log (D3 rehearsal #3).
+If the backend has its own `tag`, it is joined in front once: `<backend tag>:dev:survey:<arm>`. A simengine backend
+gets the raw tag and joins it with `compose_tag`; another backend with a string `.tag` gets it joined by `ask_panel`.
+The tag text is never inspected, so `Claude(tag="survey")` + `survey()` logs `survey:survey:persona`. The ledger's
+`tag_prefix` (`Claude(tag_prefix=...)` or env `SIMENGINE_SPEND_TAG_PREFIX`) is then put in front in the TSV
+column. Other runners use their `ask_panel` tag, for example `strategy:<scenario>`. `ask_panel(..., llm_tag=...)`
+overrides it.
+
+```python
+llm = se.llm.Claude(tag="L1", tag_prefix="d3/", spend_log="spend.tsv", agent="team")
+sim.survey(panel, [q], llm=llm, tag="dev")     # TSV tag column: d3/L1:dev:survey:persona, ...:no_persona, ...
+```
 
 ## When it works and when it does not (measured)
 
@@ -378,8 +406,9 @@ Deviations from replicant, all deliberate:
 `tests/test_sim_parse.py`, `test_sim_panel.py`, `test_sim_runners.py`, `test_sim_distribution.py`,
 `test_sim_prediction.py`, `test_sim_evaluate.py`, `test_sim_constrained.py`, `test_sim_survey_gaps.py` (refusals,
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
-profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line)
-(109 tests, offline, FakeLLM, under 1 s):
+profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
+`test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column) (123 tests, offline, FakeLLM, under 1 s):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'

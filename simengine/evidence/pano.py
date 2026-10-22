@@ -264,12 +264,14 @@ def _manset(o: _Ozet) -> str:
                        '<div class="kalt">tavan yok: test-retest ölçülmemiş</div></div>')
     for anahtar, ad, sinif in (("en_iyi_baseline", "En güçlü taban", "k-base"), ("en_iyi_rakip", "En güçlü diğer yöntem", "k-ham"),
                                ("bizim", "Bizim yöntem", "k-bizim"),
-                               ("tavan", "Model/oracle tavanı" if o.oz.get("tavan_turu") == "model" else "İnsan tavanı",
-                                "k-tavan")):
+                               ("tavan", {"model": "Model/oracle tavanı", "orneklem_gurultusu": "Örneklem gürültüsü tavanı"}
+                                .get(o.oz.get("tavan_turu"), "İnsan tavanı"), "k-tavan")):
         d = m.get(anahtar)
         if not d:
             continue
         alt = _e(o.etiket(d["sutun"])) if d.get("sutun") else ("test-retest" if anahtar == "tavan" else "")
+        if anahtar == "tavan" and o.oz.get("tavan_turu") == "orneklem_gurultusu":
+            alt = "tavan türü: örneklem gürültüsü (varyans bileşenleri)"
         kutular.append(f'<div class="kutu {sinif}"><div class="kad">{ad}</div><div class="kdeger">{_e(sayi(d.get("deger")))}</div>'
                        f'<div class="ga">{_e(ga(d.get("alt"), d.get("ust")))}</div><div class="kalt">{alt}</div></div>')
     d = m.get("tavana_oran")
@@ -622,20 +624,33 @@ def _metrik_tablosu(o: _Ozet) -> str:
 
 # ------------------------------------------------------------------ 5. eşleşik farklar
 def _farklar(o: _Ozet) -> str:
-    kl = o.oz.get("karsilastirmalar") or []
+    kl = list(o.oz.get("karsilastirmalar") or [])
+    kayitli = o.oz.get("kayitli_karsilastirmalar") or []   # evaluate(compare=, blind_col=): kayıtlı / düşme koşulu
+    kl += kayitli
     if not kl:
         return ""
     satirlar = []
     for c in kl:
         alt, ust = c.get("alt"), c.get("ust")
         anlamli = (not _bos(alt) and not _bos(ust) and (alt > 0 or ust < 0)) or (not _bos(c.get("p")) and c["p"] < 0.05)
+        f = c.get("fark")
+        tek = c.get("tur") == "kayitli" and c.get("b") is None   # A'nın değeri 0'a karşı: yön yorumu yok
         if not anlamli:
             rz = '<span class="drm d-atlandi">○ anlamlı değil</span>'
+        elif tek:
+            yer = "0'ın üstünde" if (not _bos(f) and f > 0) else "0'ın altında"
+            rz = f'<span class="drm d-atlandi">● anlamlı · {_e(yer)}</span>'
         elif c.get("a_iyi"):
             rz = '<span class="drm d-tamam">▲ anlamlı · A iyi</span>'
         else:
             rz = '<span class="drm d-hata">▼ anlamlı · B iyi</span>'
-        f = c.get("fark")
+        if c.get("tur") in ("kayitli", "kor"):
+            et_ = ("kör kol · " if c["tur"] == "kor" else "kayıtlı · ") + (c.get("etiket") or "")
+            b_ = _e(o.etiket(c["b"])) if c.get("b") else "0"
+            satirlar.append([_e(et_), b_, _e(_metrik_adi(c.get("metrik", ""))),
+                             f'{_e(("+" if not _bos(f) and f > 0 else "") + sayi(f))} <span class="ga">{_e(ga(alt, ust))}</span>',
+                             _e(p_bicim(c.get("p"))), rz])
+            continue
         satirlar.append([_e(o.etiket(c.get("a"))), _e(o.etiket(c.get("b"))), _e(_metrik_adi(c.get("metrik", ""))),
                          f'{_e(("+" if not _bos(f) and f > 0 else "") + sayi(f))} <span class="ga">{_e(ga(alt, ust))}</span>',
                          _e(p_bicim(c.get("p"))), rz])

@@ -1,7 +1,10 @@
-"""`simengine` command line: evaluate | card | bench | loop | demo.
+"""`simengine` command line: evaluate | seal | card | bench | loop | demo.
 
     simengine evaluate frame.csv --ours hybrid --raw llm --primary auc        # -> runs/frame-evidence/{report.json,card.md,...}
     simengine evaluate test.csv --ours hybrid --prereg .onkayit                # no truth yet -> sealed "awaiting truth" card
+    simengine evaluate pairs.csv --ours ours --primary spearman --aggregate-by item_id --offset-col member_mean \
+        --noise-ceiling variance_components --memorization audit.json --blind-col ours_blind --compare P1:L1 --compare P2
+    simengine seal preds.csv "test predictions" --registry runs/.onkayit --no-copy   # hash-chain record only
     simengine card runs/card1/report.json -o card.md                           # Markdown (or *.json card dict)
     simengine bench list
     simengine bench run gss opinionqa_groups:split=dev --data-root /path/to/catalogue
@@ -115,6 +118,17 @@ def _space_from_json(cfg: dict):
 
 # ------------------------------------------------------------------ commands
 
+def _compare_arg(spec: str) -> tuple:
+    """--compare 'A:B' | 'A:B:label' | 'A' | 'A::label' -> (a, b | None, label | None); b empty = A against 0."""
+    parts = spec.split(":", 2)
+    a = parts[0].strip()
+    if not a:
+        raise ValueError(f"--compare {spec!r}: give A:B (paired A − B) or A (A against 0)")
+    b = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+    label = parts[2].strip() if len(parts) > 2 and parts[2].strip() else None
+    return (a, b) if label is None else (a, b, label)
+
+
 def cmd_evaluate(a) -> int:
     from . import evidence as ev
     from .evidence.onkayit import ZINCIR_ADI
@@ -124,16 +138,29 @@ def cmd_evaluate(a) -> int:
               f"or {RESEARCH_CHAIN} (se.research.seal, default '.prereg'); pass the directory the seal was written "
               "to", file=sys.stderr)
         return 2
+    if a.memorization and not Path(a.memorization).is_file():
+        print(f"error: --memorization {a.memorization!r} is not a file (save the correlation_audit / "
+              "memorization_audit result with se.evidence.save_json(result, 'audit.json'))", file=sys.stderr)
+        return 2
+    try:
+        compare = [_compare_arg(c) for c in (a.compare or [])] or None
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     df = _read_table(a.table)
     mmr = a.multiplier_max_rows
     extra = {} if mmr is None else {"multiplier_max_rows": (mmr or None)}
+    if a.noise_ceiling_repeats is not None:
+        extra["noise_ceiling_repeats"] = a.noise_ceiling_repeats
     report = ev.evaluate(df, title=a.title or Path(a.table).stem, ours=a.ours, raw=a.raw, task=a.task,
                          primary=a.primary, B=a.B, B_aggregate=a.B_aggregate, seed=a.seed, dataset=a.dataset or "",
                          cutoff=a.cutoff, methods=_csv_list(a.methods), circular=_csv_list(a.circular),
                          unlabeled_baselines=_csv_list(a.unlabeled_baselines), calibrate=_csv_list(a.calibrate),
                          baselines_oof=_csv_list(a.baselines_oof), ceiling_col=a.ceiling_col,
                          ceiling_label=a.ceiling_label, aggregate_by=a.aggregate_by,
-                         prereg=a.prereg, multiplier=not a.no_multiplier, **extra)
+                         prereg=a.prereg, multiplier=not a.no_multiplier, memorization=a.memorization,
+                         offset_col=a.offset_col, noise_ceiling=a.noise_ceiling, blind_col=a.blind_col,
+                         compare=compare, ours_uses_llm=False if a.ours_no_llm else None, **extra)
     out = Path(a.out or Path("runs") / (Path(a.table).with_suffix("").name + "-evidence"))
     paths = _write_outputs(report, out, lang=a.lang)
     s = ev.summary(report)
@@ -147,6 +174,25 @@ def cmd_evaluate(a) -> int:
               "metric you pre-registered, e.g. --primary auc.", file=sys.stderr)
     for k, v in paths.items():
         print(f"{k}: {v}")
+    return 0
+
+
+def cmd_seal(a) -> int:
+    from . import evidence as ev
+    if not Path(a.predictions).is_file():
+        print(f"error: {a.predictions!r} is not a file", file=sys.stderr)
+        return 2
+    try:
+        rec = ev.seal(a.predictions, a.description, registry=a.registry, git_commit=a.git,
+                      store_copy=not a.no_copy, archive_dir=a.archive_dir)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"sealed: sha256 {rec.get('sha256')}  {rec.get('zaman_utc') or rec.get('zaman')}")
+    print(f"registry: {a.registry}  copy: {rec.get('arsiv') or 'none (chain record only)'}")
+    if not a.no_copy and a.archive_dir is None:
+        print(f"note: a full canonical copy of the predictions is in {a.registry}; keep that directory git-ignored "
+              "or outside the repo for licensed data, or pass --no-copy / --archive-dir.", file=sys.stderr)
     return 0
 
 
@@ -324,6 +370,22 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--calibrate", help="comma list of methods to recalibrate")
     e.add_argument("--cutoff", help="model training cutoff for the contamination audit (needs a time column)")
     e.add_argument("--prereg", help="seal registry directory to attach")
+    e.add_argument("--memorization", help="memorization audit JSON (correlation_audit / memorization_audit result "
+                   "saved with se.evidence.save_json); without it the card says the audit was skipped")
+    e.add_argument("--ours-no-llm", dest="ours_no_llm", action="store_true",
+                   help="ours uses no LLM arm: no 'gain may come from memorization' caveat on the badge")
+    e.add_argument("--offset-col", dest="offset_col",
+                   help="per-row offset (e.g. the member's training mean) subtracted from truth and every prediction "
+                        "before aggregation; with --aggregate-by this scores the group residual")
+    e.add_argument("--noise-ceiling", dest="noise_ceiling", choices=["variance_components", "split_half"],
+                   help="sampling-noise ceiling of group means from variance components over all scored groups "
+                        "(split_half = older name, same estimator; needs --aggregate-by; spearman/pearson/r2 primary)")
+    e.add_argument("--noise-ceiling-repeats", dest="noise_ceiling_repeats", type=int,
+                   help="random half splits for the reported split-half cross-check (default 200)")
+    e.add_argument("--blind-col", dest="blind_col",
+                   help="blind twin of ours (no names/titles), e.g. ours_blind: paired ours − blind row")
+    e.add_argument("--compare", action="append", metavar="A:B",
+                   help="registered comparison, repeatable: A:B (paired A − B), A (A against 0), A:B:label")
     e.add_argument("--B", type=int, default=1000)
     e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200)
     e.add_argument("--seed", type=int, default=0)
@@ -335,6 +397,19 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--lang", choices=["mixed", "en"], default="mixed",
                    help="card language: mixed (English + research Turkish labels) or en")
     e.set_defaults(func=cmd_evaluate)
+
+    sl = sub.add_parser("seal", help="seal a prediction file before the truth is opened (hash chain)")
+    sl.add_argument("predictions", help="prediction table (csv/tsv/parquet/jsonl)")
+    sl.add_argument("description")
+    sl.add_argument("--registry", default=".onkayit",
+                    help="registry directory (default .onkayit; git-ignored, keep it out of the repo for licensed "
+                         "data); pass the same directory to evaluate --prereg")
+    sl.add_argument("--no-copy", dest="no_copy", action="store_true",
+                    help="write only the hash-chain record, no canonical copy of the predictions (store_copy=False)")
+    sl.add_argument("--archive-dir", dest="archive_dir",
+                    help="write the canonical copy here instead (the chain keeps only the file name)")
+    sl.add_argument("--git", action="store_true", help="git commit the chain record")
+    sl.set_defaults(func=cmd_seal)
 
     c = sub.add_parser("card", help="report.json -> Markdown card (or card dict for *.json), optional dashboard")
     c.add_argument("report")

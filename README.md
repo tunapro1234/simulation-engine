@@ -81,6 +81,19 @@ Kör provadan (D2, 22 Eki) sonra eklenenler, her biri bir iki satır (ayrıntı 
   çarpan 2.000 satırlık alt örneklemle, gerçek yokken mühürlü `awaiting truth` kartı; sayısal ezber için
   `se.correlation_audit` ve `memorization_audit(tolerance=, relative=True)`.
 
+Kör prova D3'ten (yeni film soğuk başlangıcı, 22 Eki) sonra eklenenler:
+
+- **Soğuk başlangıç:** `se.item_holdout_features` (katta üye istatistiği + SVD zevk vektörü, Procrustes hizası),
+  `se.MFBaseline` (ALS ile yanlı matris ayrışımı tabanı), `oof_predict(..., folds=)` (hazır katlar).
+- **Kanıt:** `offset_col=` (ofsetli grup artığı), `noise_ceiling="variance_components"` (örneklem gürültüsü tavanı, tüm gruplar; eski adı `"split_half"`),
+  `blind_col=` ve ezber uyarısında rozet notu, `compare=[("P1", "L1"), ...]` (kayıtlı düşme koşulları) ve
+  `se.paired_diff`; `correlation_audit` `max_calls`'ı çağrıdan önce denetler.
+- **Mühür:** `se.seal(..., store_copy=False)` ya da `archive_dir=`: lisanslı veride tahmin kopyası repoya düşmez;
+  `.onkayit` ve `.prereg` `.gitignore`'da.
+- **Anket / etiket:** `survey` bir koldaki bütün uyarıcı gruplarını tek `llm.map` ile, `parallel=` iş parçacığıyla
+  gönderir; `refused` / `unparsed` sayıdır, kimlikler `refused_ids` / `unparsed_ids`; `survey(tag=)`,
+  `Claude(tag_prefix=)` ya da `SIMENGINE_SPEND_TAG_PREFIX` harcama logunda etikete önek koyar.
+
 ## Komut satırı
 
 ```bash
@@ -88,6 +101,10 @@ simengine demo                                                   # sentetik veri
 simengine evaluate data/frame.csv --ours stack --raw llm --task binary --primary auc \
     --unlabeled-baselines persistence --prereg .onkayit            # -> runs/frame-evidence/
 simengine evaluate data/test_frame.csv --ours stack --task binary --primary auc --prereg .onkayit   # gerçek yok: awaiting truth
+simengine evaluate data/dev_pairs.csv --ours ours --primary spearman --aggregate-by movie_id \
+    --offset-col member_mean --noise-ceiling variance_components --memorization runs/audit.json \
+    --blind-col ours_blind --compare P1:L1 --compare "P2::c: P2 ≈ 0"              # grup artığı + ezber + düşme koşulları
+simengine seal runs/test_pred.csv "test tahmini" --registry runs/.onkayit --no-copy   # yalnız zincir kaydı
 simengine card runs/demo/report.json --dashboard runs/pano.html --lang en
 simengine bench list -v                                          # görevler, kabul edilen seçenekler, dosya düzeni
 simengine bench run gss upworthy:split=holdout --data-root <veri-kökü>
@@ -101,8 +118,12 @@ simengine loop examples/loop.json --max-turns 10
   `chain.jsonl` varsa `evaluate` hata verir; `se.seal(...)` (= `se.evidence.seal`) varsayılan olarak `.onkayit/`
   dizinine yazar.
 - `evaluate` ek seçenekleri: `--baselines-oof T1,T2`, `--ceiling-col pred_oracle --ceiling-label oracle`,
-  `--aggregate-by group`, `--multiplier-max-rows N` (0 = tüm tablo), `--no-multiplier`. `truth` sütunu yoksa ya da
+  `--aggregate-by group`, `--multiplier-max-rows N` (0 = tüm tablo), `--no-multiplier`, `--memorization audit.json`
+  (`--ours-no-llm` ezber notunu kapatır), `--offset-col`, `--noise-ceiling variance_components` (eski adı `split_half`; `--noise-ceiling-repeats` split-half denetimi),
+  `--blind-col`, `--compare A:B` (tekrarlanabilir; `A` tek başına 0'a karşı, `A:B:etiket`). `truth` sütunu yoksa ya da
   tümü boşsa `awaiting truth` kartı yazılır (çıkış kodu 0).
+- `seal`: `--registry` (varsayılan `.onkayit`), `--no-copy` (yalnız zincir kaydı), `--archive-dir` (kopya başka
+  yerde, zincirde yalnız dosya adı), `--git`. Aynı dizini `evaluate --prereg`'e ver.
 - Rozetler: `high confidence`, `inconclusive`, `below baseline` (bizim − en güçlü taban GA'sı tümüyle sıfırın
   altında; araştırma kuralında bu da "kararsız" sayılır), `awaiting truth`.
 
@@ -119,11 +140,12 @@ simengine loop examples/loop.json --max-turns 10
 | `simengine.research` | ön kayıt + kilit, arama uzayı, öneriler (rastgele, ızgara, açgözlü, halving, LLM), dev/seçim/test döngüsü; ön kayıtta beyan edilen hedefler (`declare_targets`), tek değişiklikli düzenek taraması (`harness_variants`, `harness_sweep`: ifade, max_tokens, sıcaklık) | [research](docs/modules/research.md) |
 | `simengine.games` | 15 tek atışlık ekonomik oyun (10 kalibrasyon, 5 ayrılmış), maliyet kapılı koşucu, alıntılı insan değerlerine uzaklık (ajan bootstrap CI, W1/KS), tutarlılık denetimi, kimi cezalandırmalı 9 ölçütlü karne | [games](docs/modules/games.md) |
 | `simengine.bench` | 10 kıyas görevi: 7 veri görevi (bank marketing, GSS, Open e-commerce, OpinionQA, SimBench, Twin-2K-500, Upworthy) + 3 oyun görevi (`econ_games_b01`, `ertan_wtp` veri istemez; `beebench_b01_prior` yerel b01 tablosunu okur) | [bench](docs/modules/bench.md) |
-| `simengine.cli` | `evaluate`, `card`, `bench`, `loop`, `demo` | bu dosya |
+| `simengine.cli` | `evaluate`, `seal`, `card`, `bench`, `loop`, `demo` | bu dosya |
 
 Kısayollar: `se.Claude`, `se.FakeLLM`, `se.CostLedger`, `se.EmptyResponseError`, `se.ThinkingBudgetWarning`,
 `se.looks_like_refusal`, `se.from_table`, `se.survey`, `se.survey_frame`, `se.ab_test`, `se.segment_distribution`,
-`se.predict_people`, `se.GroupTransfer`, `se.oof_predict`, `se.evaluate`, `se.evaluate_aggregate`, `se.card`,
+`se.predict_people`, `se.GroupTransfer`, `se.oof_predict`, `se.item_holdout_features`, `se.MFBaseline`,
+`se.compose_tag`, `se.paired_diff`, `se.evaluate`, `se.evaluate_aggregate`, `se.card`,
 `se.dashboard`, `se.worth_humans`, `se.memorization_audit`, `se.correlation_audit`, `se.seal`, `se.chain`, `se.Loop`,
 `se.Space`, `se.Prereg`, `se.play_games`, `se.distance_to_human`. Alt paketler ilk erişimde yüklenir.
 

@@ -68,18 +68,84 @@ def _as_1d(p, method: str) -> np.ndarray:
     return p
 
 
+def _fold_splits(folds, df: pd.DataFrame, pos: np.ndarray):
+    """Precomputed folds -> (list of (train, test) positions into ``df.iloc[pos]``, fold labels).
+
+    ``folds``: a column name of ``df``, a Series (aligned by index), a 1-D array of fold ids (one per row of ``df``),
+    or an iterable of ``(train_idx, test_idx)`` positional index pairs into ``df`` (what ``sklearn`` ``split``
+    yields). Fold id ``-1`` = always in training, never predicted (sklearn ``PredefinedSplit``); NaN = row left out.
+    """
+    n = len(df)
+    inv = np.full(n, -1, dtype=int)
+    inv[pos] = np.arange(len(pos))
+    if isinstance(folds, str):
+        if folds not in df.columns:
+            raise KeyError(f"folds column {folds!r} not in df")
+        folds = df[folds]
+    if isinstance(folds, pd.Series):
+        if not folds.index.equals(df.index):
+            if not df.index.isin(folds.index).all():
+                raise ValueError("folds Series must have a fold id for every row of df (index alignment); pass "
+                                 "folds.to_numpy() to align by position")
+            folds = folds.reindex(df.index)
+        ids = folds.to_numpy()
+    elif isinstance(folds, np.ndarray) and folds.ndim == 1 and folds.dtype != object:
+        ids = folds
+    else:
+        lst = list(folds)
+        pairish = bool(lst) and all(isinstance(t, (tuple, list)) and len(t) == 2 and np.ndim(t[0]) == 1
+                                   for t in lst)
+        if not pairish:
+            ids = np.asarray(lst)
+        else:
+            splits, seen = [], np.zeros(n, dtype=int)
+            for k, (tr, te) in enumerate(lst):
+                tr, te = np.asarray(tr, dtype=int), np.asarray(te, dtype=int)
+                if (tr.size and (tr.min() < -n or tr.max() >= n)) or (te.size and (te.min() < -n or te.max() >= n)):
+                    raise IndexError(f"fold {k}: positional index out of range for df with {n} rows")
+                tr, te = np.mod(tr, n), np.mod(te, n)
+                if np.intersect1d(tr, te).size:
+                    raise ValueError(f"fold {k}: a row is in both its train and test indices")
+                seen[te] += 1
+                a, b = inv[tr], inv[te]
+                splits.append((a[a >= 0], b[b >= 0]))
+            if (seen > 1).any():
+                raise ValueError("a row is in the test indices of more than one fold")
+            return splits, list(range(len(splits)))
+    if len(ids) != n:
+        raise ValueError(f"folds has {len(ids)} fold ids, df has {n} rows")
+    ids = pd.Series(ids).iloc[pos].reset_index(drop=True)
+    keep = ids.notna().to_numpy()
+    always = (ids == -1).to_numpy() & keep
+    labels = sorted(pd.unique(ids[keep & ~always]), key=lambda v: (str(type(v)), v))
+    splits = []
+    for lab in labels:
+        test = (ids == lab).to_numpy() & keep
+        splits.append((np.flatnonzero(keep & ~test), np.flatnonzero(test)))
+    return splits, labels
+
+
 def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str, group: str | None = None,
-                n_splits: int = 5, seed: int = 0, method: str = "predict") -> pd.Series:
+                n_splits: int | None = None, seed: int = 0, method: str = "predict", folds=None) -> pd.Series:
     """Out-of-fold predictions: every row is predicted by a model that did not see its fold.
 
     ``group`` given -> ``GroupKFold(n_splits)`` on ``df[group]`` (no group is in both train and test of a fold;
     deterministic, as in the D2 port, so ``seed`` is unused); otherwise ``KFold(n_splits, shuffle=True,
-    random_state=seed)``. ``model`` is any object with ``fit(X, y)`` / ``predict(X)`` (sklearn estimator, a simengine
-    baseline, ``GroupTransfer``) or a zero-argument factory; it is cloned per fold. If ``fit`` / ``predict`` accept a
-    ``groups`` keyword (``GroupTransfer`` does) the fold's group labels are passed. ``method="predict_proba"`` takes the
-    positive-class column of a two-column output. Rows with a missing target are neither trained on nor predicted
-    (NaN). Returns a float Series aligned with ``df.index``; ``.attrs["fold"]`` holds each row's fold number (-1 =
-    not predicted).
+    random_state=seed)``. ``n_splits`` defaults to 5. ``model`` is any object with ``fit(X, y)`` / ``predict(X)``
+    (sklearn estimator, a simengine baseline, ``GroupTransfer``) or a zero-argument factory; it is cloned per fold. If
+    ``fit`` / ``predict`` accept a ``groups`` keyword (``GroupTransfer`` does) the fold's group labels are passed.
+    ``method="predict_proba"`` takes the positive-class column of a two-column output. Rows with a missing target
+    are neither trained on nor predicted (NaN). Returns a float Series aligned with ``df.index``; ``.attrs["fold"]``
+    holds each row's fold number (-1 = not predicted) and ``.attrs["fold_ids"]`` the fold labels in that order.
+
+    ``folds``: precomputed folds, used EXACTLY instead of GroupKFold / KFold: a column name of ``df``, a Series of
+    fold ids aligned with ``df.index``, a 1-D array of fold ids (one per row), or an iterable of ``(train_idx,
+    test_idx)`` positional index pairs. Fold id ``-1`` = always trained on, never predicted (sklearn
+    ``PredefinedSplit``); NaN = left out. ``group`` still goes to models that take ``groups=`` (``GroupTransfer``);
+    a ``UserWarning`` is raised when a group falls in both train and test of a fold. ``n_splits`` given together
+    with ``folds`` must equal the number of folds (else ``ValueError``). Why: features rebuilt inside folds (SVD
+    taste vectors, member statistics; see ``item_holdout_features``) must be scored with the SAME folds, or rows
+    whose features were built with the held-out items still present end up in training and dev is optimistic.
 
     Group-level scores of pooled group-held-out predictions are biased NEGATIVE under the null (pessimistic, not
     leakage): a held-out group's prediction leans on the mean of the other groups, which is lower when the held-out
@@ -87,6 +153,7 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
     Spearman of the pooled OOF predictions is clearly below 0, not 0. Compare against a baseline cross-fitted the
     same way (e.g. ``GroupTransfer(person_model=None, composition=())``), not against 0.
     """
+    import warnings
     from sklearn.model_selection import GroupKFold, KFold
     features = list(features)
     missing = [c for c in features + [target] + ([group] if group else []) if c not in df.columns]
@@ -98,18 +165,37 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
     pos = np.flatnonzero(ok)
     d = df.iloc[pos]
     X, y = d[features], d[target].to_numpy()
-    if group is not None:
-        g = d[group].to_numpy()
-        n_groups = len(pd.unique(g))
-        if n_groups < n_splits:
-            raise ValueError(f"group-held-out CV needs at least n_splits={n_splits} groups, got {n_groups}")
-        splits = GroupKFold(n_splits).split(X, y, g)
+    g = d[group].to_numpy() if group is not None else None
+    if folds is not None:
+        splits, labels = _fold_splits(folds, df, pos)
+        if n_splits is not None and n_splits != len(splits):
+            raise ValueError(f"n_splits={n_splits} conflicts with the {len(splits)} precomputed folds; pass only "
+                             "folds= (the split is taken from it)")
+        if not splits:
+            raise ValueError("folds= gives no fold with a test row")
+        if g is not None:
+            leaky = [labels[k] for k, (a, b) in enumerate(splits) if np.intersect1d(g[a], g[b]).size]
+            if leaky:
+                warnings.warn(f"oof_predict: groups of {group!r} fall in both train and test of folds {leaky[:5]}; "
+                              "the group level leaks into training for those rows (folds are used as given)",
+                              UserWarning, stacklevel=2)
     else:
-        g = None
-        splits = KFold(n_splits, shuffle=True, random_state=seed).split(X)
+        n_splits = 5 if n_splits is None else n_splits
+        labels = list(range(n_splits))
+        if g is not None:
+            n_groups = len(pd.unique(g))
+            if n_groups < n_splits:
+                raise ValueError(f"group-held-out CV needs at least n_splits={n_splits} groups, got {n_groups}")
+            splits = GroupKFold(n_splits).split(X, y, g)
+        else:
+            splits = KFold(n_splits, shuffle=True, random_state=seed).split(X)
     out = np.full(len(df), np.nan)
     fold = np.full(len(df), -1, dtype=int)
     for k, (a, b) in enumerate(splits):
+        if len(b) == 0:
+            continue
+        if len(a) == 0:
+            raise ValueError(f"fold {labels[k]!r} has no training rows")
         m = _fresh(model)
         fkw = {"groups": g[a]} if g is not None and _accepts(m.fit, "groups") else {}
         m.fit(X.iloc[a], y[a], **fkw)
@@ -119,6 +205,7 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
         fold[pos[b]] = k
     s = pd.Series(out, index=df.index, name=f"oof_{target}")
     s.attrs["fold"] = fold
+    s.attrs["fold_ids"] = list(labels)
     return s
 
 

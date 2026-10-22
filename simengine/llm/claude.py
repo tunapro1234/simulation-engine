@@ -148,6 +148,10 @@ class Claude(CachedBackend):
     ledger : CostLedger or path; overrides the default ledger location.
     spend_log, agent : shared TSV spend log for the default ledger (CostLedger tsv_path/agent; env
         SIMENGINE_SPEND_LOG / SIMENGINE_AGENT are read when not given).
+    tag, tag_prefix : the instance tag and the default ledger's tag prefix (env SIMENGINE_SPEND_TAG_PREFIX when
+        not given). A per-call tag= combines with them: TSV tag = "<tag_prefix><tag>:<call tag>"
+        (`simengine.llm.compose_tag`; no instance tag -> the call tag alone, as before). The JSONL row keeps
+        `tag` without the prefix plus a `tag_prefix` field.
     budget_usd : BudgetExceeded is raised before a call when the ledger total >= this.
     system_cache : put cache_control on the system block (default True).
     fallbacks : None (default) or a server-side fallback spec such as "default"; when set, the beta
@@ -163,9 +167,10 @@ class Claude(CachedBackend):
                  system_cache: bool = True, fallbacks: Any = None, max_attempts: int = 4, rate_wait: float = 15.0,
                  error_wait: float = 3.0, timeout: float = 180.0, parallel: int = 4, tag: str = "",
                  api_key: str | None = None, client: Any = None, prices: dict[str, Price] | None = None,
-                 sleep: Callable[[float], None] = time.sleep, spend_log=None, agent: str | None = None):
+                 sleep: Callable[[float], None] = time.sleep, spend_log=None, agent: str | None = None,
+                 tag_prefix: str | None = None):
         super().__init__(cache_dir=cache_dir, ledger=ledger, budget_usd=budget_usd, tag=tag, parallel=parallel,
-                         spend_log=spend_log, agent=agent)
+                         spend_log=spend_log, agent=agent, tag_prefix=tag_prefix)
         if effort is not None and effort not in EFFORTS:
             raise ValueError(f"effort must be one of {EFFORTS} or None")
         self.model = model
@@ -266,13 +271,13 @@ class Claude(CachedBackend):
 
     # ------------------------------------------------------------ LLM protocol
     def complete(self, system: str, user: str, *, max_tokens: int | None = None, **kw: Any) -> LLMResponse:
-        """One call (or a cache hit). Extra keywords: tag (ledger/TSV tag), sample, validate,
+        """One call (or a cache hit). Extra keywords: tag (combined with the instance tag, see compose_tag), sample, validate,
         cache_if, effort, thinking, system_cache, output_config, and any other messages.create parameter.
 
         validate(text): raising ValueError/KeyError/TypeError retries the call (nothing cached; LLMError
         after max_attempts). cache_if(text) -> bool: False returns the reply without caching it and without
         a retry (raw["not_cached"] = True), e.g. cache_if=lambda t: not looks_like_refusal(t)."""
-        tag = kw.pop("tag", self.tag)
+        tag = self._call_tag(kw)
         validate = kw.pop("validate", None)
         cache_if = kw.pop("cache_if", None)
         thinking_arg = kw.get("thinking", self.thinking)

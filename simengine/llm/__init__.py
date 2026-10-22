@@ -16,14 +16,15 @@ from .errors import (AuthError, BudgetExceeded, EmptyResponseError, LLMError, Re
                      ThinkingBudgetWarning)
 from .fake import FakeLLM
 from .jsonx import complete_json, json_extract
-from .ledger import AGENT_ENV, SPEND_LOG_ENV, TSV_COLUMNS, CostLedger
+from .ledger import AGENT_ENV, SPEND_LOG_ENV, TAG_PREFIX_ENV, TSV_COLUMNS, CostLedger, compose_tag
 from .parallel import parallel_map
 from .refusal import looks_like_refusal
 from .pricing import PRICES, Price, cost_usd, price_for, usage_cost
 
 __all__ = [
     "Claude", "ClaudeCode", "FakeLLM",
-    "DiskCache", "cache_key", "CostLedger", "TSV_COLUMNS", "SPEND_LOG_ENV", "AGENT_ENV", "looks_like_refusal",
+    "DiskCache", "cache_key", "CostLedger", "TSV_COLUMNS", "SPEND_LOG_ENV", "AGENT_ENV", "TAG_PREFIX_ENV",
+    "compose_tag", "looks_like_refusal",
     "PRICES", "Price", "cost_usd", "usage_cost", "price_for",
     "json_extract", "complete_json", "parallel_map",
     "load_api_key", "classify_error",

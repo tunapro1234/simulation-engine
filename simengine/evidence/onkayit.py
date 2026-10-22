@@ -135,8 +135,16 @@ def _git_commit(dizin: Path, mesaj: str) -> None:
         warnings.warn(f"onkayit: git commit atlandı ({ayrinti.strip()})")
 
 
-def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = False) -> dict:
-    """Tahmini mühürler: hash + zaman + zincir bağı; kanonik kopyayı saklar."""
+def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = False, *, kopya: bool = True,
+            arsiv_dizini=None) -> dict:
+    """Tahmini mühürler: hash + zaman + zincir bağı; kanonik kopyayı saklar.
+
+    kopya=False: yalnız zincir kaydı yazılır (kanonik kopya yok; kayıtta "arsiv": None). Doğrulama zincirle yapılır,
+    notlama tahminin kendisini ister. arsiv_dizini: kopya kayıt dizini yerine buraya yazılır (kayıtta yalnız dosya adı
+    ve "arsiv_konum": "dis"; yol zincire girmez). Varsayılan kayıt dizini çalışma dizinindedir: lisanslı veride
+    git-ignored ya da repo dışında tutun."""
+    if not kopya and arsiv_dizini is not None:
+        raise ValueError("kopya=False ile arsiv_dizini birlikte verilemez (store_copy=False, archive_dir)")
     dizin = Path(kayit_dizini)
     dizin.mkdir(parents=True, exist_ok=True)
     df = _oku(tahmin)
@@ -155,14 +163,19 @@ def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = F
         "sutunlar": sorted(str(s) for s in df.columns),
         "aciklama": aciklama,
         "kaynak": None if isinstance(tahmin, pd.DataFrame) else str(tahmin),
-        "arsiv": f"{sha[:12]}.csv.gz",
+        "arsiv": f"{sha[:12]}.csv.gz" if kopya else None,
         "onceki": son["sha256"] if son else None,
         "onceki_kayit": son["kayit_hash"] if son else None,
     }
+    if arsiv_dizini is not None:
+        kayit["arsiv_konum"] = "dis"   # kopya kayıt dizininin dışında (yol bilerek yazılmaz)
     kayit["kayit_hash"] = _kayit_hash(kayit["onceki_kayit"], kayit)
     # kanonik kopya: açılmış içeriğin sha256'sı doğrudan kayıttaki sha256'dır
-    with open(dizin / kayit["arsiv"], "wb") as f:
-        f.write(gzip.compress(bayt, mtime=0))
+    if kopya:
+        hedef = Path(arsiv_dizini) if arsiv_dizini is not None else dizin
+        hedef.mkdir(parents=True, exist_ok=True)
+        with open(hedef / kayit["arsiv"], "wb") as f:
+            f.write(gzip.compress(bayt, mtime=0))
     with open(dizin / ZINCIR_ADI, "a", encoding="utf-8") as f:
         f.write(_json(kayit) + "\n")
     if git_commit:
@@ -193,11 +206,49 @@ def zincir_dogrula(kayit_dizini=".onkayit") -> dict:
     return {"gecerli": not kirik, "n": len(zincir), "kirik": kirik}
 
 
+def arsivden(kayit_dizini=".onkayit", sha256: str | None = None, arsiv_dizini=None) -> pd.DataFrame:
+    """Mühürlü kanonik kopyayı açar (sha256 verilmezse zincirin son kaydı). Açılmış baytların sha256'sı kayıtla
+    eşleşmezse ValueError. Kopya yoksa (kopya=False ile mühür) FileNotFoundError: tahmini kendiniz verin."""
+    k = _zincir_kaydi(kayit_dizini, sha256)
+    if k is None:
+        raise ValueError("arşivden okuma: zincirde eşleşen mühür kaydı yok")
+    if not k.get("arsiv"):
+        raise FileNotFoundError(f"mühür {k['sha256'][:12]} kopyasız (store_copy=False): tahmin tablosunu verin")
+    yol = Path(arsiv_dizini if arsiv_dizini is not None else kayit_dizini) / k["arsiv"]
+    if not yol.exists():
+        raise FileNotFoundError(f"arşiv kopyası yok: {k['arsiv']}" + (" (kopya kayıt dizininin dışında: archive_dir= verin)"
+                                                                   if k.get("arsiv_konum") == "dis" and arsiv_dizini is None else ""))
+    bayt = gzip.decompress(yol.read_bytes())
+    if _sha(bayt) != k["sha256"]:
+        raise ValueError(f"arşiv kopyası mühürle eşleşmiyor: {k['arsiv']}")
+    return pd.read_csv(io.BytesIO(bayt))
+
+
 def notla(tahmin, gercek, anahtar: list[str], kayit_dizini=".onkayit", **degerlendir_kw) -> dict:
-    """Mühür doğrulanırsa tahmin ile gerçeği anahtar sütunlarından birleştirir."""
+    """Mühür doğrulanırsa tahmin ile gerçeği anahtar sütunlarından birleştirir.
+
+    tahmin=None: mühürlü kanonik kopya açılır (`arsivden`; sha256= ve arsiv_dizini= ile); baytları mühürle eşleşir."""
+    arsiv_dizini = degerlendir_kw.pop("arsiv_dizini", None)
+    if tahmin is None:
+        sha = degerlendir_kw.pop("sha256", None)
+        tahmin = arsivden(kayit_dizini, sha, arsiv_dizini)      # baytların sha256'sı kayıtla eşleşti
+        k = _zincir_kaydi(kayit_dizini, sha)
+        return _birlestir(tahmin, gercek, anahtar, {"eslesti": True, "kayit": k, "sha256": k["sha256"], "kaynak": "arsiv"},
+                          degerlendir_kw)
     dog = dogrula(tahmin, degerlendir_kw.pop("sha256", None), kayit_dizini)
     if not dog["eslesti"]:
         raise ValueError(f"tahmin mühürlü kayıtla eşleşmiyor (sha256={dog['sha256'][:12]})")
+    return _birlestir(tahmin, gercek, anahtar, dog, degerlendir_kw)
+
+
+def _zincir_kaydi(kayit_dizini, sha256=None) -> dict | None:
+    zincir = _zincir_oku(kayit_dizini)
+    if sha256:
+        return next((r for r in zincir if r.get("sha256") == sha256.lower()), None)
+    return zincir[-1] if zincir else None
+
+
+def _birlestir(tahmin, gercek, anahtar, dog, degerlendir_kw) -> dict:
     t, g = _oku(tahmin), _oku(gercek)
     eksik = [a for a in anahtar if a not in t.columns or a not in g.columns]
     if eksik:
@@ -221,6 +272,8 @@ def main(argv=None) -> int:
     m.add_argument("dosya")
     m.add_argument("--aciklama", required=True)
     m.add_argument("--git", action="store_true", help="kayıt dizinini git'e commit et")
+    m.add_argument("--kopyasiz", action="store_true", help="kanonik kopya yazma, yalnız zincir kaydı (store_copy=False)")
+    m.add_argument("--arsiv", help="kanonik kopyayı bu dizine yaz (archive_dir)")
     d = alt.add_parser("dogrula", help="tahmin mühürlü mü")
     d.add_argument("dosya")
     d.add_argument("--sha256")
@@ -236,7 +289,7 @@ def main(argv=None) -> int:
         print(json.dumps(veri, ensure_ascii=False, indent=2) if a.json else metin)
 
     if a.komut == "muhurle":
-        k = muhurle(a.dosya, a.aciklama, a.dizin, a.git)
+        k = muhurle(a.dosya, a.aciklama, a.dizin, a.git, kopya=not a.kopyasiz, arsiv_dizini=a.arsiv)
         yaz(k, f"Mühürlendi #{k['sira']}: {k['sha256']}\n  zaman: {k['zaman']}  "
                f"({k['satir']} satır × {k['sutun']} sütun)\n  açıklama: {k['aciklama']}\n"
                f"  zincir: {k['kayit_hash'][:16]}…  önceki: {(k['onceki'] or 'yok')[:12]}")

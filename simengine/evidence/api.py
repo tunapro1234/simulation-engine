@@ -81,7 +81,11 @@ BELOW_BASELINE = "below baseline"
 RANK_METRICS = {"auc": 0.5, "pearson": 0.0, "spearman": 0.0, "madde_ici_kor": 0.0, "spearman_ici": 0.0,
                 "etki_korelasyonu": 0.0, "kappa": 0.0, "r2": 0.0, "demeaned_r2": 0.0}
 STATUS_TO_ENGLISH = {"tamam": "ok", "uyari": "warning", "hata": "error", "atlandi": "skipped"}
-CEILING_KIND = {"insan_tekrar": "human retest", "model": "oracle/model"}
+CEILING_KIND = {"insan_tekrar": "human retest", "model": "oracle/model", "orneklem_gurultusu": "sampling noise (variance components)"}
+NOISE_CEILINGS = ("variance_components", "split_half")   # same estimator; split_half = older name
+NOISE_CEILING_REPEATS = 200     # random half splits (the D3 rehearsal tavan.py used 200)
+MEMORIZATION_CAVEAT_EN = "gain may come from recognition/memorization"
+CAVEAT_REASON_EN = {"ezber_denetimi": "memorization audit warning", "kor_kol": "the blind arm loses most of the gain"}
 ROW_TO_ENGLISH = {"taban": "Strongest simple baseline", "ham": "Raw method", "kalibre": "Ours",
                   "tavan": "Human retest ceiling", "bosluk": "Gap closed (ours - base)/(ceiling - base)",
                   "bedel": "Worth N humans (+100 real answers)"}
@@ -142,7 +146,9 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              level: str | None = None, source: str | None = None,
              unlabeled_baselines: Sequence[str] | None = None, baselines_oof: Sequence[str] | None = None,
              ceiling_col: str | None = None, ceiling_label: str | None = None, aggregate_by: str | None = None,
-             multiplier_max_rows: int | None = MULTIPLIER_MAX_ROWS) -> dict:
+             multiplier_max_rows: int | None = MULTIPLIER_MAX_ROWS, offset_col: str | None = None,
+             noise_ceiling: str | None = None, noise_ceiling_repeats: int = NOISE_CEILING_REPEATS,
+             blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -164,6 +170,24 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         (and per item / split when present) and the bootstrap resamples groups. Binary/continuous tasks only.
     multiplier_max_rows: single-item frames larger than this compute the PPI++ multiplier on a fixed-seed
         subsample of this many rows (None: whole table, slow). A warning is raised for large frames.
+    offset_col: a per-row offset column (e.g. the member's training mean): subtracted from truth, retest, the
+        model ceiling and every prediction BEFORE aggregation, so aggregate_by="movie_id" scores the group residual
+        (mean(truth − offset) vs mean(pred − offset)). Numeric truth only; the task becomes continuous.
+    noise_ceiling: "variance_components" (or its older name "split_half", same estimator; needs aggregate_by):
+        sampling-noise ceiling of group means over ALL scored groups. reliability = 1 - mean(s2_g / n_g) / var(group
+        means), s2_g = within-group variance (pooled within variance for one-row groups); ceiling = sqrt(reliability)
+        for pearson, (6/pi) asin(sqrt(reliability) / 2) for spearman (normal theory), reliability for r2. Other
+        primaries raise NotImplementedError. A split-half cross-check (`noise_ceiling_repeats` random within-group
+        half splits, Spearman-Brown) is reported but not used: it is biased low for small or odd-sized groups. The
+        card labels the ceiling type and the gap closed uses it.
+    blind_col: the blind (no names / titles) twin of ours, e.g. "pred_ours_blind": adds a paired row ours − blind
+        and flags when the blind arm keeps less than half of ours' gain over the strongest baseline.
+    compare: registered comparisons / drop conditions, [("P1", "L1"), ("P2", None, "P2 ≈ 0"), ...]: each (a, b)
+        pair gets a paired difference on the same bootstrap resamples (b None: a's value against 0); shown in the
+        report (`kayitli_karsilastirmalar`), `summary()["comparisons"]`, the card and the dashboard.
+    ours_uses_llm: when the memorization audit is in warning state and ours includes an LLM arm, the badge reason
+        gets the caveat "gain may come from recognition/memorization". None (default) assumes yes whenever a
+        memorization result is passed; False turns the caveat off.
     Missing truth: rows with no truth are dropped (noted); when the truth column is absent or all missing the
     report is an "awaiting truth" card (seals + prediction summary; no ladder, calibration or bootstrap).
     """
@@ -181,6 +205,15 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             warnings.warn(f"prereg registry {str(prereg)!r} has no {_onkayit.ZINCIR_ADI} (evidence.seal / se.seal) "
                           f"or {RESEARCH_CHAIN} (research.seal): no seal is attached", UserWarning, stacklevel=2)
         prereg = chain(prereg)
+    if noise_ceiling is not None:
+        if noise_ceiling not in NOISE_CEILINGS:
+            raise ValueError(f"noise_ceiling must be one of {NOISE_CEILINGS}, not {noise_ceiling!r}")
+        if aggregate_by is None:
+            raise ValueError(f"noise_ceiling={noise_ceiling!r} needs aggregate_by= (the groups whose means carry the noise)")
+        if ceiling_col is not None:
+            raise ValueError("pass noise_ceiling or ceiling_col, not both")
+        if int(noise_ceiling_repeats) < 1:
+            raise ValueError("noise_ceiling_repeats must be >= 1")
     d = to_internal(df)
     methods_i = _methods(methods)
     labels_i = {_method(k): v for k, v in (labels or {}).items()}
@@ -189,12 +222,21 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         d, tavan_sutun, tavan_etiket = _ceiling_column(d, ceiling_col, ceiling_label, labels_i, ours, raw)
         if methods_i:
             methods_i = [m for m in methods_i if ON_EK + m != ceiling_col and m != _method(ceiling_col)]
+    ofset = None
+    if offset_col is not None:
+        d, ofset = _offset(d, offset_col, _task(task))
+        task = "continuous"
+        limits = list(limits or []) + [ofset["note"]]
     toplama = None
+    tavan_yarim = None
     if aggregate_by is not None:
-        d, toplama = _aggregate(d, aggregate_by, _task(task))
+        d, toplama = _aggregate(d, aggregate_by, _task(task),
+                                halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed)
+        tavan_yarim = toplama.pop("halves", None)
         task = "continuous"
         limits = list(limits or []) + [toplama["note"]]
         level = level or "grup"
+    kiyas = _compare_list(compare)
     if multiplier and len(d) > (multiplier_max_rows or MULTIPLIER_MAX_ROWS) and not gercek_yok(d):
         tek = "madde" not in d or d["madde"].nunique() <= 1
         warnings.warn(
@@ -212,13 +254,66 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             baseline=baselines, carpan_yontemler=_methods(multiplier_methods), dongusel=_methods(circular),
             duzey=level, girdi_kaynagi=source, etiketsiz_tabanlar=_methods(unlabeled_baselines),
             oof_tabanlar=_methods(baselines_oof), tavan_sutun=tavan_sutun, tavan_etiket=tavan_etiket,
-            carpan_en_fazla=multiplier_max_rows)
+            carpan_en_fazla=multiplier_max_rows, tavan_yarim=tavan_yarim, kor=_method(blind_col),
+            kiyaslar=kiyas, ezber_llm=ours_uses_llm)
     finally:
         if tmp:
             os.unlink(tmp)
     if toplama:
         rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
+    if ofset:
+        rep["ofset"] = {k: v for k, v in ofset.items() if k != "note"}
     return rep
+
+
+def _compare_list(compare) -> list | None:
+    """compare=[(a, b), (a, b, label), {"a", "b", "label"}] -> [(a, b | None, label | None)] (prefix-free names)."""
+    if not compare:
+        return None
+    out = []
+    for c in compare:
+        if isinstance(c, dict):
+            a, b, lab = c.get("a"), c.get("b"), c.get("label")
+        elif isinstance(c, (tuple, list)) and len(c) in (2, 3):
+            a, b, lab = c[0], c[1], (c[2] if len(c) == 3 else None)
+        else:
+            raise ValueError(f"compare entries are (a, b) or (a, b, label) tuples, not {c!r}")
+        if a is None:
+            raise ValueError(f"compare entry {c!r} has no first column")
+        out.append((_method(a), _method(b), lab))
+    return out
+
+
+def _offset(d: pd.DataFrame, col: str, task: str | None):
+    """Subtract a per-row offset from truth, retest, model ceiling and every prediction (residual evaluation)."""
+    if task in ("cok_sinif", "dagilim", "ab"):
+        raise ValueError(f"offset_col works for numeric (binary/continuous) truth, not {TASK_TO_ENGLISH.get(task, task)}")
+    src = next((c for c in (col, COLUMN_TO_INTERNAL.get(col, col)) if c in d.columns), None)
+    if src is None:
+        raise ValueError(f"offset_col {col!r} is not a column of the frame")
+    if src == "gercek" or (isinstance(src, str) and src.startswith(ON_EK)):
+        raise ValueError(f"offset_col {col!r} is the truth or a prediction column")
+    off = pd.to_numeric(d[src], errors="coerce")
+    if off.isna().all() and d[src].notna().any():
+        raise ValueError(f"offset_col {col!r} is not numeric")
+    d = d.copy()
+    cols = [c for c in d.columns if c in ("gercek", "tekrar", "tavan_model") or (isinstance(c, str) and c.startswith(ON_EK))]
+    for c in cols:
+        x = pd.to_numeric(d[c], errors="coerce")
+        if c != "gercek" and x.isna().all() and d[c].notna().any():
+            raise ValueError(f"offset_col needs numeric predictions; {c!r} is not numeric")
+        if c == "gercek" and x.isna().all() and d[c].notna().any():
+            raise ValueError("offset_col needs a numeric truth")
+        d[c] = x - off
+    n_na = int(off.isna().sum())
+    if n_na:
+        warnings.warn(f"offset_col {col!r}: {n_na} row(s) have no offset; their truth and predictions become missing "
+                      "(rows with missing truth are dropped)", UserWarning, stacklevel=3)
+    note = (f"Ofsetli değerlendirme (offset_col={col}): gerçek ve bütün tahminlerden satır ofseti çıkarıldı "
+            f"(ortalama ofset {float(off.mean()):.3f}) ve grup düzeyine indirmeden önce; metrikler artık "
+            "(gerçek − ofset) üzerinde.")
+    return d, {"column": col, "n_rows": int(len(d)), "n_missing": n_na, "mean": float(off.mean()) if off.notna().any() else None,
+               "columns": [str(c) for c in cols], "note": note}
 
 
 def evaluate_aggregate(df: pd.DataFrame, by: str = "group", title: str = "", ours: str | None = None,
@@ -244,8 +339,45 @@ def _ceiling_column(d: pd.DataFrame, col: str, label, labels: dict, ours, raw):
     return d, "tavan_model", label or labels.get(name, name)
 
 
-def _aggregate(d: pd.DataFrame, by: str, task: str | None):
-    """Average truth, predictions, retest and model ceiling per group (x item x split when present)."""
+def _split_halves(y: np.ndarray, codes: np.ndarray, G: int, R: int, seed: int):
+    """R random within-group half splits -> (A, B) half means, R x G (NaN for groups with < 2 rows)."""
+    ok = np.isfinite(y) & (codes >= 0)
+    gi, yi = codes[ok], y[ok]
+    n_g = np.bincount(gi, minlength=G)
+    start = np.concatenate([[0], np.cumsum(n_g)[:-1]])
+    half_n = n_g // 2
+    rng = np.random.default_rng([seed, 2112])
+    A, B = np.full((R, G), np.nan), np.full((R, G), np.nan)
+    rank = np.empty(len(yi), int)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        for s in range(R):
+            o = np.lexsort((rng.random(len(yi)), gi))
+            rank[o] = np.arange(len(yi)) - start[gi[o]]
+            h = rank < half_n[gi]
+            ca, cb = np.bincount(gi[h], minlength=G), np.bincount(gi[~h], minlength=G)
+            a = np.bincount(gi[h], yi[h], G) / ca
+            b = np.bincount(gi[~h], yi[~h], G) / cb
+            a[(ca == 0) | (cb == 0)] = np.nan
+            b[(ca == 0) | (cb == 0)] = np.nan
+            A[s], B[s] = a, b
+    return A, B, n_g
+
+
+def _within_variance(y: np.ndarray, codes: np.ndarray, G: int):
+    """Per group: number of finite truth rows and within-group variance (ddof=1; NaN for groups with < 2 rows)."""
+    ok = np.isfinite(y) & (codes >= 0)
+    gi, yi = codes[ok], y[ok]
+    n = np.bincount(gi, minlength=G).astype(float)
+    m = np.bincount(gi, yi, G) / np.where(n > 0, n, 1)
+    ss = np.bincount(gi, (yi - m[gi]) ** 2, G)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        s2 = np.where(n >= 2, ss / (n - 1), np.nan)
+    return n, s2
+
+
+def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0):
+    """Average truth, predictions, retest and model ceiling per group (x item x split when present).
+    halves: number of random within-group half splits for the split-half noise ceiling (None: not computed)."""
     col = COLUMN_TO_INTERNAL.get(by, by)
     if col not in d.columns:
         raise ValueError(f"aggregate_by {by!r} is not a column of the frame")
@@ -273,14 +405,27 @@ def _aggregate(d: pd.DataFrame, by: str, task: str | None):
     if col != "grup":
         agg["grup"] = agg[col].astype(str)
     n_groups = int(agg[col].nunique())
+    yarim = None
+    if halves:
+        codes = g.ngroup().to_numpy()
+        A, B, n_g = _split_halves(out["gercek"].to_numpy(float) if "gercek" in out else np.full(len(out), np.nan),
+                                  codes, len(agg), halves, seed)
+        agg["_tavan_satir"] = np.arange(len(agg))
+        n_v, s2 = _within_variance(out["gercek"].to_numpy(float) if "gercek" in out else np.full(len(out), np.nan),
+                                   codes, len(agg))
+        yarim = {"A": A, "B": B, "n": n_v, "s2": s2, "sutun": "_tavan_satir", "R": int(halves), "tohum": seed,
+                 "ortalama_grup_boyu": float(n_g[n_g > 0].mean()) if (n_g > 0).any() else None}
     note = (f"Grup düzeyi değerlendirme (aggregate_by={by}): {len(d)} satır {n_groups} grubun ortalamasına indirildi "
             f"(eşit satır ağırlığı, {len(agg)} değerlendirme satırı); bootstrap gruplar üzerinden. Grup içi örneklem "
             "gürültüsü ortalamalarda kalır. Otomatik tabanlar (genel ortalama, demografi) grup satırları üzerinde "
             "çapraz uydurmalıdır: kat dışı ortalama tutulan grupların ortalamasıyla ters ilişkili olduğundan sıra "
             "metriklerinde (Spearman) bilgisizken bile sıfırın belirgin altında çıkabilir; anlamlı karşılaştırma için "
             "baselines_oof / unlabeled_baselines ile grup düzeyi bir taban bildirin.")
-    return agg, {"by": by, "column": col, "n_rows": int(len(d)), "n_groups": n_groups, "n_eval_rows": int(len(agg)),
-                 "auto_baselines_cross_fitted_bias": True, "note": note}
+    info = {"by": by, "column": col, "n_rows": int(len(d)), "n_groups": n_groups, "n_eval_rows": int(len(agg)),
+            "auto_baselines_cross_fitted_bias": True, "note": note}
+    if yarim is not None:
+        info["halves"] = yarim
+    return agg, info
 
 
 def save_json(report: dict, path) -> Path:
@@ -381,9 +526,35 @@ def summary(report: dict) -> dict:
         "awaiting_truth": bool(report.get("gercek_bekleniyor")),
         "predictions": report.get("tahmin_ozeti"),
         "aggregate": report.get("toplama"),
+        "offset": report.get("ofset"),
+        "noise_ceiling": report.get("gurultu_tavani"),
+        "comparisons": [_comparison_en(c) for c in report.get("kayitli_karsilastirmalar") or []],
+        "blind_arm": report.get("kor_kol"),
+        "badge_caveat": _caveat_en(report),
     }
     out["headline_en"] = _headline_en(out)
     return out
+
+
+def _comparison_en(c: dict) -> dict:
+    v = c.get("sonuc") or ""
+    verdict = ("a better (CI above 0)" if v.startswith("A iyi") else "b better (CI below 0)" if v.startswith("B iyi")
+               else "above 0" if v.startswith("0'ın üstünde") else "below 0" if v.startswith("0'ın altında")
+               else "no CI" if v == "GA yok" else "unclear (CI includes 0)")
+    return {"label": c.get("etiket"), "a": c.get("a"), "b": c.get("b"), "kind": {"kor": "blind", "kayitli": "registered"}
+            .get(c.get("tur"), c.get("tur")), "metric": METRIC_TO_ENGLISH.get(c.get("metrik"), c.get("metrik")),
+            "diff": c.get("fark"), "lo": c.get("alt"), "hi": c.get("ust"), "p": c.get("p"), "n": c.get("n"),
+            "a_better": c.get("a_iyi"), "verdict": verdict}
+
+
+def _caveat_en(report: dict) -> str | None:
+    ez = report.get("ezber_uyarisi")
+    if not ez or report.get("gercek_bekleniyor"):
+        return None
+    k = report.get("kanit_kart") or {}
+    if k.get("satirlar") is not None and not _kart.kazanc_var(k.get("fark")):   # no gain over the baseline
+        return None
+    return f"{MEMORIZATION_CAVEAT_EN} ({', '.join(CAVEAT_REASON_EN.get(n, n) for n in ez.get('nedenler') or [])})"
 
 
 # ------------------------------------------------------------------ card (markdown) and dashboard
@@ -445,7 +616,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     if s.get("only_trivial_baselines"):
         badge += (" (only trivial baselines: random/marginal; declare real ones with unlabeled_baselines= or "
                   "baselines_oof=)")
-    out.append(f"**Badge: {badge}.** " + ("" if en else reason))
+    cav = s.get("badge_caveat")
+    out.append(f"**Badge: {badge}.** " + ("" if en else reason) + (f" Caveat: {cav}." if cav else ""))
     if k.get("etiketler"):
         out.append("")
         out.append("Flags: " + ", ".join(_dot(e, lang) for e in k["etiketler"]))
@@ -469,12 +641,33 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         row = ROW_TO_ENGLISH.get(r['tur'], r['tur'])
         if r["tur"] == "tavan" and s.get("ceiling_kind") == "oracle/model":
             row = "Oracle/model ceiling"
+        elif r["tur"] == "tavan" and s.get("ceiling_kind") == CEILING_KIND["orneklem_gurultusu"]:
+            row = "Sampling-noise ceiling (variance components)"
         out.append(f"| {row} | {_md(r.get('etiket'))} | "
                    f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)} | {_dot(r.get('not'), lang)} |")
     f = k.get("fark")
     if f and f.get("fark") is not None:
         out += ["", f"Ours − strongest baseline (paired, metric direction, positive = better): {f['fark']:+.3f}"
                     + (f" [{f['alt']:+.3f}, {f['ust']:+.3f}]" if f.get("alt") is not None and f.get("ust") is not None else "")]
+    if s.get("noise_ceiling") and s["noise_ceiling"].get("tavan") is not None:
+        nc = s["noise_ceiling"]
+        conv = {"guvenilirlik": "reliability", "karekok_guvenilirlik": "sqrt(reliability)"}.get(
+            nc.get("olcek"), "(6/pi) asin(sqrt(reliability)/2)")
+        out += ["", f"Ceiling type: sampling noise (variance components) over all {nc.get('n_grup')} scored groups "
+                    f"({nc.get('n_tek_satir')} with one row, pooled within variance): reliability {_f3(nc.get('guvenilirlik'))} "
+                    f"-> ceiling {_f3(nc.get('tavan'))} ({conv}). Split-half check (not used; biased low for small groups): "
+                    f"half-mean {nc.get('korelasyon')} {_f3(nc.get('yari_korelasyon'))} over {nc.get('n_grup_yari')} groups "
+                    f"({nc.get('R')} splits) -> Spearman-Brown {_f3(nc.get('spearman_brown'))}."]
+    if s.get("comparisons"):
+        out += ["", "## Registered comparisons / drop conditions", "",
+                "| Comparison | Kind | Metric | A − B [95% CI] | p | n clusters | Verdict |", "|---|---|---|---|---|---|---|"]
+        for c in s["comparisons"]:
+            ci_ = (f" [{c['lo']:+.3f}, {c['hi']:+.3f}]" if c.get("lo") is not None and c.get("hi") is not None else "")
+            dv = "—" if c.get("diff") is None else f"{c['diff']:+.3f}{ci_}"
+            p = "—" if c.get("p") is None else f"{c['p']:.3f}"
+            out.append(f"| {_md(c.get('label'))} | {c['kind']} | {c.get('metric')} | {dv} | {p} | {c.get('n')} | {c['verdict']} |")
+        out += ["", "A − B on the same cluster-bootstrap resamples as the ladder (b empty: A's value against 0). "
+                    "For lower-is-better metrics a negative difference favours A."]
     if s["ladder"]:
         out += ["", "## Baseline ladder", "", "| Rung | Kind | Value [95% CI] | Δ vs previous [95% CI] | p |",
                 "|---|---|---|---|---|"]
@@ -648,6 +841,110 @@ def paired_ci(df: pd.DataFrame, a: str, b: str, metric: str | None = None, *, B:
             "n_clusters": int(v.kume.max()) + 1}
 
 
+def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = None, aggregate_by: str | None = None,
+                group: str | None = None, B: int = 2000, seed: int = 0, offset_col: str | None = None,
+                task: str | None = None) -> dict:
+    """Paired difference metric(a) − metric(b) with a cluster-bootstrap 95 % CI, for ANY two columns (a drop
+    condition such as P1 − L1, or a control such as P1 − P_shuffled). b=None: a's own value and CI (e.g. "P2 ≈ 0").
+
+    frame_or_report: an EvalFrame (or Turkish frame) -> computed here; or a report from `evaluate` -> the pair is
+        looked up in its registered comparisons (`evaluate(compare=...)`, `blind_col=`) or in its ours − X
+        comparisons, either order (B and seed are then the report's).
+    metric: English or internal name (default: the task's primary). aggregate_by: average per group first (as
+        `evaluate(aggregate_by=)`; the clusters are then the groups). group: the bootstrap cluster column (default
+        group > item > row; with aggregate_by it must be constant within each aggregate group). offset_col: as in
+        `evaluate`, subtracted before aggregation. All percentile CIs use B resamples for every metric type.
+    Returns {"metric", "a", "b", "value_a", "value_b", "diff", "lo", "hi", "p", "n" (clusters), "cluster",
+    "a_better", "B", "source"}. diff is raw a − b: for lower-is-better metrics a negative diff favours a."""
+    if isinstance(frame_or_report, dict):
+        return _paired_from_report(frame_or_report, a, b, metric)
+    d = to_internal(frame_or_report)
+    task_i = _task(task)
+    if offset_col is not None:
+        d, _ = _offset(d, offset_col, task_i)
+        task_i = "surekli"
+    gc = None
+    if group is not None:
+        gc = next((c for c in (group, COLUMN_TO_INTERNAL.get(group, group)) if c in d.columns), None)
+        if gc is None:
+            raise ValueError(f"group {group!r} is not a column of the frame")
+    if aggregate_by is not None:
+        col = COLUMN_TO_INTERNAL.get(aggregate_by, aggregate_by)
+        cmap = None
+        if gc is not None and gc != col:
+            if col not in d.columns:
+                raise ValueError(f"aggregate_by {aggregate_by!r} is not a column of the frame")
+            if (d.groupby(col, dropna=False)[gc].nunique(dropna=False) > 1).any():
+                raise ValueError(f"group {group!r} must be constant within each aggregate_by={aggregate_by!r} group")
+            cmap = d.groupby(col, dropna=False)[gc].first()
+        d, _ = _aggregate(d, aggregate_by, task_i)
+        task_i = "surekli"
+        if cmap is not None:
+            d["grup"] = d[col].map(cmap).astype(str)
+    elif gc is not None and gc != "grup":
+        d["grup"] = d[gc].astype(str)
+    v = hazirla(d, task_i)
+    dd = v.df
+    madde_var = "madde" in dd
+    olas = v.gorev != "cok_sinif" or isinstance(dd[ON_EK + v.yontemler[0]].iloc[0], np.ndarray)
+    birim = v.gorev == "surekli" and dd["gercek"].between(0, 1).all()
+    fam = {m.ad: m for m in _metrik.aile(v.gorev, olas, madde_var and v.gorev in ("ikili", "surekli"), birim)}
+    ad = _metric(metric) or ("bir_eksi_mae" if birim else _metrik.BIRINCIL[v.gorev])
+    if ad not in fam:
+        raise ValueError(f"metric {metric!r} is not available for this task: {sorted(fam)}")
+    M = fam[ad]
+    cols = [ON_EK + _method(x) for x in (a, b) if x is not None]
+    for c in cols:
+        if c not in dd:
+            raise ValueError(f"column {c!r} is not in the frame (need pred_<name>)")
+    girdi = {c: (*_metrik.diziler(v, c), None) for c in cols}
+    orn = _boot.Orneklem(v.kume, B=B, B_toplu=B, tohum=seed, madde_kume=v.kume_adi == "madde")
+    nokta, tekrar = _boot.hesapla(orn, girdi, [M], pd.factorize(dd["madde"])[0] if madde_var else None,
+                                  dd["agirlik"].to_numpy(float) if "agirlik" in dd else None)
+    ca = cols[0]
+    cb = cols[1] if len(cols) > 1 else None
+    va = nokta[ca][ad]
+    vb = nokta[cb][ad] if cb else None
+    f = tekrar[ca][ad] - (tekrar[cb][ad] if cb else 0.0)
+    lo, hi = _boot.ga(f)
+    diff = va - (vb if cb else 0.0)
+    return {"metric": METRIC_TO_ENGLISH.get(ad, ad), "a": _method(a), "b": _method(b), "value_a": va, "value_b": vb,
+            "diff": diff, "lo": lo, "hi": hi, "p": _boot.p_degeri(f),
+            "a_better": bool(M.yon * diff > 0) if cb else None, "n": int(v.kume.max()) + 1, "cluster": v.kume_adi,
+            "B": int(B), "source": "frame"}
+
+
+def _paired_from_report(report: dict, a: str, b: str | None, metric: str | None) -> dict:
+    met = _metric(metric) or report.get("birincil")
+    ca = ON_EK + _method(a)
+    cb = None if b is None else ON_EK + _method(b)
+    names = lambda x: {x, _method(x)} if x else {None}
+    rows = list(report.get("kayitli_karsilastirmalar") or []) + list(report.get("karsilastirmalar") or [])
+    n = (report.get("kart") or {}).get("n_kume")
+    for r in rows:
+        if r.get("metrik") != met:
+            continue
+        ra, rb = r.get("a"), r.get("b")
+        sign = None
+        if ra in names(ca) | {a} and (rb in (names(cb) | {b}) if cb else rb is None):
+            sign = 1
+        elif cb and ra in names(cb) | {b} and rb in names(ca) | {a}:
+            sign = -1
+        if sign is None:
+            continue
+        lo, hi = r.get("alt"), r.get("ust")
+        if sign < 0:
+            lo, hi = (None if hi is None else -hi), (None if lo is None else -lo)
+        diff = None if r.get("fark") is None else sign * r["fark"]
+        yon = next((m.get("yon", 1) for m in report.get("metrikler") or [] if m.get("ad") == met), 1)
+        return {"metric": METRIC_TO_ENGLISH.get(met, met), "a": _method(a), "b": _method(b), "value_a": None,
+                "value_b": None, "diff": diff, "lo": lo, "hi": hi, "p": r.get("p"),
+                "a_better": None if (diff is None or b is None) else bool(yon * diff > 0), "n": r.get("n", n),
+                "cluster": report.get("tutma_birimi"), "B": None, "source": "report"}
+    raise ValueError(f"pair ({a!r}, {b!r}) on {met!r} is not in the report: pass the frame, or evaluate(..., "
+                     f"compare=[({a!r}, {b!r})])")
+
+
 def baseline_ladder(df: pd.DataFrame, task: str | None = None, summary_stat: str = "mean", seed: int = 0) -> dict:
     """Cross-fitted label-free baselines {name: (label, values aligned with test rows)}:
     random, marginal (item mean / class shares), demography (item x segment, shrunk k=10) when a segment exists."""
@@ -717,10 +1014,22 @@ def _registry(registry, registry_dir):
 
 
 def seal(predictions, description: str, registry: str | os.PathLike | None = None, git_commit: bool = False, *,
-         registry_dir: str | os.PathLike | None = None) -> dict:
+         registry_dir: str | os.PathLike | None = None, store_copy: bool = True,
+         archive_dir: str | os.PathLike | None = None) -> dict:
     """Seal a prediction table before the truth is revealed: SHA-256 of a canonical CSV + timestamp + hash chain.
-    registry (default '.onkayit'; `registry_dir=` is an accepted alias) gets `zincir.jsonl` + a gzip copy."""
-    return _onkayit.muhurle(predictions, description, _registry(registry, registry_dir), git_commit)
+    registry (default '.onkayit'; `registry_dir=` is an accepted alias) gets `zincir.jsonl` + a gzip copy.
+
+    WARNING: the default registry '.onkayit' is created in the current working directory, usually inside your
+    repository, and the gzip copy is the FULL prediction table. For licensed data keep the registry git-ignored
+    or outside the repo, or pass store_copy=False.
+    store_copy=False: write only the hash-chain record (no canonical copy; the record has "arsiv": None).
+    verify / verify_chain work from the chain alone; grade then needs the predictions passed back in.
+    archive_dir: write the canonical copy there instead of the registry (the record keeps only the file name
+    and "arsiv_konum": "dis", no path); grade(None, truth, keys, archive_dir=...) can reopen it."""
+    if not store_copy and archive_dir is not None:
+        raise ValueError("store_copy=False and archive_dir= exclude each other")
+    return _onkayit.muhurle(predictions, description, _registry(registry, registry_dir), git_commit,
+                            kopya=store_copy, arsiv_dizini=archive_dir)
 
 
 def verify(predictions, sha256: str | None = None, registry: str | os.PathLike | None = None, *,
@@ -735,8 +1044,13 @@ def verify_chain(registry: str | os.PathLike | None = None, *, registry_dir: str
 
 
 def grade(predictions, truth, keys: list[str], registry: str | os.PathLike | None = None, *,
-          registry_dir: str | os.PathLike | None = None, **kw) -> dict:
-    """Verify the seal, then join predictions with the truth on `keys` (raises ValueError if not sealed)."""
+          registry_dir: str | os.PathLike | None = None, archive_dir: str | os.PathLike | None = None, **kw) -> dict:
+    """Verify the seal, then join predictions with the truth on `keys` (raises ValueError if not sealed).
+    predictions=None: reopen the sealed canonical copy (the last record, or `sha256=`) from the registry or
+    `archive_dir`; its bytes are checked against the record. A seal made with store_copy=False has no copy, so
+    pass the predictions (FileNotFoundError otherwise)."""
+    if archive_dir is not None:
+        kw["arsiv_dizini"] = archive_dir
     return _onkayit.notla(predictions, truth, keys, _registry(registry, registry_dir), **kw)
 
 

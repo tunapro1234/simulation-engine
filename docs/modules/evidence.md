@@ -253,6 +253,9 @@ the seal matches. Pass `prereg=<registry>` to `evaluate` to attach the chain to 
 because it is part of kanit. The research module's own lock and loop are separate.
 - *Measured:* an Upworthy expectation was sealed before computation (seal bad4549ab3a5). Both results fell
   inside the sealed range [kanit RAPOR §1a].
+- **Licensed data warning:** by default the registry `.onkayit` is created in the current working directory (usually
+  your repository), and the gzip copy is the full prediction table. Keep the registry git-ignored or outside the repo,
+  or seal with `store_copy=False` / `archive_dir=` (see "Options added after rehearsal D3").
 
 ## Extras: spread, completion, published findings, stylized facts, coefficients (`extras.py`)
 
@@ -419,6 +422,116 @@ row (accepted: `test`, `deger`, `degerlendirme`, `holdout`; for example `split="
 se.seal(pred_df, "before truth"); rep = ev.evaluate(pred_df, ours="llm", prereg=".onkayit")  # no truth column
 ```
 
+## Options added after rehearsal D3 (new-item cold start, group residual metric)
+
+Blind rehearsal D3 used only this library for a "new film launch" task (member ratings for films with no ratings;
+primary metric = Spearman of the film residual). Its gap list asked for the six options below. All are keyword
+arguments with backward-compatible defaults; a report made without them has no new keys. Tests:
+`tests/test_evidence_d3_gaps.py` (27 tests, synthetic data and FakeLLM, about 11 s).
+
+**Offset group metric (`offset_col=`).** A per-row offset (for example the member's training mean `um`) is subtracted
+from truth, retest, the model ceiling and every prediction before aggregation. With `aggregate_by="movie_id"` the
+card then scores the film residual directly: mean(rating − um) per film against mean(pred − um) per film. The task
+becomes continuous, `report["ofset"]` / `summary()["offset"]` describe the offset, and a limit line notes it. Rows
+with no offset lose their truth (dropped, with a warning). Multiclass, distribution and A/B tasks raise `ValueError`.
+```python
+# pairs: one row per (member, film); um = the member's training mean rating
+rep = ev.evaluate(pairs, ours="stack", raw="persona", offset_col="um", aggregate_by="movie_id",
+                  primary="spearman", baselines_oof=["ridge"])          # = film residual Spearman
+```
+
+**Sampling-noise ceiling (`noise_ceiling="variance_components"`, older name `"split_half"`).** Needs
+`aggregate_by`; both names run the same estimator. A group mean carries within-group sampling noise, so even the true
+group value cannot correlate perfectly with it. The ceiling is computed over **every scored group** from variance
+components: s2_g = within-group variance (ddof=1; groups with one row use the pooled within variance), reliability =
+1 − mean(s2_g / n_g) / var(group means) · (G − 3)/(G − 1) (the last factor is the normal-theory small-sample
+correction). Ceiling = sqrt(reliability) for `pearson`, reliability for `r2`, and for `spearman` the expected
+Spearman between the true value and the noisy mean under a normal model with the estimated true variance and each
+group's own size (Monte Carlo, 400 draws, fixed seed; it differs from Pearson when group sizes are mixed, e.g. with
+one-row groups). Other primary metrics (`mae`, `rmse`, `one_minus_mae`) raise `NotImplementedError`. Each bootstrap
+replicate recomputes the reliability on the same group resample as the methods, so the ceiling CI is paired with
+ours. On synthetic data the estimate sits within about 0.01-0.03 of what a predictor that knows the true group values
+reaches (slightly low for ~80 groups of 2-3 rows); such an oracle sits at the ceiling in expectation, so the
+"exceeds the ceiling" audit can fire for it by chance.
+
+The earlier split-half estimate (random within-group halves, Spearman-Brown) is still reported as a cross-check,
+`noise_ceiling_repeats=200` splits: `yari_korelasyon`, `spearman_brown`, `yari_tavan`, `n_grup_yari`,
+`bolme_yayilimi`. It is not used: it leaves one-row groups out although they are scored (ceiling too high), and a
+3-row group splits 1 against 2 while Spearman-Brown assumes equal halves (ceiling too low).
+`report["tavan_turu"] == "orneklem_gurultusu"`, `summary()["ceiling_kind"] == "sampling noise (variance components)"`,
+`report["gurultu_tavani"]` holds `guvenilirlik`, `tavan`, `n_grup` (scored groups), `n_tek_satir` (one-row groups),
+`ic_varyans_havuz` and the split-half fields. The card row reads "Sampling-noise ceiling (variance components)"; one-row
+groups get a card note. An audit flags methods that beat this ceiling significantly (a leakage sign). A `retest`
+column is then ignored (noted). It cannot be combined with `ceiling_col`.
+```python
+rep = ev.evaluate(pairs, ours="stack", offset_col="um", aggregate_by="movie_id", primary="spearman",
+                  noise_ceiling="variance_components")
+ev.summary(rep)["ceiling"], ev.summary(rep)["gap_closed"], rep["gurultu_tavani"]["n_tek_satir"]
+```
+- *One rehearsal run (D3 dev, 300 films, no CI):* half Spearman 0.950 → Spearman-Brown 0.975 → ceiling ≈ 0.987.
+  These numbers come from the rehearsal's own split-half script, not from this function.
+
+**Call budget first (`correlation_audit`).** `max_calls` is compared with the planned total (prompt arms × keys ×
+samples) before any call. The error names the number needed (`pass max_calls=600`). Cached replies are counted,
+because the LLM backend has no public cache probe; a re-run from the cache costs nothing. An answer-dict arm needs no
+calls and is not counted. In D3 the old check fired after the named arm had spent its 300 calls.
+
+**Seal without a copy (`seal(..., store_copy=True, archive_dir=None)`).** `store_copy=False` writes only the
+hash-chain record (`"arsiv": None`). `verify`, `verify_chain`, `evaluate(prereg=)` and `research.verify_seal` /
+`grade_sealed` work from the chain alone, and `grade` then needs the predictions passed back in. `archive_dir=`
+writes the canonical copy to another directory (for example outside the repo). The record keeps only the file name
+and `"arsiv_konum": "dis"`, never the path. `grade(None, truth, keys, registry, archive_dir=...)` reopens the copy and
+checks its bytes against the sealed SHA-256 (a tampered copy raises `ValueError`, a missing one `FileNotFoundError`).
+The default (copy in the registry) is unchanged. CLI: `python -m simengine.evidence.onkayit muhurle f.csv --aciklama
+.. --kopyasiz` or `--arsiv <dir>`. The registry still defaults to `.onkayit` in the working directory: keep it
+git-ignored or outside the repo for licensed data.
+```python
+se.seal(pred, "test predictions, before truth", registry="teslim/.onkayit", store_copy=False)  # chain only
+se.seal(pred, "before truth", registry=".onkayit", archive_dir="<outside the repo>")
+ev.grade(None, truth, ["pair_id"], registry=".onkayit", archive_dir="<outside the repo>")
+```
+
+**Memorization caveat on the badge, blind arm (`ours_uses_llm=None`, `blind_col=`).** When the memorization audit
+passed to `evaluate(memorization=...)` is in warning state (for `correlation_audit`: the named − blind Spearman CI lies
+above the margin) and ours includes an LLM arm, the badge reason gets "Uyarı: kazanç ezber/tanımadan gelebilir" and
+the card flag "kazanç ezber/tanımadan olabilir". `summary()["badge_caveat"]` and the Markdown card (both `lang`
+modes) add "Caveat: gain may come from recognition/memorization (...)". The badge itself is not changed. The caveat
+is only added when there is a gain: when ours − strongest baseline is ≤ 0 (e.g. badge "below baseline") it is left
+out (the audit row stays); with no baseline it is kept. The mixed-language card carries it twice on purpose (Turkish
+badge reason + English caveat).
+`ours_uses_llm=None` assumes ours uses an LLM whenever a memorization result is passed; `False` turns the caveat off.
+`blind_col="pred_ours_blind"` names the blind twin of ours (same pipeline without names or titles). It adds a paired
+row ours − blind to the registered comparisons, and `report["kor_kol"]` gives the share of ours' gain over the
+strongest baseline that the blind arm keeps. Below half, an audit warns and the same badge caveat is added.
+```python
+rep = ev.evaluate(pairs, ours="stack", offset_col="um", aggregate_by="movie_id", primary="spearman",
+                  memorization=audit, blind_col="stack_blind", baselines_oof=["ridge"])
+ev.summary(rep)["badge_caveat"], rep["kor_kol"]["korunan_pay"]
+```
+- *One rehearsal run (D3 dev):* the title-recognition audit gave named 0.779 vs blind 0.169, difference +0.610
+  [+0.493; +0.720]; ours − ours-blind was +0.046, which was the whole of the gain over the baseline. The old badge
+  still read plain "high confidence".
+
+**Arbitrary paired differences (`paired_diff`, `evaluate(compare=)`).**
+`ev.paired_diff(frame_or_report, a, b, *, metric=None, aggregate_by=None, group=None, B=2000, seed=0,
+offset_col=None, task=None)` returns `diff` (raw metric(a) − metric(b)), `lo`, `hi`, `p`, `n` (clusters), `cluster`,
+`a_better`, and the two values. With a frame it runs a cluster bootstrap with B resamples for every metric type.
+`aggregate_by` averages per group first, so the clusters are the groups. `group=` chooses the cluster column; with
+`aggregate_by` it must be constant within each group. `b=None` gives a's own value and CI (e.g. "P2 ≈ 0"). With a
+report it looks the pair up among the registered comparisons and the ours − X comparisons, in either order.
+`evaluate(compare=[("P1", "L1"), ("P2", None, "c: P2 ≈ 0"), ...])` computes each pair on the ladder's bootstrap
+resamples. The results go to `report["kayitli_karsilastirmalar"]`, `summary()["comparisons"]` (with a verdict: a
+better / b better / unclear; a `(a, None)` row has no direction: `a_better` is None and the verdict is above 0 /
+below 0, also on the dashboard, whatever the metric direction), a "Registered comparisons / drop conditions" table on the Markdown card, the card dict
+(`kayitli`) and the dashboard's paired-difference table. An unknown column raises `ValueError`. This ports the
+rehearsal's `esli()` (film-clustered bootstrap, B = 2000); the point difference is the same.
+```python
+ev.paired_diff(pairs, "P1", "L1", aggregate_by="movie_id", offset_col="um", metric="spearman")
+rep = ev.evaluate(pairs, ours="stack", offset_col="um", aggregate_by="movie_id", primary="spearman",
+                  compare=[("P1", "L1", "b: P1 − L1"), ("P1", "P_nopersona"), ("P2", None, "c: P2 ≈ 0")])
+ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipped
+```
+
 ## When not to trust a number
 - Few items (< 20): only PPI++ is shown. Bayes shrinkage and "simulation alone" depend on hitting a single mean.
 - A method above the human ceiling: check leakage first.
@@ -443,6 +556,6 @@ se.seal(pred_df, "before truth"); rep = ev.evaluate(pred_df, ours="llm", prereg=
   - the dataset adaptors (`adaptor/oe.py`, `adaptor/twin.py`, which belong to bench)
   - `kod/lig.py`, which is outside the package
 - `python -m simengine.evidence.onkayit {muhurle|dogrula|zincir|notla}` still works.
-- Tests *(this port)*: 100 evidence tests run in about 37 s (ported, API, extras, the gap tests in
-  `test_evidence_gaps.py` and 6 equivalence
-  tests, which skip when the original is absent).
+- Tests *(this port)*: 137 evidence tests run in about 50 s (ported, API, extras, the gap tests in
+  `test_evidence_gaps.py` and `test_evidence_d3_gaps.py`, and 6 equivalence tests, which skip when the original is
+  absent; with `SIMENGINE_KANIT_SRC` set they pass after the D3 options, which add keys only when used).

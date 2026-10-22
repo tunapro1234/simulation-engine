@@ -108,6 +108,20 @@ def _bedel_satiri(oz: dict, bizim: str | None = None, ham: str | None = None) ->
         if en else "")), None
 
 
+TAVAN_ETIKET = {"model": "Model/oracle tavanı", "orneklem_gurultusu": "Örneklem gürültüsü tavanı (varyans bileşenleri)"}
+TAVAN_NOT = {"model": "tür: model/oracle (insan test-retest değil)",
+             "orneklem_gurultusu": "tavan türü: örneklem gürültüsü (varyans bileşenleri, tüm gruplar)"}
+EZBER_EKI = "Uyarı: kazanç ezber/tanımadan gelebilir"
+EZBER_NEDEN = {"ezber_denetimi": "ezber denetimi uyarıda", "kor_kol": "kör kol kazancın çoğunu kaybediyor"}
+
+
+def kazanc_var(fark: dict | None) -> bool:
+    """Ezber notu yalnız bir kazanç varken anlamlı: bizim − en güçlü taban > 0 (taban yoksa bilinmez: True)."""
+    if not fark or fark.get("fark") is None:
+        return True
+    return bool(fark["fark"] > 0)
+
+
 def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> dict:
     man = oz.get("manset") or {}
     birincil = oz.get("birincil")
@@ -119,9 +133,8 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
                not_=None if tb else "taban yok"),
          satir("ham", f"Ham: {ham['etiket']}" if ham else "Ham yöntem", *_u(ham), not_=None if ham else "ham kol yok"),
          satir("kalibre", f"Bizim: {biz['etiket']}" if biz else "Bizim yöntem", *_u(biz)),
-         satir("tavan", "Model/oracle tavanı" if oz.get("tavan_turu") == "model" else "İnsan tekrar tavanı", *_u(tav),
-               not_=(("tür: model/oracle (insan test-retest değil)" if oz.get("tavan_turu") == "model" else None)
-                     if tav else "tavan yok (test-tekrar ölçülmemiş)")),
+         satir("tavan", TAVAN_ETIKET.get(oz.get("tavan_turu"), "İnsan tekrar tavanı"), *_u(tav),
+               not_=(TAVAN_NOT.get(oz.get("tavan_turu")) if tav else "tavan yok (test-tekrar ölçülmemiş)")),
          satir("bosluk", "Kapanan boşluk (bizim − taban)/(tavan − taban)", *_u(bos), birim="%",
                not_=None if bos else "tavan yok: hesaplanamaz"),
          None]
@@ -140,13 +153,21 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     et = list(etiketler or []) + (["kanıtlanmadı: sızıntı/ezber"] if atl else [])
     if (oz.get("tabanlar") or {}).get("yalniz_basit"):
         et.append("yalnız basit tabanlar (rastgele/marjinal)")
+    ez = oz.get("ezber_uyarisi")
+    if ez and r != "bekliyor" and kazanc_var(fark):
+        neden = ", ".join(EZBER_NEDEN.get(n, n) for n in ez.get("nedenler") or [])
+        g = f"{g} {EZBER_EKI} ({neden})."
+        et.append("kazanç ezber/tanımadan olabilir")
     if r == "bekliyor" and not (muhur or oz.get("onkayit")):
         g = "Gerçek sonuç henüz yok ve tahmin mühürlenmemiş: gerçek açılmadan önce seal() ile mühürleyin."
-    return {"baslik": oz.get("baslik"), "alt_baslik": f"metrik: {birincil}", "metrik": birincil,
+    out = {"baslik": oz.get("baslik"), "alt_baslik": f"metrik: {birincil}", "metrik": birincil,
             "n": (oz.get("kart") or {}).get("n_kume"), "kaynak": oz.get("girdi_kaynagi") or oz.get("veri_adi"),
             "satirlar": S, "fark": fark, "rejimler": rejimler or [],
             "yanilgi": list(yanilgi or []) + list(oz.get("sinirlar") or [])[:3], "muhur": muhur,
             "rozet": r, "rozet_gerekce": g, "etiketler": et, "dil": "tr"}
+    if oz.get("kayitli_karsilastirmalar"):   # kayıtlı karşılaştırmalar / düşme koşulları (evaluate(compare=, blind_col=))
+        out["kayitli"] = oz["kayitli_karsilastirmalar"]
+    return out
 
 
 # Herkese açık panel fiyatı, yanıt başı USD (araştırma notu, 21 Eki 2026): Pollfish "starting at

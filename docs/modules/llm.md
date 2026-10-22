@@ -108,8 +108,21 @@ the cache are still served; a new call raises `AuthError`.
   rs = llm.map(prompts, tag="survey:persona", cache_if=lambda t: not looks_like_refusal(t), return_exceptions=True)
   refused = [r for r in rs if not isinstance(r, Exception) and r.raw.get("not_cached")]
   ```
-- **Tags.** `tag=` on `complete()` and `map()` (default: the constructor's `tag`) goes into every ledger and TSV row,
-  so spend can be split by arm (`persona` / `no_persona` / `persona_swap`). `FakeLLM` accepts and ignores it.
+- **Tags.** `tag=` on `complete()` and `map()` goes into every ledger and TSV row, so spend can be split by arm
+  (`persona` / `no_persona` / `persona_swap`). It is **combined** with the constructor's `tag` by
+  `simengine.llm.compose_tag(instance_tag, call_tag)`, and the ledger's `tag_prefix` goes in front (see the TSV section):
+
+  | constructor `tag` | call `tag=` | row `tag` |
+  |---|---|---|
+  | `""` | `"persona"` | `"persona"` (unchanged from before) |
+  | `"L1"` | not given or `""` | `"L1"` |
+  | `"L1"` | `"survey:persona"` | `"L1:survey:persona"` |
+  | `"survey"` | `"survey:persona"` | `"survey:survey:persona"` (the call tag is never inspected) |
+
+  Before this change a call tag replaced the constructor tag; with no constructor tag the result is the same as before.
+  `simengine.sim.ask_panel` / `ask_many` pass the raw `llm_tag` to simengine backends, which compose it once; an
+  earlier draft guessed "already combined" from a `"<backend tag>:"` prefix and could drop the backend tag. `FakeLLM` accepts and ignores `tag`. `llm.full_tag("survey:persona")` returns the exact
+  string a real call writes to the TSV.
 - **map and stops.** `map` uses a thread pool (`parallel`, default 4). A `StopError` cancels the items that have not
   started. Finished answers are already in the cache, so re-running the same code resumes where it stopped.
   Other errors (`LLMError`, `RefusalError`, `EmptyResponseError`) raise from `map` by default; with
@@ -141,9 +154,22 @@ llm = Claude(model="claude-haiku-5-5", ledger=led)
 
 - `tsv_path` / `spend_log` default to the env var `SIMENGINE_SPEND_LOG`; `agent` defaults to `SIMENGINE_AGENT`, then
   `"simengine"`. `tsv_path=False` turns the TSV off even when the env var is set.
-- `tag_prefix` is prepended to the TSV tag column only (the rehearsal used `<run>/<tag>`).
-- Passing `spend_log=`/`agent=` together with a `ledger=CostLedger(...)` instance raises `ValueError`; configure that
-  instance instead.
+- `tag_prefix` is prepended verbatim (no separator added) to the TSV tag column; the rehearsals used `<run>/<tag>`.
+  It defaults to the env var `SIMENGINE_SPEND_TAG_PREFIX`; `tag_prefix=""` ignores the env var. The JSONL row keeps
+  `tag` without the prefix, as before, and gets a `tag_prefix` field when the prefix is not empty
+  (`row["tag_prefix"] + row["tag"]` is the TSV tag).
+- `Claude(...)` and `ClaudeCode(...)` take `tag_prefix=` and forward it to the default ledger, so the TSV tag is
+  `<tag_prefix><tag>:<call tag>`. In the D3 rehearsal (`prova/d3/SIMENGINE-EKSIK.md` #3) this was missing: the brief
+  asked for `prova-d3/...` tags and the panel rows landed as plain `survey:*`.
+
+  ```python
+  llm = Claude(model="claude-haiku-5-5", cache_dir=".cache", spend_log="spend.log", agent="team-a",
+               tag_prefix="prova-d3/", tag="dev")
+  llm.complete(sys, user, tag="prior")        # TSV tag: prova-d3/dev:prior   JSONL: tag="dev:prior", tag_prefix="prova-d3/"
+  # or: export SIMENGINE_SPEND_TAG_PREFIX=prova-d3/
+  ```
+- Passing `spend_log=`/`agent=`/`tag_prefix=` together with a `ledger=CostLedger(...)` instance raises `ValueError`;
+  configure that instance instead.
 - A TSV write failure warns once (`RuntimeWarning`) and never fails the call; the row is still in the JSONL ledger.
 
 ## Soft refusals: `looks_like_refusal(text)`
@@ -197,7 +223,7 @@ free persona speech, false positives only skip caching (the reply is still retur
   that mentions a usage limit raises `SpendLimitError`; not-logged-in or invalid-key text raises `AuthError`; neither
   is retried. These marker strings are guesses: they have not been checked against real CLI failure output.
 - **Arguments.** `max_tokens` is accepted for protocol compatibility but is not passed on; the CLI has no such flag.
-  `tag`, `sample`, `validate` and `cache_if` work as for `Claude`; `spend_log=`/`agent=` as for `Claude`. Other keyword
+  `tag`, `sample`, `validate` and `cache_if` work as for `Claude`; `spend_log=`/`agent=`/`tag_prefix=` as for `Claude`. Other keyword
   arguments raise `TypeError`.
 
 ## When it works and when it does not (measured)
