@@ -22,6 +22,7 @@ that combine an LLM prediction with a model learned from data.
 | `rct_effects`, `rct_transfer` | RCT condition (x segment) effects vs control within blocks, averaged over blocks, with SE; "same test in another market" transfer baseline | G1 rehearsal (11 messages, 32 -> 31 countries) transfer Spearman **0.845** [0.43, 1.00], noise ceiling 0.908; one country alone median 0.28 |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
 | `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature` | multi-series demand forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon, rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
+| `wave_persistence`, `pooled_shrunk`, `same_regime`, `subgroup_mixture`, `mixture_reweight`, `role_swap`, `transition_backtest`, `merge_frames` (`waves.py`) | repeated surveys: past waves -> next wave's segment x question distributions; last-wave copy, k-wave pool shrunk to the population, same-regime pool, party-ID mixture with role swap across a regime switch, per-year backtest over past switch years | D6 rehearsal (yearly opinion survey, D -> R president, one run): copying last year 0.1315 test TVD (approval 0.295), role-mirror baseline 0.0839, team 0.0788; on dev the same-regime 4-wave pool beat the preregistered method, 0.0990 vs 0.1007 |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -35,6 +36,7 @@ that combine an LLM prediction with a model learned from data.
 - **[prova-d2]** = `uretim/prova/d2/NOTLAR.md` and `SIMENGINE-EKSIK.md` (blind rehearsal: new-country survey answers; code `kod/cv.py`, `cv_biz3.py`, `tahmin.py`)
 - **[prova-d4]** = `uretim/prova/d4/NOTLAR.md`, `SONUC-MAIN.md`, `SIMENGINE-EKSIK.md` (blind rehearsal: M5 weekly demand, 30,490 series, 4 weeks ahead, WMAPE; code `kod/ozellik.py`, `ses.py`, `kos.py`, `pm.py`, `ek.py`, `llm_olay.py`)
 - **[prova-d3]** = `uretim/prova/d3/SIMENGINE-EKSIK.md` (blind rehearsal: new-film ratings, item cold start; code `kod/ozellik.py`, `kod/model.py`)
+- **[prova-d6]** = `uretim/prova/d6/SIMENGINE-EKSIK.md`, `SONUC-MAIN.md` (blind rehearsal: yearly opinion survey 2006-2024 -> 2025 segment x question distributions across a president switch, cell TVD)
 - **[G1]** = `uretim/recete/G1/RECETE.md`, `kart.md` (open recipe rehearsal: climate many-labs, 11 messages vs control, 32 training / 31 test countries); **[G4]** = `uretim/recete/G4/RECETE.md`, `kart.md`, `CAPRAZ-G1.md` (open recipe rehearsal: ShopCART first query -> purchase, 1,000 test sessions)
 
 Every number below comes from those files. This port re-measured nothing. The tests
@@ -764,3 +766,68 @@ Cautions:
   noisy), T4b 0.393, against last-4 mean 0.387 and persistence 0.434; neither beat the plain last-4 mean.
 - `seasonal_naive` was the worst rung on M5 weekly data (0.600). It wins only where the season really repeats
   (the synthetic test).
+
+
+## Repeated surveys: next-wave distributions (`waves.py`) [prova-d6]
+
+For "past survey waves -> next wave's segment x question answer distribution", often across a regime switch
+(the president's party changed). Not exported from `simengine.methods`; import from `simengine.methods.waves`.
+Input is long: one row per respondent x question with wave, segment, item and answer columns (optional survey
+weight, regime and subgroup columns). A wide frame works with `item=None, value=[<question columns>]`.
+`categories` is one list or `{item: list}`; other answers (NaN, skipped) are ignored. Every predictor uses only
+waves strictly before `target` (default: the wave after the last one) and returns the frame
+`evaluate(task="distribution")` takes: `unit` ("seg|item"), `truth` (the target wave's distribution when it is in
+the data, else NaN), `pred_<method>`, `segment`, `item`, `group` (= item), `wave`, `n` (valid answers in the
+target cell) and `n_train_<method>`.
+
+```python
+from simengine.methods.waves import (wave_persistence, pooled_shrunk, same_regime, subgroup_mixture,
+                                     transition_backtest, merge_frames)
+cols = dict(wave="year", segment="seg", item="q", value="answer", categories=CATS, weight="w")
+PRES = {y: "D" if 2009 <= y <= 2016 or 2021 <= y <= 2024 else "R" for y in range(2006, 2026)}  # wave -> regime
+
+t0 = wave_persistence(df, **cols, target=2025)                       # copy 2024 (k=3: pool the last 3, n-weighted)
+t2 = pooled_shrunk(df, **cols, target=2025, k=4, m=20)               # last 4 waves, shrunk toward the population
+t4b = same_regime(df, **cols, target=2025, regime=PRES, k=4)         # last 4 waves with an R president
+mx = subgroup_mixture(df, **cols, target=2025, subgroup="pid3", k=1,
+                      swap={"Rep": "Dem", "Dem": "Rep"}, swap_items=["approval_pres", "economy_retro"])
+frame = merge_frames([t0, t2, t4b, mx])                              # one row per cell, all pred_ columns
+
+bt = transition_backtest(df, waves=[2009, 2017, 2021], **cols, methods={
+    "t0": (wave_persistence, {}), "t2": (pooled_shrunk, {"k": 4}),
+    "t4b": (same_regime, {"regime": PRES, "k": 4}),
+    "mx": (subgroup_mixture, {"subgroup": "pid3", "swap": {"Rep": "Dem", "Dem": "Rep"}})})
+bt.by_wave      # wave x method mean 1-TVD
+bt.summary      # mean, sd, min over waves, waves led, mean rank
+```
+
+- `pooled_shrunk`: p = (n_s * own + m * prior) / (n_s + m), n_s = valid answers of the segment in the window
+  (Kish effective size with weights); `prior="population"` (the window's pooled item distribution), `"uniform"`
+  or `{item: distribution}`. A segment with no answers in the window gets the prior (`n_train` 0).
+- `same_regime`: `regime` is a `{wave: label}` mapping or a column constant within each wave; the target's label
+  comes from `target_regime=`, the mapping or the target wave's rows. With no earlier wave of that regime it
+  falls back to the last k waves and warns. `frame.attrs["waves"]` lists the waves pooled.
+- `subgroup_mixture`: segment s, item i -> sum_g w[s][g] P(answer | g, i). The conditionals are pooled over the
+  last k waves at population level, or per segment x subgroup shrunk toward it with `m=`. Weights default to each
+  segment's subgroup composition in the last training wave. `weights="target"` uses the target wave's composition
+  (only when it is known before the answers, e.g. from the sample frame). A dict sets fixed weights, for every
+  segment or per segment. `swap` applies `role_swap` (out[g] = cond[mapping[g]]) to `swap_items`.
+  `mixture_reweight(cond, weights)` and `role_swap(cond, mapping)` are the pure pieces.
+- `transition_backtest`: `methods` maps a name to `(predictor, kwargs)` (the column arguments, `target` and
+  `method` are filled in) or to `callable(df, target) -> frame`. Every backtest wave must be in the data. `frame` is
+  the long frame over all waves. For one `evaluate` over several years, make `unit` unique (prefix the wave) and
+  cluster by year if year-to-year spread is the question.
+
+What was measured (D6, one run, [prova-d6] `SONUC-MAIN.md`, 2025 test, cell TVD, lower is better): copying 2024
+0.1315 (presidential approval alone 0.295); a backward-looking rule ladder 0.0892; party-ID-mediated 0.0872; the
+hidden role-mirror baseline (in-party / out-party swap, the `role_swap` family) 0.0839; the team's preregistered
+arm 0.0788 and its post-referee arm 0.0800. The gain came from the two regime-dependent questions (approval,
+economy); the other five were close to the role-mirror baseline. On dev, the same-regime 4-wave pool (T4b) beat the
+team's preregistered method, 0.0990 vs 0.1007 TVD: put `same_regime` on the ladder whenever the target crosses
+a regime switch.
+
+Cautions:
+- **One dev year hides regime uncertainty.** A cluster bootstrap over segments in a single transition year does
+  not cover year-to-year spread. Score on several past switch years (`transition_backtest`) and report each year.
+- **Post-hoc selection.** In D6 the arm picked after the referee (best of ~40 configurations on two dev years)
+  lost to the preregistered arm on test. Seal the preregistered arm separately and report both.
