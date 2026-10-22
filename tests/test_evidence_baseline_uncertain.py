@@ -94,6 +94,14 @@ class TestCard(unittest.TestCase):
         self.assertEqual(k2["fark"], k["fark"])            # fark stays ours − the single strongest baseline
         self.assertIn("-0.010", k2["rozet_gerekce"])
 
+    def test_worst_tied_bound_never_looser_than_single(self):
+        # ci="basic" reflects the per-replicate min around the point: its lower bound can sit above the single
+        # strongest baseline's; the badge must not get easier than against that one baseline
+        rep = _eval(_frame(sds=(1.0, 1.0, 1.0, 1.0), ours_sd=0.6))
+        single = kart.kart(rep)["fark"]["alt"]
+        _audit(rep)["en_kotu"]["alt"] = single + 0.5
+        self.assertIn(f"{single:+.3f}", kart.kart(rep)["rozet_gerekce"])
+
     def test_clearly_best_baseline_no_warning(self):
         rep = _eval(_frame(sds=(0.3, 2.0, 2.0, 2.0), ours_sd=0.2))
         a = _audit(rep)

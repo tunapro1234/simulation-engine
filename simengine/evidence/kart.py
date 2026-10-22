@@ -161,8 +161,11 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     tb_bel = next((d for d in oz.get("denetim") or [] if d.get("kontrol", "").startswith("en güçlü taban belirsiz")
                    and d.get("durum") == "uyari"), None)
     ek = (tb_bel or {}).get("en_kotu") or {}
-    fark_r = ({"fark": ek["fark"], "alt": ek["alt"], "ust": ek["ust"]}
-              if fark and all(_f(ek.get(k)) is not None for k in ("fark", "alt", "ust")) else fark)
+    # alt sınır tek tabanınkinden gevşek olamaz: ci="basic" min istatistiğini yansıtınca en_kotu alt'ı tek tabanın
+    # alt'ının üstüne çıkabilir (eşitlerin en kötüsüne karşı rozet tek tabana karşı rozetten kolay olurdu)
+    fark_r = ({"fark": min(ek["fark"], fark["fark"]), "alt": min(ek["alt"], fark["alt"]), "ust": ek["ust"]}
+              if fark and all(_f(ek.get(k)) is not None for k in ("fark", "alt", "ust"))
+              and all(_f(fark.get(k)) is not None for k in ("fark", "alt")) else fark)
     r, g = rozet(S, fark_r, gercek_var=bool(son), bedel_kaynak=bedel_kaynak,
                  taban_bedel_alt=_f(tbb[1].get("alt")) if tbb else None, taban_var=bool(biz and tb))
     esit = ", ".join((tb_bel or {}).get("esitler") or [])
