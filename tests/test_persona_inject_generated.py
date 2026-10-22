@@ -39,7 +39,8 @@ ALL = [("anthology_backstory", {}), ("anthology_backstory", {"placement": "syste
        ("anthology_backstory", {"placement": "history", "consistency": False}),
        ("anthology_greedy", {"pool": pool(), "keys": ["age_bracket", "gender"]}),
        ("personahub", {}), ("personahub", {"style": "prefix"}),
-       ("llm_narrative", {}), ("llm_narrative", {"with_fields": True})]
+       ("llm_narrative", {}), ("llm_narrative", {"with_fields": True}),
+       ("llm_narrative", {"style": "system", "with_fields": True})]
 
 
 class TestRegistry(unittest.TestCase):
@@ -61,6 +62,7 @@ class TestRegistry(unittest.TestCase):
 
     def test_bad_params(self):
         for name, kw in [("anthology_backstory", {"placement": "middle"}), ("personahub", {"style": "vibes"}),
+                         ("llm_narrative", {"style": "vibes"}),
                          ("anthology_greedy", {"pool": pool()})]:
             with self.assertRaises(ValueError, msg=(name, kw)):
                 pi.get_injector(name, **kw)
@@ -134,12 +136,26 @@ class TestRender(unittest.TestCase):
     def test_narrative_with_fields_hides_target_and_exclude(self):
         p = person(0)
         p["fields"]["q2"] = 3
-        out = pi.get_injector("llm_narrative", with_fields=True)(p, QX)
-        self.assertIn("You are person 0", out.system)
-        self.assertIn("- age: 25", out.system)
-        self.assertNotIn("- q2:", out.system)
-        self.assertNotIn("- vote:", out.system)                # QX excludes "vote"
-        self.assertIn("- vote: left", pi.get_injector("llm_narrative", with_fields=True)(p, Q).system)
+        for style, part in (("paper", "user"), ("system", "system")):
+            inj = pi.get_injector("llm_narrative", style=style, with_fields=True)
+            out = getattr(inj(p, QX), part)
+            self.assertIn("You are person 0", out)
+            self.assertIn("- age: 25", out)
+            self.assertNotIn("- q2:", out)
+            self.assertNotIn("- vote:", out)                    # QX excludes "vote"
+            self.assertIn("- vote: left", getattr(inj(p, Q), part))
+
+    def test_narrative_paper_layout_is_b5(self):
+        out = pi.get_injector("llm_narrative")(person(0), Q)
+        self.assertEqual(out.system, G.SIMULATION_SYSTEM)
+        self.assertTrue(out.user.startswith("### PERSONA ###\nYou are person 0"))
+        self.assertLess(out.user.index("### PERSONA ###"), out.user.index("### QUESTION ###\n" + Q["text"]))
+        self.assertTrue(out.user.endswith("### YOUR RESPONSE ###"))
+        self.assertNotIn("Answer: [Letter]", out.system)          # the strict answer line replaces the letter format
+        num = pi.get_injector("llm_narrative")(person(0), QX).system
+        self.assertNotIn("multiple-choice", num)
+        self.assertNotIn("Choose ONE option", num)
+        self.assertIn("Be Faithful to the Persona", num)
 
     def test_greedy_picks_by_edge_weight(self):
         inj = pi.get_injector("anthology_greedy", pool=pool(), keys=["age_bracket", "gender"])
@@ -153,6 +169,27 @@ class TestRender(unittest.TestCase):
         inj = pi.get_injector("anthology_greedy", pool=pool(), keys=["gender", "vote"])
         with self.assertRaisesRegex(ValueError, "target"):
             inj(person(0), QX)
+
+    def test_greedy_refuses_derived_trait_of_target(self):
+        inj = pi.get_injector("anthology_greedy", pool=pool(), keys=["age_bracket"])
+        for q in ({"id": "age", "text": "How old are you?", "min": 18, "max": 99},
+                  {**Q, "exclude": ["age"]}):
+            with self.assertRaisesRegex(ValueError, "age"):
+                inj(person(1), q)
+        self.assertEqual(inj(person(1), Q).meta["story"], "old")
+
+    def test_greedy_uses_story_question(self):
+        own = [dict(pool()[1], question=G.BACKSTORY_QUESTION_SHORT)]
+        p = pi.get_injector("anthology_greedy", pool=own, keys=["age_bracket"])(person(1), Q)
+        self.assertTrue(p.user.startswith(f"Question: {G.BACKSTORY_QUESTION_SHORT}\n\nAnswer: {STORY_OLD}"))
+        p = pi.get_injector("anthology_greedy", pool=own, keys=["age_bracket"], elicitation="Who are you?")(person(1), Q)
+        self.assertTrue(p.user.startswith("Question: Who are you?\n\nAnswer:"))
+
+    def test_list_pool_label_is_short(self):
+        lab = pi.get_injector("anthology_greedy", pool=pool(), keys=["age_bracket"]).label
+        self.assertNotIn("bakery", lab)
+        self.assertRegex(lab, r"pool=<2 stories [0-9a-f]{8}>")
+        self.assertEqual(lab, G.AnthologyGreedy(pool=pool(), keys=["age_bracket"]).label)
 
     def test_registered_pool(self):
         G.register_pool("t_pool", pool(), replace=True)
@@ -214,8 +251,9 @@ class TestMatching(unittest.TestCase):
         ppl = [{"id": "a", "fields": {"age": 23}}, {"id": "b", "fields": {"age": 23}}]
         m = G.match_backstories(ppl, pool(), ["age_bracket"], method="hungarian")
         self.assertEqual(sorted(s["id"] for s in m.values()), ["old", "young"])
+        more = ppl + [{"id": "c", "fields": {"age": 70}}]
         with self.assertRaisesRegex(ValueError, "at least as many"):
-            G.match_backstories(ppl * 2, pool(), ["age_bracket"], method="hungarian")
+            G.match_backstories(more, pool(), ["age_bracket"], method="hungarian")
 
     def test_bad_pool_and_method(self):
         with self.assertRaises(ValueError):
@@ -224,18 +262,40 @@ class TestMatching(unittest.TestCase):
             G.match_backstories([person(0)], [{"id": "s", "text": "x"}], ["gender"])
         with self.assertRaises(ValueError):
             G.match_backstories([person(0)], pool(), ["gender"], method="auction")
+        with self.assertRaisesRegex(ValueError, "unique"):
+            G.match_backstories([person(0), person(0)], pool(), ["gender"])
+
+    def test_missing_trait_is_refused_not_matched_at_random(self):
+        ppl = [{"id": "a", "fields": {"age": 70}}, {"id": "b", "fields": {"gender": "male"}},
+               {"id": "c", "fields": {"age": 12}}]                          # no bracket under 18
+        with self.assertRaisesRegex(pi.MissingPersonField, r"\['b', 'c'\]"):
+            G.match_backstories(ppl, pool(), ["age_bracket"])
+        self.assertEqual(G.edge_weight({}, {"demographics": {"x": "None"}}, ["x"]), 0.0)
 
 
 class TestGeneration(unittest.TestCase):
     def test_generate_backstories(self):
-        replies = iter([STORY_YOUNG + "\nQuestion: next one?", "too short", STORY_OLD])
+        replies = iter([STORY_YOUNG + "\nQuestion: next one?", "too short", STORY_OLD + " Interview ends here."])
         llm = FakeLLM(lambda s, u: next(replies))
         out = G.generate_backstories(llm, 3, parallel=1)
         self.assertEqual([s["id"] for s in out], ["bs0", "bs2"])
         self.assertEqual(out[0]["text"], STORY_YOUNG)                     # stop sequence cut
+        self.assertEqual(out[1]["text"], STORY_OLD)                       # stops match anywhere, as stop= does
+        self.assertEqual(out[0]["question"], G.BACKSTORY_QUESTION)
         self.assertTrue(all(u == f"Question: {G.BACKSTORY_QUESTION}\n\nAnswer:" for _, u in llm.calls))
         with self.assertRaises(ValueError):
             G.generate_backstories(llm, -1)
+        with self.assertRaisesRegex(ValueError, "sample"):
+            G.generate_backstories(llm, 1, llm_kw={"sample": 3})
+
+    def test_cut_at_stops(self):
+        self.assertEqual(G.cut_at_stops("I grew up poor. Q: anything else? no"), "I grew up poor.")
+        self.assertEqual(G.cut_at_stops("A Questionable start."), "A")                # released stop= behaviour
+        self.assertEqual(G.cut_at_stops("  plain  "), "plain")
+
+    def test_backstory_prompt_preamble(self):
+        self.assertEqual(G.backstory_prompt(preamble=G.US_PREAMBLE),
+                         f"Question: {G.US_PREAMBLE}\n\nAnswer: Yes.\n\nQuestion: {G.BACKSTORY_QUESTION}\n\nAnswer:")
 
     def test_estimate_demographics(self):
         def resp(s, u):
@@ -248,6 +308,10 @@ class TestGeneration(unittest.TestCase):
         self.assertEqual(out[1]["demographics"], {"age_bracket": {"18-29": 1.0}})
         self.assertEqual(len(llm.calls), 6)
         self.assertIn(G.CONSISTENCY, llm.calls[0][1])
+        self.assertTrue(llm.calls[0][1].startswith(f"Question: {G.BACKSTORY_QUESTION}\n\nAnswer: {STORY_OLD}"))
+        llm = FakeLLM(resp)
+        G.estimate_demographics(llm, [{"id": "a", "text": STORY_OLD, "question": "Who are you?"}], [q], samples=1)
+        self.assertTrue(llm.calls[0][1].startswith("Question: Who are you?\n\nAnswer:"))
         with self.assertRaises(ValueError):
             G.estimate_demographics(llm, [], [{"id": "age", "text": "Age?"}])
         none = G.estimate_demographics(FakeLLM(lambda s, u: "unclear"), [{"id": "a", "text": "x"}], [q], samples=2)
@@ -278,16 +342,25 @@ class TestGeneration(unittest.TestCase):
                          ["A tall nurse", "A bus driver"])
 
     def test_narrate_people_uses_fields_only(self):
-        llm = FakeLLM(lambda s, u: "You are a nurse.")
+        llm = FakeLLM(lambda s, u: "Persona: Maria, 25, is a nurse.")
         out = G.narrate_people(llm, [person(0)], exclude=["vote"], words=80)
-        self.assertEqual(out, {"u0": "You are a nurse."})
+        self.assertEqual(out, {"u0": "Maria, 25, is a nurse."})           # B.4 "Persona:" label stripped
         s, u = llm.calls[0]
         self.assertEqual(s, G.NARRATIVE_SYSTEM)
-        self.assertIn("- age: 25", u)
-        self.assertIn("80 words", u)
+        self.assertIn('### PERSONA METADATA ###\n{\n  "age": 25,\n  "gender": "female"\n}', u)
+        self.assertIn("under 80 words", u)
         self.assertNotIn("vote", u)
         self.assertNotIn(SECRET, s + u)
         self.assertNotIn("bus was late", u)                            # free text is not a field
+
+    def test_narrative_prompt_is_paper_b4(self):
+        s, u = G.narrative_prompt(person(0))
+        self.assertTrue(s.startswith("You are an AI assistant specialized in detailed and unbiased persona generation"))
+        self.assertTrue(u.startswith("### INSTRUCTIONS ###\n1. You will be provided with a persona meta file"))
+        self.assertTrue(u.endswith("### PERSONA GENERATION ###\n"))
+        self.assertNotIn("{METADATA}", u)
+        self.assertNotIn("words", u)                                    # no length cap unless asked
+        self.assertEqual(G.strip_persona_label("### PERSONA GENERATION ###\npersona:  An engineer."), "An engineer.")
 
 
 class TestCompare(unittest.TestCase):
