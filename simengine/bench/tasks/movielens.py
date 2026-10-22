@@ -11,7 +11,7 @@ per-user temporal split, two targets and LLM-free baselines.
 Each user's ratings are ordered by timestamp. ML-1M has many ratings in the same second (42% of users end on such a
 burst), so ties are broken by a fixed hash of (user_id, movie_id): deterministic, independent of file order, and
 unrelated to the movie id (a movie-id tie-break makes the newest-id movie the "next" one and lets a score = movie id
-reach sampled hit@10 0.171 instead of 0.131).
+reach sampled hit@10 0.171 instead of 0.129).
 
 target='rating' (kind continuous): the last ceil(test_frac * n_u) ratings of every user are test (default 0.2), the
     rest train. Metrics RMSE (primary) and MAE, user-cluster bootstrap. Baselines global_mean, user_mean, item_mean,
