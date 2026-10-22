@@ -552,11 +552,15 @@ robustness_frame(rb)                           # segment x question x condition,
   a model by surprise.
 - **SSR on long texts and offline.** `SSR(max_chars=2000)` (the default; `None` = no cut, the old behaviour;
   `embed(texts, max_chars=...)` overrides per call) cuts each text before encoding: bge-base reads at most 512
-  tokens anyway. `cache_dir=` stores one `.npy` per text keyed by sha256(model name + text), written atomically,
-  so reruns and other processes skip texts already embedded. `progress=True` prints one stderr line per
-  `progress_every` new texts with texts/s; a callable gets `(done, total, texts_per_s)`. No CPU throughput figure
-  is given here because none was measured with this code. A model missing from the local cache raises an
-  `OSError` naming `SIMENGINE_HF_CACHE`, `cache_folder`, `HF_HOME` and `offline=False`.
+  tokens anyway, so the default loses little and gains little. Speed comes from a lower cut. One run (22 Oct,
+  bge-base, CPU, 4 threads, nice 19 on a shared, loaded machine, 96 synthetic English texts of ~10k characters):
+  no cut 2.3 texts/s, 2000 chars 3.0, 1000 chars 6.4, 500 chars 13.7 (rates depend on load). `cache_dir=`
+  stores one `.npy` per text keyed by sha256(model name + text), written atomically, so reruns and other
+  processes skip texts already embedded (with a lambda or nested `encoder=` it needs `cache_key=`, else
+  ValueError). `progress=True` prints one stderr line per `progress_every` new texts with texts/s; a callable
+  gets `(done, total, texts_per_s)`. `SIMENGINE_HF_CACHE` / `cache_folder` may be the HF_HOME folder or its
+  `hub/`. A model missing from the local cache raises an `OSError` naming `SIMENGINE_HF_CACHE`, `cache_folder`,
+  `HF_HOME` and `offline=False`.
 - **Retries.** `predict_people` re-asks with a "(Attempt n: reply with the JSON object only.)" suffix, so a
   cached backend does not return the same bad answer. talp73 retried inside its backend.
 - **Generalised prompts.** `persona_distribution` takes `setting=` in place of the fixed "public opinion survey
