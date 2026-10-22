@@ -118,6 +118,14 @@ class TestMetrics(unittest.TestCase):
         with self.assertRaises(ValueError):
             M.geobleu(np.zeros((0, 2)), [[1, 1]])
 
+    def test_user_scores_refuses_unknown_metric(self):
+        args = ([1, 1], [0, 0], [0, 1], [[1, 1], [2, 2]], [[1, 1], [2, 2]])
+        for bad in (("geobleu", "dtwx"), (), ("accuracy",)):
+            with self.assertRaises(ValueError):
+                M.user_scores(*args, metrics=bad)
+        s = M.user_scores(*args, metrics="dtw")                  # a bare string is one metric
+        self.assertEqual(list(s.columns), ["uid", "n_days", "dtw"])
+
     def test_cells_roundtrip(self):
         xy = np.array([[1, 1], [200, 200], [37, 150]])
         c = M.to_cell(xy[:, 0], xy[:, 1])
@@ -202,6 +210,27 @@ class TestBaselines(unittest.TestCase):
         p = M.EPRMobility(seed=5).fit(self.train).predict(self.q)
         first_row = ~self.q.duplicated(["uid", "d"]).to_numpy()            # the test rows are (uid, d, t)-sorted
         self.assertTrue(all((u, c) in firsts for u, c in zip(self.q.uid[first_row], p[first_row])))
+
+    def test_epr_distinct_cells_grow_as_paper(self):
+        # Song et al. 2010: P_new = rho S^-gamma gives S ~ n^(1/(1+gamma)). One person moving at every record, no day
+        # reset, a buffer long enough to remember every explored cell; slope of log S vs log n over 3 seeds.
+        tr = pd.DataFrame({"uid": 1, "d": 0, "t": np.arange(4), "x": [100, 101, 100, 101], "y": 100})
+        n = 3000
+        q = pd.DataFrame({"uid": 1, "d": np.arange(n) // 48, "t": np.arange(n) % 48})
+        k = np.unique(np.geomspace(50, n - 1, 25).astype(int))
+        slope = {}
+        for g in (0.21, 0.6):
+            sl = []
+            for seed in range(3):
+                c = M.EPRMobility(gamma=g, day_reset=False, buffer=4096, seed=seed).fit(tr).predict(q)
+                first = np.sort(np.unique(c, return_index=True)[1])
+                sl.append(np.polyfit(np.log(k), np.log(np.searchsorted(first, k, side="right")), 1)[0])
+            slope[g] = np.mean(sl)
+        self.assertTrue(0.7 < slope[0.21] < 0.9, slope)           # paper 1 / 1.21 = 0.83
+        self.assertTrue(0.5 < slope[0.6] < 0.7, slope)            # 1 / 1.6 = 0.63
+        # rho = 1, gamma = 0: every move explores, so (almost) every row is a new cell
+        c = M.EPRMobility(rho=1.0, gamma=0.0, day_reset=False, seed=0).fit(tr).predict(q.iloc[:500])
+        self.assertGreater(len(np.unique(c)), 450)
 
     def test_clean(self):
         df = pd.DataFrame({"uid": [1, 1, 1, 2], "d": [0, 0, 0, 0], "t": [1, 1, 2, 1], "x": [5, 6, 7, 999],
