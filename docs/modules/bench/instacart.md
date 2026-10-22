@@ -30,7 +30,7 @@ task.score_all(frame)
 | `threshold` | float (0.2) | F1 decision rule: a product is predicted when its score is ≥ threshold |
 | `lgbm` | bool (True) | add the LightGBM baseline; skipped silently when `lightgbm` is not installed |
 
-An unknown option key raises `ValueError`, as in every bench task.
+An unknown option key raises `ValueError`, as in every bench task; so do `n_users < 1` and a non-finite `threshold`.
 
 `data.train` and `data.test` are candidate tables with one row per (user, product the user bought before):
 `user_id`, `product_id`, `y` and the 23 columns in `FEATURES`. `data.meta` holds the split description, the user
@@ -69,8 +69,9 @@ used). Candidates for a user are the distinct products in their `prior` orders.
 
 - user: number of orders, items, distinct products, mean basket size, reorder rate (orders after the first), mean
   days between orders;
-- product, over all users' history before the cut: line count, buyer count, reorder rate, share of buyers who bought
-  it at least twice, mean add-to-cart position;
+- product, over all users' history before the cut (the cut is each user's own order number; the data has no
+  calendar dates): line count, buyer count, reorder rate, share of buyers who bought it at least twice, mean
+  add-to-cart position;
 - user × product: times bought, share of the user's orders, share since first purchase, orders and days since last
   purchase, mean cart position, bought in the most recent order;
 - label order: days since the prior order, day of week, hour (the competition gives these for the order to predict);
@@ -132,6 +133,22 @@ was not chosen from it):
 | user_product_rate | 0.2712 | 0.3012 | 0.3133 | 0.3208 | 0.3237 |
 | lgbm | 0.3468 | 0.3740 | **0.3811** | 0.3748 | 0.3594 |
 
+Reviewer re-check, same day, same data (point values with B = 10; 3.5 min, 6.3 GB peak RSS): all eight F1 / AUC
+point values above reproduced to four decimals, and the test truth count (828,824 positives) equals the number of
+`reordered == 1` lines in `order_products__train`. Eight features (`u_orders`, `up_n`, `up_rate`,
+`up_rate_since_first`, `up_orders_since_last`, `up_days_since_last`, `u_days_mean`, `o_days`) recomputed
+independently from the raw files for 300 random users matched on both cuts (17,065 test and 15,739 train rows, no
+missing or extra rows, max difference 1e-6). Extending the `user_product_rate` sweep and choosing its threshold on
+the **train cut** (labels of each user's last prior order, no test rows seen):
+
+| threshold | 0.20 | 0.25 | 0.30 | 0.35 | 0.40 | 0.50 |
+|---|---|---|---|---|---|---|
+| train-cut F1 | 0.3199 | 0.3273 | **0.3296** | 0.3271 | 0.3172 | 0.2923 |
+| test F1 | 0.3133 | 0.3208 | **0.3237** | 0.3217 | 0.3107 | 0.2833 |
+
+So `user_product_rate` with its threshold picked on the train cut (0.30) scores 0.3237 on test, still well below
+LightGBM at the default 0.2 (0.3811).
+
 `user_reorder_rate` is one value per user, so within a user it predicts all or none of the candidates; its AUC near
 0.5 reflects that. The raw `user_product_rate` is not a calibrated probability, so its best F1 sits at a higher
 threshold than LightGBM's. A new method should be reported at the default threshold and, if it outputs scores rather
@@ -150,6 +167,10 @@ than probabilities, also with its threshold picked on the train cut, not on the 
 - **One train cut.** LightGBM learns from each user's last prior order only. Using more cuts per user, or the
   competition's usual setup of training on the `train` orders of other users, would give more training rows; not
   done.
+- **Order, not time.** Instacart gives order numbers and day gaps but no dates, so "before the cut" means before
+  each user's own label order. Product statistics on the test cut include other users' prior orders that may have
+  been placed after this user's last order in calendar time. This is the usual setup for this dataset and no label
+  is read, but it is not a strict time split.
 - **Candidate set.** Only previously bought products are candidates, so first-time purchases are out of scope by
   design.
 - **Licence:** the Instacart dataset was released for non-commercial use under Instacart's terms; the local copy is a
