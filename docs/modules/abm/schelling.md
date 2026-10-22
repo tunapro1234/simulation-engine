@@ -94,7 +94,129 @@ Each method was checked against the text of its source (sections named below). N
 
 ## Measured numbers
 
-See the next revision of this file.
+All runs are this port's, on synthetic random initial lattices. There is no data set. Scripts and CSVs are outside
+the repo. Command: `PYTHONPATH=. nice -n 19 python olc.py <experiment>`; each experiment is a few lines that call the
+API below. The runs were made on 22 Oct 2026 on a shared machine.
+
+### 1. Tipping curve (random move, unhappy movers)
+
+`tipping_curve(thr, seeds=range(10), grid=Grid((50, 50), torus=True), n_steps=300)` with 10% empty cells. Means over
+10 seeds:
+
+| threshold | like share (start 0.501) | happy | no unlike nbr | seg. coef. s | Duncan D (5x5) | steps | converged |
+|---|---|---|---|---|---|---|---|
+| 0.00 | 0.501 | 1.00 | 0.008 | 0.020 | 0.168 | 1 | 10/10 |
+| 0.10 | 0.510 | 1.00 | 0.014 | 0.022 | 0.175 | 2.2 | 10/10 |
+| 0.20 | 0.571 | 1.00 | 0.060 | 0.040 | 0.222 | 7.3 | 10/10 |
+| 0.25 | 0.574 | 1.00 | 0.064 | 0.039 | 0.224 | 6.4 | 10/10 |
+| 1/3 | 0.751 | 1.00 | 0.286 | 0.362 | 0.400 | 13.2 | 10/10 |
+| 0.40 | 0.827 | 1.00 | 0.439 | 0.646 | 0.501 | 14.5 | 10/10 |
+| 0.50 | 0.874 | 1.00 | 0.566 | 0.803 | 0.583 | 17.6 | 10/10 |
+| 0.60 | 0.971 | 1.00 | 0.869 | 0.930 | 0.780 | 74.0 | 10/10 |
+| 0.65 | 0.979 | 1.00 | 0.899 | 0.929 | 0.812 | 72.6 | 10/10 |
+| 0.70 | 0.993 | 1.00 | 0.962 | 0.948 | 0.859 | 156.5 | 10/10 |
+| 0.75 | 0.995 | 1.00 | 0.977 | 0.995 | 0.880 | 132.3 | 10/10 |
+| 0.80 | 0.553 | 0.146 | 0.036 | 0.033 | 0.221 | 300 | 0/10 |
+| 0.90 | 0.501 | 0.009 | 0.009 | 0.020 | 0.167 | 300 | 0/10 |
+
+This is the known tipping shape. Below about 1/4 there is almost no segregation. A mild demand of 1/3 gives a 0.75
+like share, and 0.6-0.75 gives near-complete separation. Above 0.75 nobody can be satisfied, agents keep
+reshuffling at random, and the lattice stays mixed. The curve moves in steps because k = 8: 0.20 and 0.25 both mean
+"2 of 8" for a full neighbourhood.
+
+- **NetLogo comparison** (`netlogo`, 51 x 51 torus, 30% wanted, 20 seeds): like share 0.754 (sd 0.013) at 5%
+  empty, 0.748 (sd 0.009) at 10% empty. NetLogo's page says "on average 70%" with nearby-patch moves. We are a few
+  points higher with random moves.
+
+### 2. Schelling's own board (`schelling71`)
+
+13 x 16 bounded board, 69 + 69 agents (34% blank), nearest satisfactory square, 200 seeds:
+
+| demand | like share start -> end | no unlike neighbour start -> end | all happy |
+|---|---|---|---|
+| 1/3 | 0.494 -> 0.652 (sd 0.026) | 0.059 -> 0.191 | 200/200 |
+| 3/8 | 0.494 -> 0.718 (sd 0.025) | 0.059 -> 0.264 | 200/200 |
+| 0.40 | 0.494 -> 0.724 (sd 0.026) | 0.059 -> 0.272 | 200/200 |
+| 1/2 | 0.494 -> 0.789 (sd 0.020) | 0.059 -> 0.378 | 200/200 |
+
+Schelling's reported values (one hand-played board, pp. 156-158) at demand 1/2: like share 53% (zeros) and 46%
+(stars) at the start, and five-sixths (0.83) and four-fifths (0.80) at equilibrium. Agents with no neighbour of
+the opposite colour went from 13 (about 10%) to 54 (about 40%). At about 1/3 demand he calls segregation "slight",
+and he says segregation is "a rapidly rising function of demands in the range from about 35% to 50%". Our mean at
+1/2 (0.789, 0.378) is within about one sd of his single board. Our start value for "no unlike neighbour" (0.059)
+is below his 13/138. His count comes from one random draw, and he quotes it against an 11 x 16 expectation.
+
+### 3. Gauvin et al. variant (`gauvin`)
+
+L = 50 with free boundaries, 10% vacancies, every agent tries a satisfying vacancy, 150 sweeps, 2 seeds per T:
+
+| T (tolerance) | 1/4 | 1/3 | 3/8 | 3/7 | 1/2 | 4/7 | 5/8 | 2/3 | 5/7 | 3/4 | 4/5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| s | 0.018 | 0.029 | 0.764 | 0.819 | 0.848 | 0.727 | 0.712 | 0.814 | 0.813 | 0.086 | 0.046 |
+| like share | 0.524 | 0.560 | 0.984 | 0.975 | 0.973 | 0.963 | 0.952 | 0.942 | 0.923 | 0.633 | 0.583 |
+| happy | 0.186 | 0.391 | 0.989 | 0.991 | 0.996 | 0.993 | 0.994 | 0.994 | 0.990 | 0.962 | 0.965 |
+
+Their Table 1 gives the frozen-to-segregated jump Tf = 3/8 at a vacancy density of 10%. We see it between 1/3 and
+3/8, so it matches. Their segregated-to-mixed jump Tc is "almost at a constant value" of T. Their Figs. 3 and A.7
+put it near 2/3-3/4 (read off the plots; the text gives no number). We see it between 5/7 and 3/4. Our s
+is 0.7-0.85 where theirs is ~1, because we stop at 150 sweeps while they equilibrate and then average over 30,000
+steps. Our clusters are still coarsening.
+
+### 4. Zhang swap game (`zhang`, `zhangwait`)
+
+100 x 100 Moore torus, 50/50, Z = 1, M = 0.6, random initial state (rho about 19,900 unlike pairs; the two-stripe
+minimum is 3 x 100 x 2 = 600). `zhangwait`: 4M pairs, rho recorded every 20k pairs, 3 seeds (2 for beta 5-8).
+"Scaled" is Zhang's potential with his constant M/(2n) applied, rho x 0.075; Zhang's criterion is |potential| < 600,
+which is rho <= 8,000.
+
+| beta | rho after 4M pairs | like share | pairs until scaled potential <= 600 |
+|---|---|---|---|
+| 1 | 19,022-19,152 | 0.52 | never (3/3) |
+| 2 | 17,722-18,024 | 0.55 | never (3/3) |
+| 3 | 15,832-16,414 | 0.60 | never (3/3) |
+| 4 | 13,550-14,038 | 0.65 | never (3/3); a 60M-pair run stays at 13,660-14,258 |
+| 5 | 8,528-9,436 | 0.76-0.79 | never (2/2) |
+| 6 | 4,358-4,734 | 0.88-0.89 | 160k (2/2) |
+| 7 | 3,030-3,278 | 0.92 | 80k (2/2) |
+| 8 | 2,188-2,464 | 0.94 | 60k (2/2) |
+| 10 | 2,078-2,158 | 0.95 | 60k (3/3) |
+| 40 | 1,894-2,284 | 0.95 | 40k (3/3) |
+
+- Qualitatively this agrees with Zhang. With large beta, rho collapses and the like share reaches 0.95, although
+  every agent's payoff peaks at a 50-50 neighbourhood. The waiting time falls steeply with beta and then flattens
+  (60k pairs at beta 8-10, 40k at 40).
+- **Disagreement:** Zhang (§3.3, Fig. 8) reports that for beta < 2 runs never reach the criterion, that the waiting
+  time drops sharply around beta = 2, and that runs at beta = 4 "always end fairly quickly". In our runs the
+  threshold is between beta 5 and 6, and beta = 4 stays mixed at stationarity: 60M pairs, rho ~14k. This fits a
+  check from equilibrium theory. The logit rule on a potential game has the Gibbs stationary law
+  exp(-beta x 0.075 x rho) (Zhang's Prop. 1 / Young 1998). That is an Ising model with coupling K = 0.0375 beta on
+  the 8-neighbour lattice, which orders only above some K_c, so a finite threshold beta is expected. Its exact
+  value was not computed here. Either Zhang's potential or time unit is scaled differently from our reading of
+  eqs. 1-2, or the pair rule matters. We could not settle this from the paper.
+- A raw rho of 600 (two clean stripes) was not reached in 60M pairs at beta = 10. rho levelled off at ~1,200, the
+  count for four straight boundaries. A metastable multi-stripe state on the torus is the likely cause; the
+  lattice was not inspected.
+- Speed: ~12.6 s per 1M pairs on 100 x 100 (pure Python loop, measured under load).
+
+### 5. LLM path with a rule-following FakeLLM (`llm`)
+
+30 x 30 torus, 10% empty, 5 seeds, at most 300 rounds, `FakeLLM(threshold_responder(thr))`. This checks the
+mechanics of batched synchronous decisions against the asynchronous sweep. It is **not** a measurement of any real
+LLM.
+
+| threshold | classic like share (sweeps) | LLM, no options (rounds) | calls / asked | LLM, 3 options (rounds) | blocked |
+|---|---|---|---|---|---|
+| 0.3 | 0.753 (12.6) | 0.749 (11.0) | 99 / 349 | 0.747 (9.0) | 113 |
+| 0.5 | 0.863 (15.0) | 0.869 (14.4) | 182 / 871 | 0.853 (13.2) | 487 |
+| 0.7 | 0.991 (185.6) | 0.993 (180.6) | 2,772 / 11,155 | 0.550 (300, not converged) | 548 |
+
+- Without options, the batched round reproduces the classic outcome. De-duplication cuts calls 3.5-4.8x, and more
+  with a disk cache across rounds.
+- With 3 random vacancies on offer, a demanding agent (0.7) rarely finds a satisfying one. The lattice then stays
+  mixed (0.55 after 300 rounds and ~161k calls). Limited search alone changes the macro outcome, so any LLM result
+  with options has to be compared with this control, not with the classic curve.
+- No real-LLM numbers were measured in this port. The LLM literature value above (Cheng et al. shift ~0.27) is
+  theirs.
 
 ## Limitations
 
