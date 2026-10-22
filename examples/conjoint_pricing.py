@@ -9,7 +9,8 @@ the prompt and picks the one with the highest utility plus Gumbel noise, so the 
 can print it next to the estimate. With a real model, swap the FakeLLM for `se.Claude(...)` and keep everything
 else; the estimate then measures what the model says, which still has to be checked against people.
 Pooled MNL ignores the per-persona spread, so its part-worths are slightly attenuated; with the seeds below the
-warranty WTP lands at the lower end, with the truth inside its 95% CI.
+warranty WTP lands low (71.8 vs 87.5 TL), the truth just inside the delta-method 95% CI and just above the
+bootstrap one (over 20 seeds the delta intervals covered the truth at about the nominal rate).
 
 A "none of these" option is its own alternative (id 0, all attributes 0, the base of the ASCs), so every task has
 exactly one chosen row, as `MNL.fit` requires.
