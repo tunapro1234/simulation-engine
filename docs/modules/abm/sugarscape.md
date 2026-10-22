@@ -42,7 +42,8 @@ run.calls, run.invalid, run.conflicts, run.stopped
 ```
 
 - `Sugarscape.step(plan=None)` runs one step. `plan` is `{slot: flat site id}`. A planned site that an earlier mover
-  has taken counts as a conflict, and that agent falls back to rule M.
+  has taken counts as a conflict, and that agent falls back to rule M. A site outside the agent's vision raises
+  `ValueError`. The capacity grid must be square (`ValueError` otherwise).
 - `Sugarscape.rule_m(i)` and `candidates(i)` expose the movement rule for one agent.
 - `LLMPolicy`: each prompt lists the agent's holdings and metabolism and the free sites it can see at the start of
   the step (direction, distance, sugar, plus spice when on). The reply is `{"site": k}`. Replies that do not
@@ -60,6 +61,10 @@ run.calls, run.invalid, run.conflicts, run.stopped
   - death when sugar <= 0 or age > max_age
   - initial population 400 in the NetLogo default, which is why `n_agents` is a parameter
   - endowment 5-25, metabolism 1-4, vision 1-6, max age 60-100, growback 1 per tick
+  - 50x50 world wrapping in both directions; its Gini plot is (2/n) Σ_i (i/n − L_i) over sorted wealth, which is
+    algebraically the same as `gini()` here
+  - these points were re-checked on 22 Oct 2026 against "Sugarscape 3 Wealth Distribution.nlogox" in the
+    NetLogo/models GitHub repository (Sample Models/Social Science/Economics/Sugarscape)
 - Landscape: the book's map, as transcribed in NetLogo's `sugar-map.txt`, is CC BY-NC-SA 3.0 and is **not shipped**.
   `sugar_capacity()` is parametric instead: stepped cones (levels 4/3/2/1 within radii 6/11/17/24) around peaks at
   (row 10.5, col 38.5) and (34.5, 14.5). The centres and radii were fitted to that file. Measured on the 2,500
@@ -71,6 +76,8 @@ run.calls, run.invalid, run.conflicts, run.stopped
 - Differences from NetLogo/book:
   - deaths are processed after all agents have moved (NetLogo removes an agent inside its own turn)
   - newborns do not move in the step they are born
+  - trade runs once per step after deaths and replacement, so newborns can trade in their birth step (the book
+    interleaves T with each agent's move)
   - with spice, the "wealth" used for the Gini is sugar + spice holdings
   - spice metabolism U{1..4} and spice endowment U{5..25} are this port's choice, not checked against the book
 
@@ -125,14 +132,17 @@ These are scripted responders, not an LLM. They test the plumbing and show which
 
 - Book, qualitative: the wealth distribution turns strongly right-skewed from a roughly symmetric start, and the
   Gini rises and then fluctuates around a stable level. **Reproduced:** Gini 0.24 → about 0.47-0.48, skewness 0.03
-  → 1.3. The NetLogo model page makes the same point: most agents stay near the initial endowment and a minority
-  are rich.
+  → 1.3. The NetLogo model page makes the same qualitative point: "Only a minority of the population have above
+  average wealth", and "there are many more agents with low wealth than agents with high wealth".
 - Book Gini value: not checked. The book is not open access. From memory, the book's Gini series levels off near
   0.5. Treat that as unverified.
-- Secondary replication: Foguelman et al. 2021 (EB-DEVS), arXiv:2110.08170, §3.4, with their own grid and
-  parameters (metabolism 1-2, a different max age), report a Gini that "starts around 0.22 … until it reaches a
-  stable value of 0.42". Our start (0.236) matches theirs. Our plateau (0.47-0.48) is higher, which fits their remark
-  that the final value depends heavily on the grid and parameters.
+- Secondary replication: Foguelman et al. 2021 (EB-DEVS), arXiv:2110.08170, §3.4.3 (re-read 22 Oct 2026): with the
+  Gini threshold at 1 (plain Sugarscape) "the Gini index starts around 0.22, and it oscillates through time until it
+  reaches a stable value of 0.42". Their text says they use the book's two-peak terrain; their Listing 5 draws vision
+  1-6 and endowment 5-25 like ours, but metabolism 1-2 (ours 1-4), max age 5-25 (ours 60-100) and positions on
+  0..30. The agent count is not stated in the text. Our start (0.236) matches theirs. Our plateau (0.47-0.48) is
+  higher; with metabolism and lifespan this different the plateaus are not directly comparable, and they note
+  that the final value "is heavily dependant on the grid topology".
 - Carrying capacity and trade: the book reports, from memory and unverified, that a carrying capacity emerges, that
   selection lowers metabolism and raises vision, that trade raises carrying capacity, that prices converge with
   falling dispersion, and that trade raises inequality. All five appear in B and C with the same sign. The book's
