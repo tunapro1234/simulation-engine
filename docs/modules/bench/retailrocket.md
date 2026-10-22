@@ -84,8 +84,9 @@ rows out of 33,858 sessions.
   treated as one threshold, equal to sklearn's `average_precision_score`), ROC AUC, and log loss clipped at 1e-15.
 - **Next:** the frame has `unit`, `group`, `truth` (target item id), `item` (the input's last item), `time`,
   `segment` (`repeat` / `new`) and `seg_input_len`. `pred_<method>` cells hold int arrays. The metrics are recall@20,
-  which equals hit rate because there is one target, MRR@20, and recall@20 on `new` rows (targets not seen in the
-  input).
+  which equals hit rate because there is one target, MRR@20 (reciprocal rank, 0 outside the top 20), and recall@20
+  on `new` rows (targets not seen in the input). A list is ranked after dropping repeated ids (first position counts)
+  and negative ids (padding), as the source metric does.
 - All confidence intervals come from a visitor-cluster bootstrap (B = 1000, seed 42). `n` is rows and `n_visitors`
   is clusters.
 
@@ -109,7 +110,7 @@ rows out of 33,858 sessions.
 
 **Next item:** the input's last item is never proposed. Each list is padded with the most popular items.
 
-- `popularity`: the most viewed items in history.
+- `popularity`: the items with the most events (all three types) in history.
 - `last_viewed`: the input's earlier items, most recent first.
 - `cooc`: items that co-occur with the input's last item in history sessions. Each history session contributes its
   first 50 distinct items, and items are ranked by co-occurrence count.
@@ -167,20 +168,27 @@ Each task's test split was run twice, at about 20:35 and 21:30 on 22 Oct. The fi
 deterministic on this machine. The PR-AUC intervals are wide (about ±0.07 for lgbm) because there are only 1,013
 positives. Compare methods with a paired test (`se.evaluate`), not by overlapping intervals.
 
-Both tasks reproduce the source branch's tables (`BASELINE_RR.md`, 20 Oct 2026; the same definitions run by its own
-scripts). Next item matches to 4 decimals on test and valid. For purchase, `has_addtocart` and `counts_logistic`
-match on test PR-AUC (0.2639,
-0.3698) and on valid PR-AUC (0.2642, 0.3838). The source lgbm had PR-AUC 0.5715 on test and 0.5674 on valid (375
-rounds), and 0.5101 / 0.5280 without end-position features. The split, counts and the non-GBDT baselines are identical, so the small LightGBM
-differences most likely come from the early-stopping round count (426 refit rounds here vs 375 there); this was not
-isolated.
+Comparison with the source branch's tables (`BASELINE_RR.md`, 20 Oct 2026; the same definitions run by its own
+scripts): the split and all counts are identical, next item matches to 4 decimals on test and valid, and
+`has_addtocart` matches exactly (test 0.2639, valid 0.2642). `counts_logistic` is 0.3697 on test here against 0.3698
+there (valid 0.3838 in both). The cause is the duration features: the source's polars `total_seconds()` truncates to
+whole seconds, while this port keeps milliseconds. With durations truncated to whole seconds, a review run (22 Oct)
+reproduced the source's test PR-AUC to 6 decimals (0.369817).
+
+The source lgbm had PR-AUC 0.5715 on test and 0.5674 on valid (375 refit rounds), and 0.5101 / 0.5280 without
+end-position features. The same review measured how much small implementation details move the test lgbm PR-AUC
+(predictions only, no bootstrap): whole-second durations 0.5733 (328 rounds); plus the source's fold assignment
+(polars `hash(seed=11) % 5` instead of `visitorid % 5`) 0.5705 (377 rounds); plus train rows ordered by session start
+0.5708 (360 rounds). The port as shipped gives 0.5727 (426 rounds). So lgbm moves by about ±0.002 PR-AUC and its
+round count by about ±50 with these choices. That is far inside the ±0.07 interval, and the exact source value was
+not recovered.
 
 ## Provenance
 
 Ported from the TALP preparation research (intent branch: `hazirla_rr.py` for the split, `baseline_rr.py` for the
 baselines, `sonraki_metrik.py` for the next-item metric; protocol "RR-oturum" with the leak fix recorded in
 `BASELINE_RR.md`). The data is the Retail Rocket "Retailrocket recommender system dataset" on Kaggle, licensed
-CC BY-NC-SA 4.0. The copy used for the numbers below came from a Hugging Face mirror of the Kaggle files (events
+CC BY-NC-SA 4.0. The copy used for the numbers above came from a Hugging Face mirror of the Kaggle files (events
 and category tree only); its row count matches the Kaggle file (2,756,101). The repository ships no rows.
 
 ## Limitations
@@ -193,8 +201,9 @@ and category tree only); its row count matches the Kaggle file (2,756,101). The 
   are in UTC as defined. `hour` / `weekday` features are UTC.
 - **No categories:** the item-to-category mapping is in `item_properties`, which is not read, so there are no
   category features or category-level baselines.
-- **Single runs:** each test number is one run. LightGBM uses 4 threads with a fixed seed. Its round count is chosen
-  inside train and can differ slightly between versions.
+- **Single configuration:** each number comes from one fixed configuration, run twice with identical results. LightGBM
+  uses 4 threads with a fixed seed. Its round count is chosen inside train, and small implementation choices move it
+  and the lgbm scores slightly (see the comparison with the source above).
 - **Not comparable with published session-recommendation numbers:** those use other session definitions, filters
   (minimum item support, session length), splits and candidate sets. Results reported elsewhere on RetailRocket
   should not be placed next to these numbers without rerunning them on this split.
