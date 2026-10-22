@@ -393,23 +393,69 @@ def batch_calibrate(frame: pd.DataFrame, prior_rates: Mapping[str, float], *, co
     return f
 
 
-def retest_stats(samples, *, unit: str = "unit", item: str = "item", sample: str = "sample", p: str = "p"
-                 ) -> dict:
+def _positions(pos, item, k: int) -> np.ndarray:
+    """Option positions for one item: pos None -> 0..k-1; a sequence; or {item: sequence}."""
+    if isinstance(pos, Mapping):
+        pos = pos.get(item)
+    x = np.arange(k, dtype=float) if pos is None else np.asarray(pos, float)
+    if len(x) != k:
+        raise ValueError(f"item {item!r}: {len(x)} positions for {k} options")
+    return x
+
+
+def _w1_pos(a: np.ndarray, b: np.ndarray, x: np.ndarray) -> float:
+    """1-Wasserstein distance between two vectors over options at positions x, divided by the position range
+    (equals `w1_ordinal` for equally spaced positions)."""
+    a, b = a / a.sum(), b / b.sum()
+    span = float(x.max() - x.min()) or 1.0
+    return float((np.abs(np.cumsum(a) - np.cumsum(b))[:-1] * np.diff(x)).sum() / span)
+
+
+def _reduce_distribution(d: pd.DataFrame, unit: str, item: str, sample: str, p: str, pos) -> tuple:
+    """Distribution rows -> (rows with scalar E[position] in `p`, within-cell W1 summary)."""
+    d = d.copy()
+    vec = [None if v is None or (isinstance(v, float) and v != v) else np.asarray(v, float) for v in d[p]]
+    d[p] = [np.nan if v is None else float(v @ _positions(pos, it, len(v)) / v.sum())
+            for v, it in zip(vec, d[item])]
+    d["_vec"] = vec
+    w1 = []
+    for (_, it), g in d[[unit, item, "_vec"]].groupby([unit, item], sort=False):
+        vs = [v for v in g["_vec"] if v is not None]
+        pairs = [_w1_pos(a, b, _positions(pos, it, len(a))) for a, b in itertools.combinations(vs, 2)]
+        if pairs:
+            w1.append(float(np.mean(pairs)))
+    return d.drop(columns="_vec"), {"within_cell_w1": float(np.mean(w1)) if w1 else None,
+                                    "within_cell_w1_max": float(np.max(w1)) if w1 else None}
+
+
+def retest_stats(samples, *, unit: str = "unit", item: str = "item", sample: str = "sample", p: str = "p",
+                 kind: str = "probability", pos=None) -> dict:
     """Test-retest of repeated samples (talp73 tekrar.py). `samples`: long table or a predict_people result.
     Returns within-cell sd, share of cells with identical samples, mean pairwise correlation over cells,
     per-item between-person sd vs within-cell sd and retest r, and the Spearman-Brown reliability of the
-    k-sample mean."""
+    k-sample mean.
+    kind="distribution": `p` holds a probability vector per row (e.g. `segment_distribution(..., repeats=k)`
+    result, whose "samples" rows use unit = segment). Each vector is reduced to E[position] (pos: None -> option
+    index 0..K-1, a sequence of positions, or {item: positions}) before the statistics above, and the result
+    adds `within_cell_w1` (mean pairwise W1 between the samples of a cell, divided by the position range; the
+    `w1_ordinal` scale for equally spaced options) and `within_cell_w1_max`."""
+    if kind not in ("probability", "distribution"):
+        raise ValueError(f"kind must be 'probability' or 'distribution', got {kind!r}")
     if isinstance(samples, dict):
         samples = samples.get("samples") or []
     d = pd.DataFrame(samples)
     if d.empty:
         return {"n_units": 0, "k": 0}
     d = d.drop_duplicates([unit, sample, item])
+    extra: dict = {}
+    if kind == "distribution":
+        d, extra = _reduce_distribution(d, unit, item, sample, p, pos)
+        extra["reduced_to"] = "E[position]"
     w = d.pivot_table(index=[unit, item], columns=sample, values=p)
     K = w.shape[1]
     out = {"n_units": int(w.index.get_level_values(0).nunique()), "n_cells": int(len(w)), "k": int(K),
            "within_cell_sd": float(w.std(axis=1).mean()) if K > 1 else None,
-           "identical_share": float((w.nunique(axis=1) == 1).mean())}
+           "identical_share": float((w.nunique(axis=1) == 1).mean()), **extra}
     if K < 2:
         return out
 
