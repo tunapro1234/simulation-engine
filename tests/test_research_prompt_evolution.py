@@ -58,6 +58,8 @@ class TestSplitAndScorer(unittest.TestCase):
         ev = pe.PromptEvaluator(score, items, items, higher_is_better=True)
         a, b = ev.scores("An outdoorsy person.")["mean"], ev.scores("A homebody.")["mean"]
         self.assertGreater(a, b)
+        odd = pe.make_llm_scorer(FakeLLM(lambda s, u: "no idea"), parse=float)("x", items)
+        self.assertTrue(np.isnan(odd["scores"]).all())
 
     def test_evaluator_cache_subset_and_test_guard(self):
         n = {"calls": 0}

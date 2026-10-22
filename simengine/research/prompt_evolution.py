@@ -168,7 +168,10 @@ def make_llm_scorer(llm: LLM, *, input_key: str = "input", target_key: str = "ou
                 continue
             t = r.text or ""
             outs.append(t)
-            sc.append(float(metric(parse(t) if parse else t, u[target_key])))
+            try:
+                sc.append(float(metric(parse(t) if parse else t, u[target_key])))
+            except (ValueError, TypeError, KeyError):          # unparseable reply: NaN, left out of means
+                sc.append(np.nan)
         return {"scores": np.asarray(sc, float), "outputs": outs}
     return score
 
