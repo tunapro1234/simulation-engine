@@ -282,7 +282,7 @@ class MemorySession(_MemoryBase):
             mems = [m for m in mems if m.id in self._order and self._order[m.id] < self._order[qid]]
         if self.k is not None:
             mems = mems[-self.k:]
-        known = Injector.known_answers(person, question)
+        known = {str(q): a for q, a in Injector.known_answers(person, question).items()}   # Memory.id is str
         turns = [(self._texts.get(m.id, m.id), known[m.id]) for m in mems]
         meta = {"memories": [m.id for m in mems]}
         if self.as_history:
@@ -295,7 +295,8 @@ class MemorySession(_MemoryBase):
 
 # ---------------------------------------------------------------- offline LLM steps (run before rendering)
 def _first_int(text: str, lo: int = 1, hi: int = 10) -> int | None:
-    m = re.search(r"-?\d+", str(text))
+    # prefer "Rating: n" so an echoed "scale of 1 to 10" is not read as the rating
+    m = re.search(r"(?<=rating:)\s*-?\d+", str(text), re.I) or re.search(r"-?\d+", str(text))
     if not m:
         return None
     v = int(m.group())
