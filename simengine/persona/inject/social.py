@@ -47,8 +47,8 @@ WILLIAMS = "Williams et al. 2023, Epidemic Modeling with Generative Agents (arXi
 
 SELECT = ("recent", "random")
 SOCIAL_KEYS = ("neighbors", "norms", "media", "state", "group")   # never shown as persona attributes
-# Chuang et al. 2023: Appendix F (bias; opening sentences verbatim) and G (closed world; "XYZ" -> "this topic",
-# "tweets" -> "posts")
+# Chuang et al. 2023: Appendix F (bias, verbatim) and G (closed world, verbatim but "XYZ" -> "this topic" and
+# "other strangers on Twitter" -> "the people you follow")
 BIAS = {
     "none": "",
     "weak": ("Remember, you are role-playing as a real person. Like humans, you have confirmation bias. You will be "
@@ -59,11 +59,16 @@ BIAS = {
                "contradicts your beliefs."),
 }
 CLOSED_WORLD = ("Remember, throughout the interactions, you are alone in your room with limited access to the "
-                "Internet. You cannot search for information about this topic on the Internet and you cannot ask "
-                "anyone else. Your view can only rely on your own earlier view and the posts you have read.")
-# Zhu et al. 2024, confederate tones
-TONES = {"plain": "{a}", "neutral": "I think it is {a}", "confident": "I am sure it is {a}",
-         "uncertain": "I am not sure if it's {a}"}
+                "Internet. You cannot search for information about this topic on the Internet. You can not go out to "
+                "ask other people about this topic. Because you are alone in your room, you can not leave your room "
+                "to seek information about this topic. To form your belief about this topic, you can only rely on "
+                "your initial belief about this topic, along with the information you received from the people you "
+                "follow.")
+# Zhu et al. 2024, Table 1: the published example phrasings per tone; participant i uses variant i mod len
+TONES = {"plain": ("{a}",),
+         "neutral": ("I think it is {a}", "My answer is {a}", "{a}, in my opinion", "It's {a}"),
+         "confident": ("I am sure it is {a}", "{a}, of course", "Sure thing it's {a}"),
+         "uncertain": ("I am not sure if it's {a}", "I guess it's {a}", "{a}? perhaps")}
 
 
 # ---------------------------------------------------------------- helpers
@@ -154,9 +159,9 @@ def _missing(inj: Injector, person: dict, what: str) -> MissingPersonField:
 class _Social(Injector):
     family = FAMILY
 
-    def _system(self, person: dict, *parts: str) -> str:
-        blocks = (_persona_lines(self, person) if getattr(self, "persona", False) else []) + [p for p in parts if p]
-        return "\n\n".join(blocks)
+    def _system(self, person: dict, *parts: str, lead: str = "") -> str:
+        persona = _persona_lines(self, person) if getattr(self, "persona", False) else []
+        return "\n\n".join([lead] * bool(lead) + persona + [p for p in parts if p])
 
 
 # ---------------------------------------------------------------- injectors
@@ -166,7 +171,8 @@ class PeerMessages(_Social):
     name = "peer_messages"
     paper = CHUANG
     needs = ("neighbors",)
-    description = ("System: optional persona + 'you have been reading posts from people you follow' + optional "
+    description = ("System: 'Role play this person.' + optional persona + 'you have been reading posts from people "
+                   "you follow' + optional "
                    "confirmation-bias (weak/strong) and closed-world lines; user: the k neighbour messages "
                    "(recent or seeded random), then the question. Reads neighbors[].message, optional state, fields, text.")
 
@@ -189,10 +195,10 @@ class PeerMessages(_Social):
         st = _state(person, question)
         system = self._system(
             person,
-            "Role play this person. You have been reading posts from people you follow on a social network. "
-            "You can change or keep your views after reading them.",
-            f"Your view before reading these posts: {st}" if st is not None else "",
-            BIAS[self.bias], CLOSED_WORLD if self.closed_world else "")
+            "Now, you have been reading posts from people you follow on a social network. You can decide to change "
+            "or maintain your belief about this topic after reading them.",
+            f"Your initial belief: {st}" if st is not None else "",
+            BIAS[self.bias], CLOSED_WORLD if self.closed_world else "", lead="Role play this person.")
         lines = [f"- {n.get('label') or 'Someone you follow'}: {_quote(n['message'])}" for n in shown]
         user = "Posts you have read (oldest first):\n" + "\n".join(lines) + "\n\n" + self.question_block(question)
         return Prompt(system=system, user=user, meta={"shown": [n.get("id") for n in shown]})
@@ -248,9 +254,10 @@ class AschMajority(_Social):
     name = "asch_majority"
     paper = ZHU
     needs = ("neighbors",)
-    description = ("User: 'You are one of the participants in an experiment. There are in total N+1 participants.', "
-                   "the question, 'Participant i: <tone>' lines (plain / neutral / confident / uncertain) or one "
-                   "distilled organiser line, then 'Now, as Participant N+1, it's your turn.' Confederate "
+    description = ("User: Zhu et al.'s template ('You are one of the participants in an experiment. There are in "
+                   "total N+1 participants. ...', 'Organiser: ...', 'Question: ...'), 'Participant i: <tone>' lines "
+                   "(plain / neutral / confident / uncertain, the paper's example phrasings in turn) or one distilled "
+                   "organiser line, then 'Now, as Participant N+1, it's your turn:'. Confederate "
                    "answers = neighbors[].answers[qid] (seeded order) or a fixed answer= x n (then needs nothing). "
                    "persona=True adds fields/text.")
 
@@ -284,9 +291,13 @@ class AschMajority(_Social):
     def render(self, person: dict, question: dict) -> Prompt:
         answers, ids = self._confederates(person, question)
         m = len(answers)
-        head = (f"You are one of the participants in an experiment. There are in total {m + 1} participants. The "
-                f"organiser asks every participant the same question, one after another.\n\n"
-                f"Organiser: {question['text']}")
+        organiser = ("Answer the following multiple choice question by giving the most appropriate response. "
+                     "Answer should be chosen among [" + ", ".join(str(o) for o in question["options"]) + "]."
+                     if question.get("options") else
+                     "Answer the following question by giving the most appropriate response.")
+        head = (f"You are one of the participants in an experiment. There are in total {m + 1} participants. Answer "
+                f"the questions based on your knowledge. The conversation of the whole experiment is as follows:\n\n"
+                f"Organiser: {organiser}\n\nQuestion: {question['text']}")
         if self.distill:
             cnt = Counter(str(a) for a in answers)
             if len(cnt) == 1:
@@ -296,8 +307,9 @@ class AschMajority(_Social):
                 body = (f"Organiser: Of the {m} participants before you, "
                         + ", ".join(f"{c} chose {_quote(a)}" for a, c in rows) + ".")
         else:
-            body = "\n".join(f"Participant {i + 1}: {TONES[self.tone].format(a=a)}" for i, a in enumerate(answers))
-        user = (f"{head}\n\n{body}\n\nNow, as Participant {m + 1}, it's your turn.\n"
+            say = TONES[self.tone]
+            body = "\n".join(f"Participant {i + 1}: {say[i % len(say)].format(a=a)}" for i, a in enumerate(answers))
+        user = (f"{head}\n\n{body}\n\nNow, as Participant {m + 1}, it's your turn:\n"
                 f"{instruction(answer_spec(question))}")
         return Prompt(system=self._system(person), user=user,
                       meta={"confederates": [str(a) for a in answers], "shown": ids})
