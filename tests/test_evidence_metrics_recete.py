@@ -177,5 +177,30 @@ class TestDistributionEntropy(unittest.TestCase):
         self.assertIn("ayrışma", a["ayrinti"])
 
 
+class TestReviewFollowups(unittest.TestCase):
+    def test_mean_bias_not_primary(self):
+        with self.assertRaises(ValueError):                     # signed: "lower is better" would crown -0.5
+            _ev(binary_frame(), primary="mean_bias")
+
+    def test_card_markdown_rows(self):
+        md = api.card_markdown(_ev(binary_frame(), primary="auc"))
+        self.assertIn("Calibration-in-the-large", md)
+        self.assertIn("(`tahmin_ours`) | yontem | +0.0", md)
+
+    def test_auto_macro_f1_primary_keeps_imbalance_warning(self):
+        rep = _ev(binary_frame(base=0.1))                       # > 60% majority: primary switches to macro-F1
+        self.assertEqual(rep["birincil"], "macro_f1")
+        self.assertEqual(_audit(rep, "sınıf dengesizliği")["durum"], "uyari")
+
+    def test_divergence_uses_option_positions(self):
+        pos = np.array([0, 0.1, 0.2, 1.0])
+        df = distribution_frame(pos=pos)
+        y = _ev(df, primary="wasserstein")["yayilim"]["tahmin_ours"]
+        ep = lambda v: float(np.dot(v, pos))
+        t = pd.DataFrame({"q": df["item"], "y": [ep(v) for v in df.truth], "p": [ep(v) for v in df.pred_ours]})
+        dev = lambda c: ((t[c] - t.groupby("q")[c].transform("mean")) ** 2).sum()
+        self.assertAlmostEqual(y["ayrisma_orani"], np.sqrt(dev("p") / dev("y")), places=10)
+
+
 if __name__ == "__main__":
     unittest.main()
