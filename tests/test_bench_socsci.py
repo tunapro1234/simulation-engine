@@ -220,13 +220,37 @@ class TestTask(_Fixture):
         self.assertEqual(set(do.test.task_num), {2})
         self.assertEqual(set(do.test.study_id) | set(do.train.study_id), {"s1", "s2", "s5"})
 
+    def test_mixed_cell_left_out_of_both_sides(self):
+        """A cell whose answers the mapping puts partly in train and partly in eval is counted, not used."""
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, "socsci210")
+            raw = write_fixture(sub)
+            path = os.path.join(sub, "ham", "metadata", "condition_mapping.json")
+            with open(path) as f:
+                m = json.load(f)
+            ids = sorted(raw[(raw.study_id == "s1") & (raw.task_num == 1) & (raw.condition_num == 2)].sample_id)
+            m["s1"]["train"] = [i for i in m["s1"]["train"] if i not in ids[:5]]
+            m["s1"]["eval"] += ids[:5]
+            with open(path, "w") as f:
+                json.dump(m, f)
+            dc = ss.SocSci210(split="condition").load(d)
+            self.assertEqual(dc.meta["cells_mixed_split"], 1)
+            both = pd.concat([dc.train, dc.test])
+            self.assertFalse(((both.study_id == "s1") & (both.task_num == 1) & (both.condition_num == 2)).any())
+            self.assertTrue(((dc.train.study_id == "s1") & (dc.train.task_num == 2) &
+                             (dc.train.condition_num == 2)).any())
+
     def test_filters(self):
         d = ss.SocSci210(min_n=10 ** 6).load(self.root)
         self.assertEqual(len(d.test), 0)
         d = ss.SocSci210(max_levels=2).load(self.root)
         self.assertTrue((d.test.levels == 2).all())
+        # s4's binary outcome has no answer on its stated scale: an empty truth vector is never kept, even with
+        # both filters off (it used to enter as an all-zero "distribution")
         d = ss.SocSci210(min_in_scale=0, min_n=0).load(self.root)
-        self.assertTrue(((d.train.study_id == "s4") & (d.train.task_num == 2)).any())
+        kept = pd.concat([d.train, d.test])
+        self.assertFalse(((kept.study_id == "s4") & (kept.task_num == 2)).any())
+        self.assertTrue((kept.n >= 1).all() and all(abs(p.sum() - 1) < 1e-12 for p in kept.P))
 
     def test_baselines_and_metrics(self):
         fr = self.task.run(data=self.data)
