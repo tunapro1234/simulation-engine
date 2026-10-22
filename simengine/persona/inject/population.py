@@ -33,7 +33,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from ...sim.parse import normalize_probs, parse_json
-from ._base import Injector, MissingPersonField, Prompt, get_injector, parse_option, register
+from ._base import REGISTRY, Injector, MissingPersonField, Prompt, get_injector, parse_option, register
 
 FAMILY = "population"
 MEISTER = "Meister, Guestrin & Hashimoto 2024, Benchmarking Distributional Alignment of LLMs (arXiv:2411.05403)"
@@ -314,9 +314,12 @@ def simulate_population(llm, people: Sequence[dict], question: dict, injector: I
                         llm_kw: dict | None = None, **params: Any) -> PopulationResult:
     """Render every person, send each distinct prompt once, and pool per cell. A distribution reply counts as
     that person's vector; a single answer counts as one-hot (so cell_sample and individual injectors work).
-    keys: cell grouping (default: the injector's keys)."""
+    keys: cell grouping (default: the injector's keys; also passed to a cell injector given by name)."""
     from ...llm.parallel import parallel_map
 
+    if isinstance(injector, str) and keys is not None and "keys" not in params and \
+            issubclass(REGISTRY.get(injector, Injector), _Cell):
+        params["keys"] = list(keys)             # a cell injector by name: group the prompt by the same keys
     inj = get_injector(injector, **params)
     opts = _options(question, "simulate_population")
     keys = keys if keys is not None else getattr(inj, "keys", None)
