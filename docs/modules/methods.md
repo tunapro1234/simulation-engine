@@ -355,6 +355,12 @@ numpy: Gibbs over individual betas, the population mean `mu` (normal, prior N(0,
 covariance step^2 Sigma; the step is adapted per person toward 0.3 acceptance during burn-in and then frozen. All
 parameters, ASCs included, are random. A fixed `seed` gives identical draws. The defaults are small; for a real
 run use draws and burn of 1000 or more and check `acceptance_` (0.2-0.4 is healthy).
+The priors are unit-scale, so pass `scale=` to bring each attribute near unit sd (fit warns outside 0.1-10).
+Unscaled price (0-200) inflated the population sd of its coefficient 40x and doubled the person-level beta
+error in simulation. Predictions moved little, but WTP from `draws_` would be far too spread. With 10 tasks per
+person the prior also pulls `sigma_` up (true sd 0.6 came out near 0.78, and its 90% interval covered the
+truth in 26% of 50 simulated panels; 0.67 and 70% with 40 tasks); `mu_` 90% intervals covered 80-92%. Read
+`sigma_` as an upper-leaning estimate, not a calibrated interval.
 
 - `predict_person(df)`: known person, held-out task. Averages the probabilities over that person's own draws.
   Persons not seen in fit raise, or with `unknown="population"` are scored by `predict_new`.

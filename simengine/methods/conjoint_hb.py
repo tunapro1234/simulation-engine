@@ -23,7 +23,11 @@ Two prediction targets, as in the conjoint brief:
 `HBMNL` is the Allenby-Rossi sampler (numpy only): Gibbs over (betas, mu, Sigma) with a random-walk Metropolis step
 per person (proposal covariance step_i^2 Sigma, step_i adapted toward ``target_accept`` during burn-in, then fixed),
 mu | . normal under a N(0, prior_var I) prior, Sigma | . inverse Wishart IW(nu + N, nu I + S) with nu = K + 3.
-All parameters (attributes and ASCs) are random. Deterministic for a fixed ``seed``.
+All parameters (attributes and ASCs) are random. Deterministic for a fixed ``seed``. The priors are unit-scale, so
+attributes should be near unit sd after ``scale`` (fit warns outside 0.1-10): an unscaled price (0-200) got a
+population sd 40x the true one and twice the person-level beta error. With few tasks per person the prior pulls
+``sigma_`` up (true sd 0.6 -> about 0.78 with 10 tasks, 0.67 with 40, K = 4; 90% intervals covered the true sd
+26% / 70% of the time over 50 / 30 simulated panels); ``mu_`` 90% intervals covered 80-92% in the same runs.
 
 `MixedLogit` wraps ``xlogit.MixedLogit`` (an optional package; ImportError if missing). It sorts rows by person /
 task / alternative and pads missing alternatives as unavailable before passing panels: xlogit itself fails with an
@@ -31,6 +35,7 @@ opaque ``IndexError`` on rows that are not contiguous per person [prova-d8 #6].
 """
 from __future__ import annotations
 
+import warnings
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -142,6 +147,11 @@ class HBMNL:
         self.names_ = list(self.attrs_) + ([f"ASC_{j}" for j in self.alts_ if j != self.base_alt_] if self.asc
                                            else [])
         X = self._design(df)
+        sd = X[:, :len(self.attrs_)].std(0)
+        off = [f"{a} (sd {v:.3g})" for a, v in zip(self.attrs_, sd) if v > 10 or 0 < v < 0.1]
+        if off:                                              # unit-scale IW prior: heterogeneity would be inflated
+            warnings.warn(f"HBMNL: attribute(s) far from unit scale: {', '.join(off)}; the priors assume unit-scale "
+                          "attributes, pass scale={attr: divisor} (e.g. the sd)", stacklevel=2)
         g = pd.factorize(df["task"])[0]
         pid, persons = pd.factorize(df["person"])
         y, av = df["chosen"].to_numpy(float), np.ones(len(df))

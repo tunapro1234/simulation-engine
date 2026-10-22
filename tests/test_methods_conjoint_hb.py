@@ -81,6 +81,11 @@ class TestHBMNL(unittest.TestCase):
         np.testing.assert_array_equal(a.predict_new(small), b.predict_new(small))
         self.assertFalse(np.array_equal(a.draws_, c.draws_))
 
+    def test_unscaled_attribute_warns(self):
+        small = self.tr[self.tr["birey_id"] < 20]
+        with self.assertWarnsRegex(UserWarning, "price"):
+            HBMNL(["price", "quality"], draws=5, burn=5).fit(small)
+
     def test_unavailable_rows_and_validation(self):
         small = self.tr[self.tr["birey_id"] < 20].copy()
         small["mevcut"] = 1
