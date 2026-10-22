@@ -121,7 +121,7 @@ class TestDeviationArms(unittest.TestCase):
                 self.assertEqual(verify_chain(reg)["n"], 2)
                 # truth keys as strings: the archived arms still join
                 truth = self.truth.assign(seg=self.truth["seg"].astype(str))
-                tab = grade_arms(reg, truth, ["seg", "item"])
+                tab = grade_arms(reg, truth, ["seg", "item"], cluster="seg")
                 self.assertEqual(list(tab["arm"]), ["pool", "pool_logit"])
                 self.assertEqual(list(tab["n_joined"]), [60, 60])
                 self.assertTrue(np.isnan(tab.loc[0, "diff_vs_pre"]))
@@ -130,7 +130,7 @@ class TestDeviationArms(unittest.TestCase):
                 self.assertEqual(np.sign(row["diff_vs_pre"]), sign)
                 self.assertTrue(row["diff_lo"] > 0 if sign > 0 else row["diff_hi"] < 0)
                 # same numbers from in-memory tables
-                tab2 = grade_arms(reg, self.truth, ["seg", "item"], column="y",
+                tab2 = grade_arms(reg, self.truth, ["seg", "item"], column="y", cluster=False,
                                   predictions={"pool": pre, "pool_logit": post})
                 self.assertAlmostEqual(tab2.loc[1, "mae"], row["mae"])
                 with self.assertRaises(ValueError):
@@ -178,6 +178,55 @@ class TestDeviationArms(unittest.TestCase):
             self.assertIn("loss", sq.columns)
             with self.assertRaises(KeyError):
                 grade_arms(reg, self.truth, ["seg", "item"], arms=["nope"])
+
+
+class TestGradeArmsReview(unittest.TestCase):
+    """Review fixes: clustered diff CI, leading-zero keys, first plain seal of the pre arm."""
+
+    def test_cluster_bootstrap_matches_row_bootstrap_on_singletons(self):
+        from simengine.research.stats import paired_bootstrap_diff, paired_cluster_bootstrap_diff
+        rng = np.random.default_rng(3)
+        a, b = rng.normal(size=40), rng.normal(size=40)
+        u, c = paired_bootstrap_diff(a, b), paired_cluster_bootstrap_diff(a, b, np.arange(40))
+        self.assertEqual((u["lo"], u["hi"]), (c["lo"], c["hi"]))
+        one = paired_cluster_bootstrap_diff(a, b, np.zeros(40))
+        self.assertTrue(np.isnan(one["lo"]) and one["n_clusters"] == 1)
+
+    def test_cluster_widens_ci_and_warns_without_it(self):
+        rng = np.random.default_rng(1)
+        seg = np.repeat(np.arange(20), 7)
+        truth = pd.DataFrame({"seg": seg, "item": np.tile(np.arange(7), 20), "y": rng.normal(size=140)})
+        pre = truth.assign(y=truth["y"] + rng.normal(0, 0.5, 140))
+        post = truth.assign(y=truth["y"] + rng.normal(0, 0.8, 20)[seg] + rng.normal(0, 0.3, 140))
+        with tempfile.TemporaryDirectory() as d:
+            seal_deviation(pre, post, "x", d, reason="r", pre_name="pre", post_name="post")
+            with self.assertWarns(UserWarning):
+                row = grade_arms(d, truth, ["seg", "item"]).loc[1]
+            cl = grade_arms(d, truth, ["seg", "item"], cluster="seg").loc[1]
+            self.assertEqual((row["diff_cluster"], cl["diff_cluster"]), ("row", "seg"))
+            self.assertEqual(cl["diff_n_clusters"], 20)
+            self.assertAlmostEqual(cl["diff_vs_pre"], row["diff_vs_pre"])
+            self.assertGreater(cl["diff_hi"] - cl["diff_lo"], 1.3 * (row["diff_hi"] - row["diff_lo"]))
+            with self.assertRaises(KeyError):
+                grade_arms(d, truth, ["seg", "item"], cluster="region")
+
+    def test_leading_zero_keys_and_first_plain_seal(self):
+        truth = pd.DataFrame({"code": ["01", "02", "10", "11"], "y": [1.0, 2.0, 3.0, 4.0]})
+        pre, post = truth.assign(y=truth["y"] + 1), truth.assign(y=truth["y"] + 0.5)
+        with tempfile.TemporaryDirectory() as d:
+            first = seal(pre, "prereg arm, sealed on time", d)
+            out = seal_deviation(pre, post, "x", d, reason="r", pre_name="a", post_name="b")
+            self.assertEqual(out["pre"]["first_sealed_record"], first["record_hash"])
+            self.assertEqual(out["pre"]["first_sealed_at"], first["time"])
+            again = seal_deviation(pre, post, "x", d, reason="r", pre_name="a", post_name="b")
+            self.assertEqual(again["pre"]["record_hash"], out["pre"]["record_hash"])        # still idempotent
+            tab = grade_arms(d, truth, ["code"])
+            self.assertEqual(list(tab["n_joined"]), [4, 4])                                  # "01" stays "01"
+            self.assertEqual(list(tab["n_unmatched"]), [0, 0])
+            self.assertEqual(tab.loc[0, "first_sealed_at"], first["time"])
+            with self.assertWarns(UserWarning):
+                tab = grade_arms(d, truth.assign(code=["1", "2", "10", "11"]), ["code"])
+            self.assertEqual(list(tab["n_unmatched"]), [2, 2])
 
 
 if __name__ == "__main__":

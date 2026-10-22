@@ -26,7 +26,7 @@ Two tools:
                      falsification="claim fails if H_joint - T4b CI contains 0")      # -> ONKAYIT-EK1.md + lock
         seal_deviation(c5_df, h_df, "test forecast", ".prereg", reason="post-referee choice",
                        addendum="ONKAYIT-EK1.md", pre_name="C5", post_name="H_joint")
-        grade_arms(".prereg", truth_df, keys=["segment", "item"], column="p")       # one row per arm
+        grade_arms(".prereg", truth_df, keys=["segment", "item"], column="p", cluster="segment")  # row per arm
 
 A git commit time and a local clock are the author's own claim, not third-party evidence. For stronger proof, publish
 the SHA-256 somewhere external (an email, an issue comment) at lock time.
@@ -821,7 +821,12 @@ def seal_deviation(pre_arm, post_arm, description: str, registry_dir=".prereg", 
     `deviation_of_record` (the pre record's hash), `deviation_reason` and, when given, the `addendum` file name and
     sha256 (the addendum must exist and verify against its lock: write it with `add_addendum` first). Names default
     to the file stem, else "preregistered" / "post_deviation". Identical arms are refused (no deviation to record).
-    Calling it again with the same inputs returns the same records. Returns {pre, post, chain}."""
+    If the pre arm's table was already sealed without an arm name (`seal`, `se.seal`) in this registry, the pre
+    record points at the oldest such seal (`first_sealed_at`, `first_sealed_seq`, `first_sealed_record`,
+    `first_sealed_chain`): that earlier time, not this call's, is when the pre arm is known to have been fixed.
+    Calling it again with the same inputs returns the same records. Returns {pre, post, chain}.
+
+    The registry keeps a full gzip copy of both arms; for licensed data put `registry_dir` outside the repo."""
     if not str(reason).strip():
         raise ValueError("seal_deviation needs the reason for the deviation")
     pre_name = _arm_name(pre_arm, pre_name, "preregistered")
@@ -839,8 +844,16 @@ def seal_deviation(pre_arm, post_arm, description: str, registry_dir=".prereg", 
         if not v["ok"]:
             raise ValueError(f"addendum {ap.name} does not verify ({v['reason']}); lock it (add_addendum does)")
         meta.update(addendum=ap.name, addendum_sha256=v["sha256"])
+    pre_meta = {"superseded_by": post_name}
+    pre_sha = _sha(canonical_bytes(pre_arm))
+    plain = [r for r in _seal_records(registry_dir) if r.get("sha256") == pre_sha and not r.get("arm")]
+    first = min(plain, key=lambda r: str(r.get("time_utc") or r.get("time") or "")) if plain else None
+    if first is not None:                      # plain seals only, so a rerun finds the same one (idempotent)
+        pre_meta.update(first_sealed_at=first.get("time"), first_sealed_seq=first.get("seq"),
+                        first_sealed_record=first.get("record_hash"),
+                        first_sealed_chain=first.get("chain", CHAIN_NAME))
     pre = seal(pre_arm, description, registry_dir, git_commit=git_commit, arm=pre_name, role="preregistered",
-               meta={"superseded_by": post_name})
+               meta=pre_meta)
     post = seal(post_arm, description, registry_dir, git_commit=git_commit, arm=post_name, role="post_deviation",
                 deviation_of=pre_name, meta=dict(meta, deviation_of_record=pre["record_hash"]))
     return {"pre": pre, "post": post, "chain": verify_chain(registry_dir)}
@@ -855,7 +868,7 @@ def _keyed(df: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     return df
 
 
-def _arm_table(rec: dict, d: Path, predictions) -> pd.DataFrame:
+def _arm_table(rec: dict, d: Path, predictions, keys: list[str]) -> pd.DataFrame:
     arm = rec["arm"]
     if predictions is not None and arm in predictions:
         df = _read(predictions[arm])
@@ -870,11 +883,12 @@ def _arm_table(rec: dict, d: Path, predictions) -> pd.DataFrame:
     b = gzip.decompress(f.read_bytes())
     if _sha(b) != rec["sha256"]:
         raise ValueError(f"archive of arm {arm!r} does not match its seal")
-    return pd.read_csv(io.BytesIO(b))
+    return pd.read_csv(io.BytesIO(b), dtype={k: str for k in keys})    # keys as sealed: "01" stays "01"
 
 
 def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = None, scorer=None, unit_loss=None,
-               predictions: dict | None = None, arms=None, how: str = "inner", seed: int = 42) -> pd.DataFrame:
+               predictions: dict | None = None, arms=None, how: str = "inner", cluster=None,
+               seed: int = 42) -> pd.DataFrame:
     """Grade every sealed arm (records with an `arm` field, see `seal_deviation` / `seal(arm=)`) with the same
     scorer and return them side by side, one row per arm record in chain order.
 
@@ -885,7 +899,13 @@ def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = Non
     (or `loss` for a custom unit_loss). With per-unit losses, an arm with `deviation_of` also gets
     `diff_vs_pre` = mean loss(arm) - mean loss(pre arm) on shared units with a paired bootstrap 95% CI
     (`diff_lo`, `diff_hi`, `diff_n`; negative = the deviation helped). Units with a missing loss are left out and
-    counted in `n_missing`."""
+    counted in `n_missing`; arm rows whose key has no truth row are counted in `n_unmatched` (with a warning: a key
+    format mismatch such as "01" vs 1 would otherwise silently shrink the graded set).
+
+    `cluster`: key column(s) whose rows are resampled together for the diff CI (`diff_cluster`, `diff_n_clusters`),
+    e.g. "segment" when every segment has several items. Rows of one segment share its errors; the row bootstrap
+    then covers ~0.80 (7 items per segment, segment-varying advantage) instead of 0.95. With several keys and no
+    `cluster` the CI treats rows as independent and a warning says so; `cluster=False` means rows are independent."""
     d = Path(registry_dir)
     recs = [r for r in _chain_read(d) if r.get("arm")]
     if arms is not None:
@@ -900,16 +920,29 @@ def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = Non
     if [k for k in keys if k not in g.columns]:
         raise KeyError(f"key column(s) missing from truth: {[k for k in keys if k not in g.columns]}")
     gk = _keyed(g, keys)
-    from .stats import paired_bootstrap_diff
+    if cluster is None or cluster is False:
+        cl = []
+    else:
+        cl = [cluster] if isinstance(cluster, str) else list(cluster)
+        if not cl or [c for c in cl if c not in keys]:
+            raise KeyError(f"cluster= must name key column(s) out of {keys}, got {cluster!r}")
+    gidx = pd.MultiIndex.from_frame(gk[keys])
+    from .stats import paired_bootstrap_diff, paired_cluster_bootstrap_diff
     rows, losses = [], {}
     for r in recs:
-        t = _arm_table(r, d, predictions)
+        t = _arm_table(r, d, predictions, keys)
         miss = [k for k in keys if k not in t.columns]
         if miss:
             raise KeyError(f"key column(s) missing from arm {r['arm']!r}: {miss}")
-        table = _keyed(t, keys).merge(gk, on=keys, how=how, suffixes=("", "_truth"))
+        tk = _keyed(t, keys)
+        table = tk.merge(gk, on=keys, how=how, suffixes=("", "_truth"))
+        n_unmatched = int((~pd.MultiIndex.from_frame(tk[keys]).isin(gidx)).sum())
+        if n_unmatched:
+            warnings.warn(f"grade_arms: {n_unmatched} of {len(t)} rows of arm {r['arm']!r} have no truth row on "
+                          f"{keys} (key format, e.g. '01' vs 1?)", UserWarning, stacklevel=2)
         row = {"seq": r.get("seq"), "arm": r["arm"], "role": r.get("role"), "deviation_of": r.get("deviation_of"),
-               "sealed_at": r.get("time"), "sha256": r["sha256"][:12], "n_pred": len(t), "n_joined": len(table)}
+               "sealed_at": r.get("time"), "first_sealed_at": r.get("first_sealed_at"),
+               "sha256": r["sha256"][:12], "n_pred": len(t), "n_joined": len(table), "n_unmatched": n_unmatched}
         loss = None
         if scorer is None or unit_loss is not None:
             col = column
@@ -949,9 +982,20 @@ def grade_arms(registry_dir, truth, keys: list[str], *, column: str | None = Non
         if a is None or b is None or not (a.index.is_unique and b.index.is_unique):   # duplicate keys: no pairing
             continue
         both = pd.concat([a.rename("a"), b.rename("b")], axis=1, join="inner")
-        if len(both):
+        if not len(both):
+            continue
+        if cl:
+            grp = pd.MultiIndex.from_frame(both.index.to_frame(index=False)[cl]).factorize()[0] if len(cl) > 1 \
+                else both.index.get_level_values(cl[0]).factorize()[0]
+            diff = paired_cluster_bootstrap_diff(both["a"].to_numpy(), both["b"].to_numpy(), grp, seed=seed)
+        else:
+            if cluster is None and len(keys) > 1:
+                warnings.warn(f"grade_arms: the diff CI of arm {r['arm']!r} resamples rows as independent; with "
+                              f"keys {keys} pass cluster=<key> (e.g. {keys[0]!r}) if rows share a segment or item, "
+                              "or cluster=False", UserWarning, stacklevel=2)
             diff = paired_bootstrap_diff(both["a"].to_numpy(), both["b"].to_numpy(), seed=seed)
-            row.update(diff_vs_pre=diff["diff"], diff_lo=diff["lo"], diff_hi=diff["hi"], diff_n=diff["n"])
+        row.update(diff_vs_pre=diff["diff"], diff_lo=diff["lo"], diff_hi=diff["hi"], diff_n=diff["n"],
+                   diff_cluster="+".join(cl) if cl else "row", diff_n_clusters=diff.get("n_clusters", diff["n"]))
     out = pd.DataFrame(rows)
     out.attrs["graded_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     return out

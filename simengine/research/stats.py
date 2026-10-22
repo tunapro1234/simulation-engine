@@ -24,6 +24,31 @@ def paired_bootstrap_diff(a, b, seed: int = 42, B: int = B_BOOT, alpha: float = 
             "hi": float(np.percentile(bs, 100 - 50 * alpha)), "n": int(len(d)), "alpha": alpha}
 
 
+def paired_cluster_bootstrap_diff(a, b, groups, seed: int = 42, B: int = B_BOOT, alpha: float = 0.05) -> dict:
+    """Paired difference mean(a - b) with a cluster percentile bootstrap: whole groups (units that share a segment,
+    an item, ...) are resampled together and each replicate is the pooled unit mean of the drawn groups.
+
+    Use it when units are not independent: with 7 items per segment and an arm advantage that varies by segment,
+    the unit bootstrap of `paired_bootstrap_diff` covers ~0.80 instead of 0.95. Fewer than 2 groups gives no CI
+    (lo = hi = nan). Returns {diff, lo, hi, n, n_clusters, alpha}."""
+    d = np.asarray(a, float) - np.asarray(b, float)
+    if len(d) == 0:
+        raise ValueError("paired_cluster_bootstrap_diff: no common units")
+    _, inv = np.unique(np.asarray(groups), return_inverse=True)
+    inv = inv.ravel()
+    if len(inv) != len(d):
+        raise ValueError("paired_cluster_bootstrap_diff: groups and scores differ in length")
+    S, N = np.bincount(inv, weights=d), np.bincount(inv).astype(float)
+    out = {"diff": float(d.mean()), "lo": float("nan"), "hi": float("nan"), "n": int(len(d)),
+           "n_clusters": int(len(S)), "alpha": alpha}
+    if len(S) < 2:
+        return out
+    idx = np.random.default_rng(seed).integers(0, len(S), (B, len(S)))
+    bs = S[idx].sum(1) / N[idx].sum(1)
+    out.update(lo=float(np.percentile(bs, 50 * alpha)), hi=float(np.percentile(bs, 100 - 50 * alpha)))
+    return out
+
+
 def bootstrap_mean(a, seed: int = 42, B: int = B_BOOT, alpha: float = 0.05) -> dict:
     """Mean with a percentile bootstrap CI. Returns {value, lo, hi, n}."""
     a = np.asarray(a, float)
