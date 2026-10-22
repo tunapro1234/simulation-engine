@@ -83,6 +83,21 @@ class SayDo(unittest.TestCase):
         rows = _by(extras.say_do(f, "said", "did", preds=["y"], cluster=None, B=400), "pred_y")
         self.assertGreater(tied["hi"] - tied["lo"], rows["hi"] - rows["lo"])
 
+    def test_cluster_falls_back_to_group(self):
+        f = _frame(persons=40, items=6, noise=0.0)
+        shift = dict(zip(f["person"].unique(), np.random.default_rng(1).normal(0, 1, 40)))
+        f["pred_y"] = f["did"] + 0.5 + f["person"].map(shift)
+        tied = _by(extras.say_do(f, "said", "did", preds=["y"], B=400), "pred_y")
+        g = f.rename(columns={"person": "group"})          # survey_frame / EvalFrame convention
+        viag = extras.say_do(g, "said", "did", preds=["y"], B=400)
+        self.assertEqual(viag["cluster"], "group")
+        self.assertEqual(viag["n_clusters"], 40)
+        self.assertAlmostEqual(_by(viag, "pred_y")["hi"], tied["hi"])
+        tr = extras.say_do(f.rename(columns={"person": "grup"}), "said", "did", preds=["y"], cluster="grup", B=50)
+        self.assertEqual(tr["cluster"], "group")
+        with self.assertRaises(KeyError):                   # a named cluster column that is absent is an error
+            extras.say_do(f, "said", "did", preds=["y"], cluster="persona_id", B=50)
+
     def test_missing_and_aliases(self):
         f = _frame(persons=50).rename(columns={"pred_say": "tahmin_say"})
         f.loc[:4, "tahmin_say"] = np.nan

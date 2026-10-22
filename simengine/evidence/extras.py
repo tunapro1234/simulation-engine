@@ -577,12 +577,17 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
     - **MAE**: person-level mean absolute error to each anchor and the same ``say − do`` difference.
 
     Both differences get a percentile CI from a cluster bootstrap over ``cluster`` (persons; rows of a person
-    move together). The same resamples are used for every prediction and for the anchor gap, so they are paired.
+    move together; the default ``"person"`` falls back to ``"group"``, the EvalFrame cluster key that
+    ``survey_frame`` fills with the persona id; a named column that is missing raises). The same resamples are used
+    for every prediction and for the anchor gap, so they are paired.
     The verdict reads the CI of the ``on`` difference (``"level"``, default, or ``"mae"``): wholly below 0 →
     closer to what people say, wholly above 0 → closer to what people do, otherwise undecided. Rows missing the
-    prediction or either anchor are dropped for that prediction and counted. Without a ``cluster`` column every
-    row is its own cluster (noted). If the anchors themselves are not apart (the gap CI covers 0) the verdict is
-    forced to undecided: there is nothing to be closer to.
+    prediction or either anchor are dropped for that prediction and counted. With ``cluster=None`` (or no
+    person/group column, noted) every row is its own cluster. If the anchors themselves are not apart (the gap
+    CI covers 0) the verdict is forced to undecided: there is nothing to be closer to. The level difference is
+    ``−gap`` once the panel mean reaches the say anchor (``+gap`` at do), so when a prediction sits on an anchor
+    the CI bound away from 0 is too tight (simulated coverage ~0.84 there, ~0.94 elsewhere); the bound next to 0,
+    and so the verdict, holds.
     """
     if B < 1:
         raise ValueError("B must be >= 1")
@@ -597,16 +602,27 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
     else:
         cols = [_resolve_pred_alias(d, p) for p in ([preds] if isinstance(preds, str) else preds)]
     notes = []
-    if cluster is not None and cluster in d.columns:
-        if d[cluster].isna().any():
-            raise ValueError(f"cluster column {cluster!r} has missing values; fill or drop them first")
-        codes, uniq = pd.factorize(d[cluster], sort=False)
-        unit = f"{cluster} cluster"
+    cl = None
+    if cluster is not None:
+        # "grup" was renamed to "group" by normalize_frame; the default "person" falls back to "group", the
+        # EvalFrame cluster key (survey_frame puts the persona id there and has no "person" column)
+        for c in (cluster, COLUMN_ALIASES.get(cluster, cluster)) + (("group",) if cluster == "person" else ()):
+            if c in d.columns:
+                cl = c
+                break
+        if cl is None and cluster != "person":
+            raise KeyError(f"no cluster column {cluster!r}; pass cluster=None for a row bootstrap")
+    if cl is not None:
+        if d[cl].isna().any():
+            raise ValueError(f"cluster column {cl!r} has missing values; fill or drop them first")
+        codes, uniq = pd.factorize(d[cl], sort=False)
+        unit = f"{cl} cluster"
     else:
         codes, uniq = np.arange(len(d)), np.arange(len(d))
         unit = "row"
         if cluster is not None:
-            notes.append(f"No {cluster!r} column: every row is its own cluster (rows of one person are not tied).")
+            notes.append("No 'person' or 'group' column: every row is its own cluster (rows of one person are "
+                         "not tied; the CI is too narrow if a person has several rows).")
     G = len(uniq)
     say, do = _numeric(d[sc], sc), _numeric(d[dc], dc)
     rng = np.random.default_rng(seed)
@@ -687,7 +703,7 @@ def say_do(frame: pd.DataFrame, say_col: str, do_col: str, preds: Sequence[str] 
     return _section("say_do", "Say or do: which anchor the prediction is closer to",
                     ["prediction", "n", "mean", "mean say", "mean do", "|mean − say|", "|mean − do|", "diff", "lo",
                      "hi", "MAE say", "MAE do", "MAE diff", "MAE lo", "MAE hi", "verdict"], rows, notes,
-                    predictions=out, anchors=anchors, say_col=sc, do_col=dc, cluster=cluster if unit != "row" else None,
+                    predictions=out, anchors=anchors, say_col=sc, do_col=dc, cluster=cl,
                     n_clusters=G, on=on, B=B, seed=seed, alpha=alpha)
 
 
