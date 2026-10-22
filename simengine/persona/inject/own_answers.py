@@ -1,6 +1,8 @@
 """Own-answers injectors: the person's own other survey answers as the persona (family "own_answers").
 
-Three variants from the literature, all built on `Injector.known_answers` (target and `exclude` ids never shown):
+Three variants from the literature, all built on `Injector.known_answers` (target and `exclude` ids never shown).
+None/NaN answers are skipped; with drop_same_text=True (default) so is any item whose question text equals the
+target's, e.g. a retest copy under another id (listed in meta["dropped_same_text"]):
   own_answers_all      every known answer as question/options/answer text in the system prompt
                        (Twin-2K-500, Toubia et al. 2025, arXiv:2505.17479)
   own_answers_fewshot  k answers as earlier interview turns (user: question, assistant: {"answer": ...}),
@@ -97,6 +99,10 @@ def _missing(v: Any) -> bool:
     return type(v).__name__ in ("NAType", "NaTType")
 
 
+def _same_text(a: Any, b: Any) -> bool:
+    return " ".join(_fold(a).split()) == " ".join(_fold(b).split())
+
+
 def _json_default(o: Any) -> Any:
     return o.item() if hasattr(o, "item") else str(o)       # numpy scalars from pandas rows
 
@@ -157,11 +163,12 @@ class _OwnAnswers(Injector):
     needs = ("answers",)
 
     def __init__(self, questions: Sequence[dict] | Mapping[str, Any] | None = None, include_options: bool = True,
-                 **params: Any):
+                 drop_same_text: bool = True, **params: Any):
         super().__init__(**({"questions": questions} if questions else {}), include_options=include_options,
-                         **params)
+                         drop_same_text=drop_same_text, **params)
         self.bank = as_bank(questions)
         self.include_options = include_options
+        self.drop_same_text = drop_same_text
 
     @property
     def label(self) -> str:
@@ -171,11 +178,28 @@ class _OwnAnswers(Injector):
         return f"{self.name}({','.join(f'{k}={v}' for k, v in sorted(shown.items()))})"
 
     def known(self, person: dict, question: dict) -> list[tuple[str, Any]]:
-        """Known answers (leakage rule applied, None/NaN skipped) in bank order; ids missing from the bank follow,
-        sorted."""
+        """Known answers (leakage rule applied, None/NaN skipped, same-text items dropped unless
+        drop_same_text=False) in bank order; ids missing from the bank follow, sorted."""
         ka = {str(k): v for k, v in self.known_answers(person, question).items() if not _missing(v)}
         rank = {qid: i for i, qid in enumerate(self.bank)}
-        return sorted(ka.items(), key=lambda kv: (rank.get(kv[0], len(rank)), kv[0]))
+        items = sorted(ka.items(), key=lambda kv: (rank.get(kv[0], len(rank)), kv[0]))
+        if self.drop_same_text and question.get("text") is not None:
+            return [kv for kv in items if not _same_text(self.qdict(kv[0])["text"], question["text"])]
+        return items
+
+    def same_text_ids(self, person: dict, question: dict) -> list[str]:
+        """Answered ids hidden because their question text equals the target's (for meta)."""
+        if not self.drop_same_text or question.get("text") is None:
+            return []
+        return [str(k) for k, v in self.known_answers(person, question).items()
+                if not _missing(v) and _same_text(self.qdict(str(k))["text"], question["text"])]
+
+    def meta(self, person: dict, question: dict, shown: Sequence[str], **extra: Any) -> dict:
+        m = {"shown": list(shown), "n_shown": len(shown), **extra}
+        dropped = self.same_text_ids(person, question)
+        if dropped:
+            m["dropped_same_text"] = dropped
+        return m
 
     def qdict(self, qid: str) -> dict:
         return self.bank.get(qid) or {"id": qid, "text": qid}
@@ -227,7 +251,7 @@ class OwnAnswersAll(_OwnAnswers):
         items = self.ordered(items, self.order, self.seed)
         system = SYSTEM_ALL + "\n\n" + self.listing(items)
         return Prompt(system=system, user=self.question_block(question),
-                      meta={"shown": [q for q, _ in items], "n_shown": len(items)})
+                      meta=self.meta(person, question, [q for q, _ in items]))
 
 
 @register
@@ -266,7 +290,7 @@ class OwnAnswersFewshot(_OwnAnswers):
             history += [("user", self.question_block(q_shown)), ("assistant", reply)]
         system = SYSTEM_FEWSHOT if picked else SYSTEM_FEWSHOT + "\n" + NONE_KNOWN
         return Prompt(system=system, user=self.question_block(question), history=history,
-                      meta={"shown": [q for q, _ in picked], "n_shown": len(picked)})
+                      meta=self.meta(person, question, [q for q, _ in picked]))
 
 
 @register
@@ -309,8 +333,8 @@ class OwnAnswersRag(_OwnAnswers):
             hits = hits[::-1]                           # most similar last, next to the question
         system = SYSTEM_RAG + "\n\n" + self.listing([(q, a) for q, a, _ in hits])
         return Prompt(system=system, user=self.question_block(question),
-                      meta={"shown": [q for q, _, _ in hits], "n_shown": len(hits),
-                            "scores": [round(s, 4) for _, _, s in hits]})
+                      meta=self.meta(person, question, [q for q, _, _ in hits],
+                                     scores=[round(s, 4) for _, _, s in hits]))
 
 
 __all__ = ["OwnAnswersAll", "OwnAnswersFewshot", "OwnAnswersRag", "SCORERS", "as_bank", "tokens",
