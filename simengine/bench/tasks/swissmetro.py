@@ -9,8 +9,8 @@
     S.persona_text(data.test.iloc[0]); S.situation_text(data.test.iloc[0])
     task.run(methods={"llm": S.llm_method(llm)}, data=data)   # one prompt per test choice, parsed to probabilities
 
-1,192 respondents (441 rail travellers surveyed on the train, 751 car drivers reached by licence plate, Sept 1997 -
-Mar 1998) each answered nine stated choice situations: train, Swissmetro (a planned mag-lev) and, for car owners,
+1,192 respondents (441 rail travellers interviewed on the train in Mar 1998, 751 car drivers reached by licence plates
+recorded in Sept 1997) each answered nine stated choice situations: train, Swissmetro (a planned mag-lev) and, for car owners,
 car, described by door-to-door time, cost, headway and seat layout. One unit is one answered situation; `truth` is
 the chosen alternative coded 0 = train, 1 = Swissmetro, 2 = car (the dataset's CHOICE - 1). A prediction is one
 probability vector over (train, sm, car) per test row (array (n, 3)); the metrics zero unavailable alternatives,
@@ -19,8 +19,8 @@ renormalise and clip the chosen alternative's probability at 1e-6 for the log-li
 sample='biogeme' (default) applies the Biogeme example filter: commuter or business trips (PURPOSE 1 or 3) with a
 known choice, 6,768 choices of 752 respondents. sample='all' keeps every known choice (10,719 of 1,191).
 split='respondent' (default) holds out `test_frac` of respondents (all nine situations; default_rng(seed));
-split='situation' holds out each respondent's last `n_test` situations (default 2), so a respondent's own earlier
-answers are available (baseline own_shares).
+split='situation' holds out each respondent's last `n_test` situations in file order (default 2; positions follow a
+fixed design order, not a known presentation order), so a respondent's other answers are available (own_shares).
 
 Baselines. uniform (equal over available); shares (train market shares over available); mnl: the Biogeme b01 logit
 (ASC train, ASC car, generic time and cost / 100, train and Swissmetro cost 0 for GA holders; Swissmetro ASC = 0)
