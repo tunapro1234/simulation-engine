@@ -68,6 +68,9 @@ Decide which of these the brief is really asking for, because the measured answe
 | "what share of segment X would answer Y?" and you have no survey | `distribution` | `sim.segment_distribution` (3 framings) | closed 0.818 of the gap on CES, panel 0.55 |
 | "which of these two texts/offers wins?" with past tests | `ab` / `binary` | `methods.ABStack` (TF-IDF + LLM) | 0.817 on Upworthy; Haiku panel 0.522 |
 | the same, but with no past tests | `ab` | `LLMDirectAB` with a big model, then `EarlyTestBayes` | 2.27x traffic saving at 100 impressions per arm (prior calibrated on 20 tests) |
+| "which headline / creative wins?" from a raw A/B archive (one row per variant, clicks and impressions) | `ab` | `simengine.methods.ab.ab_archive(df, test=..., text_a=..., clicks_a=..., n_a=..., significant_only=True)` (seeded random A/B sides, same-text pairs dropped) -> ladder `LengthAB`, `TfidfAB`, a frozen-embedding learner -> `LLMDirectAB(llm, reverse=True)` -> `ABStack` -> `evidence.ab_memorization(llm, pairs, named_context, neutral_context)` (to `memorization=`) -> `evidence.ab_pairs_frame(pairs, [...], group="test_id")` -> `evaluate(task="ab")`; traffic saving with `simengine.methods.bayes_prior.compare_priors({...}, ...)` (each bootstrap replicate re-draws the 20 calibration tests) and `bayes_prior.saving_section`. Dry run: `FakeLLM(simengine.methods.ab.ab_responder(len))` | G0/G3 rehearsals (Upworthy, one run): the strongest LLM-free rung depends on the data (frozen embedding 0.733 vs TF-IDF 0.568 on the same 300 tests); Sonnet stack − embedding +0.025 [−0.010, +0.062]; the Haiku prior's 0.82x equalled a shuffled placebo. The headline 2.27x CI was fixed-calibration, so too narrow |
+| "show the synthetic panel holds against reality" / say vs do, with a person table (stated answer and observed behaviour) | `continuous` | `persona.from_table(tab, id_col=..., forbidden=[say_col, do_col])` -> `sim.survey(ps, items, free_text=False)` (control arms on) -> `sim.survey_frame(r, level="person", kind="numeric")` -> `methods.oof_predict(simengine.methods.tabular.TabularRidge(), ...)` -> `simengine.evidence.extras.say_do(frame, say_col, do_col, item="item")` (gaps per item; z-score the items first) -> `evaluate(task="continuous", primary="spearman")`. Dry run: `FakeLLM.survey(value_fn)` with `value_fn(pid, qid, spec)` | G2 rehearsal (Twin-2K-500, 400 people, one run): ridge on demographics + self-report 0.594 [0.524, 0.655], raw panel 0.141; stack − ridge −0.003 [−0.009, +0.004]; "the panel simulates what people say, not what they do" |
+| "what would this experiment show on people?" (effect sizes of framing / anchoring / price tests) with a past human-experiment archive | `continuous` (one row per effect) | `sim.experiment(llm, personas, conditions, question)` (60+ personas per condition, `samples=1`) -> `sim.experiment_frame` -> `sim.exaggeration_ratio(sim_g, human_g, family=..., human_se=...)` -> `sim.correct_effects(sim_g, method="ratio", human_g=..., family=...)` -> `sim.effect_section(sim_g, human_g, human_se, family)` on the card; baseline = mean human effect of the other families | G9 rehearsal (Twin-2K-500, 16 experiments, one run): no-persona panel MAE 0.334 [0.229, 0.516] vs other-family mean 0.509, not separated on the card; ratio 0.43 [0.34, 0.91] (the panel shrinks effects). With 3-6 families the CIs are honest but wide, so expect "about right" |
 | "what will each customer do?" with history | `binary` / `continuous` | persistence, decayed frequency, LightGBM | LLM personas stayed below the history model |
 | "predict answers of people in **new** countries/groups" from survey data in other groups (no earlier wave) | `continuous` / `binary` | `methods.GroupTransfer` (group-level ridge + person deviation, optional LLM group prior) scored with `methods.oof_predict(..., group=...)` | D2 rehearsal, group-held-out CV Spearman: person-only 0.197, two-stage 0.257, + LLM prior 0.295-0.311, oracle 0.344; one dataset, no CI |
 | "predict next wave's answer shares per segment x question" and you have **past waves** of the same survey (often across a regime switch: new president / party) | `distribution` | ladder from `simengine.methods.waves`: `wave_persistence` (copy last wave), `pooled_shrunk(k=4, m=20)`, `same_regime(regime={wave: label}, k=4)`, `subgroup_mixture(subgroup="pid3", swap={"Rep": "Dem", "Dem": "Rep"}, swap_items=[<regime-dependent items>])`; pick on several past switch years with `transition_backtest(waves=[...])`, not one dev year (docs/modules/methods.md "Repeated surveys") | D6 rehearsal, one run, 2025 test cell TVD (lower better): copy 2024 0.1315, role-mirror baseline 0.0839, team 0.0788; on dev the same-regime 4-wave pool beat the preregistered method, 0.0990 vs 0.1007 |
@@ -117,6 +120,9 @@ lock_prereg(".onkayit/prereg.md")   # SHA-256 + timestamp in .onkayit/prereg.md.
 - **Register against the strongest single baseline**, not a union or blend of baselines. In one rehearsal the
   registered T1+T2 union came out weaker than T2 alone, so the registered claim was against a weak baseline while
   the badge used T2.
+- **Register the tie rule and the deviation rule.** Write "if the dev paired CI of the top two arms includes 0,
+  submit their equal average" in the plan (trap 16), and change the plan later only by an addendum with both arms
+  sealed (trap 18).
 
 Hold out the test split (preferably by time or by person) and do not open it until the end.
 
@@ -259,6 +265,40 @@ train and test inputs, `FEATS` the columns your model uses, `G` the group column
     D6 a referee's same-regime 4-wave pool beat the team's preregistered method on dev (0.0990 vs 0.1007 TVD).
     Choose on several past switch years (`transition_backtest`, report `by_wave` year by year); a segment-cluster CI
     in one year does not cover year-to-year uncertainty.
+16. **Tied with the strongest baseline: average the two.** When the dev paired CI of two candidates (ours vs the
+    strongest baseline, or two of your own arms; `se.paired_diff(dev, a, b, metric=...)`) includes 0, do not pick
+    one by a rule: submit their equal-weight average (renormalise rows for distributions; for an A/B learner and an
+    LLM arm `methods.LogitAverageAB` is the same rule). Seal both arms and the average. In D8 hierarchical Bayes and
+    mixed logit were tied on dev (−0.0002 / −0.0012 log-lik per task); the team picked mixed logit, and the strongest
+    hidden baseline on test was exactly their average (team − average −0.002 [−0.009, +0.005]). Scored afterwards,
+    not pre-registered: the equal mix of two sealed arms was also the best row in D6 (cell TVD 0.0779 vs 0.0788 and
+    0.0800) and in D7 (MAE 2.898 vs the team's 3.105).
+17. **The strongest baseline changes with the seed / split.** With a few dozen groups, which baseline wins is
+    selection noise. In D5 (88 training experiments) the level models beat the ridge meta in group CV, so the team
+    built on them; on the test split the ridge meta won and the team was behind it (MAE +0.035 [+0.010, +0.063]).
+    Put every candidate baseline on the card (`baselines_oof=[...]`), pick on dev and score all of them on test,
+    re-run the dev ladder on a second split (other `folds=`) and report the spread. Report the whole ladder, not
+    only its winner. When the card prints "strongest baseline uncertain" (flag "en güçlü taban belirsiz"), the badge
+    is graded against the worst tied baseline: keep that warning in the pitch. For "worth N humans" next to the
+    strongest baseline use `simengine.evidence.bedel.worth_vs_baseline(frame, ours=..., baseline=...)`. The audit
+    cannot see a baseline that is not on the card.
+18. **Deviating from the pre-registration: seal the registered arm first, grade both.** Any change after the lock
+    (a new configuration, a fix after a sanity check) goes in an addendum, and the registered arm is sealed under
+    its own name before the new one:
+
+    ```python
+    from simengine.research import add_addendum, seal_deviation, grade_arms
+    add_addendum(".onkayit/prereg.md", reason="...", deviation="...")       # writes and locks prereg-EK1.md
+    seal_deviation(pre_df, post_df, "test", ".onkayit", reason="...", addendum=".onkayit/prereg-EK1.md",
+                   pre_name="preregistered", post_name="final")
+    grade_arms(".onkayit", truth_df, keys=["segment", "item"], column="p", cluster="segment")  # diff_vs_pre + CI
+    ```
+
+    In D6 the arm picked on dev after the lock lost to the registered one on test (cell TVD 0.0800 vs 0.0788); in
+    D7 the deviation (logit growth, written down before sealing) won by 0.625 MAE (3.105 vs 3.730). Both could be
+    reported honestly only because the pre-deviation arm was sealed. Use `cluster=` with several items per segment
+    (row resampling covered about 0.80 instead of 0.95). The card does not show both arms yet: put the `grade_arms`
+    table next to it.
 
 Rehearsal facts to calibrate expectations: the team with the plain kit took 63 min, the simengine-only team
 37 min; the kit team's CV estimate matched the test (0.308 → 0.306), the simengine team's was optimistic
