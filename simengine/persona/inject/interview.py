@@ -44,14 +44,15 @@ EXPERT_FOCUS = {
     "demographer": "the interviewee's demographic traits and social status",
 }
 # Offline stand-in for the paper's LLM router (see route_expert); first match wins, order matters.
+# Keys of 5+ letters are prefixes (stems); shorter ones match only as a word or a regular inflection (_hit).
 EXPERT_KEYWORDS = {
     "political scientist": ("government", "president", "party", "vote", "election", "liberal", "conservative",
-                            "democrat", "republican", "police", "law", "court", "spending", "tax", "immigra",
-                            "abortion", "rights", "policy", "military", "congress"),
+                            "democrat", "republican", "polic", "law", "court", "spending", "tax", "immigra",
+                            "abortion", "rights", "military", "congress"),
     "behavioral economist": ("money", "dollar", "income", "pay", "price", "invest", "save", "spend", "risk",
-                             "bet", "gamble", "lottery", "trust", "share", "split", "give", "game", "job"),
+                             "bet", "gambl", "lottery", "trust", "share", "split", "give", "game", "job"),
     "demographer": ("age", "born", "married", "children", "household", "education", "degree", "school",
-                    "religion", "race", "region", "city", "live", "work", "occupation", "hours"),
+                    "religio", "race", "region", "city", "live", "work", "occupation", "hours"),
     "psychologist": (),
 }
 CHARS_PER_TOKEN = 4                      # same rough rule as compare.estimate_cost
@@ -183,9 +184,19 @@ def keyword_expert(question: dict, default: str = "psychologist") -> str:
         return _expert_name(question["expert"])
     words = re.findall(r"[a-z]+", str(question.get("text", "")).lower())
     for expert, keys in EXPERT_KEYWORDS.items():
-        if any(w.startswith(k) for w in words for k in keys):
+        if any(_hit(w, k) for w in words for k in keys):
             return expert
     return default
+
+
+def _hit(word: str, key: str) -> bool:
+    """Stem prefix for keys of 5+ letters ('immigra' -> 'immigrants'); a short key matches itself or a regular
+    inflection only ('bet' -> 'bets', 'betting'; not 'better', 'lawn', 'agent')."""
+    if len(key) >= 5:
+        return word.startswith(key)
+    base = key[:-1] if key[-1] in "ey" else key
+    return word in {key, key + "s", key + "es", key + "d", key + "ed", key + "r", key + "rs", base + "ing",
+                    key + key[-1] + "ing", key + "ing", base + "ies"}
 
 
 def _expert_name(x: str) -> str:
