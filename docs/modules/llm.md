@@ -172,7 +172,12 @@ prefers missing a refusal to flagging an answer):
   yapamam", "Bu tür bir ürünü üretemem ama satın alırım" and "Bunu yapamam, çok pahalı" are not refusals.
 
 The patterns are hand-written from the rehearsal's refusal text and the cases in `tests/test_llm_gaps.py` and
-`tests/test_llm_refusal_review.py`; their precision and recall on real model output have not been measured. Because
+`tests/test_llm_refusal_review.py`. Recall on real refusals has not been measured (the rehearsal's refused replies were
+deleted with its data). False positives were measured once (22 Oct) over 124,807 cached real replies from the TALP
+research runs (Haiku/Sonnet/Opus 5.5 and other models; survey distributions, persona answers, memorisation probes):
+2 flagged, both partial answers of the form "I can't recall the exact stored values ..., so I won't present invented
+numbers ... As a rough estimate only ..." followed by an estimate. A cruder regex (`I can.?t|I cannot|unable to|...`)
+flagged 999 of the same replies. Because
 of the remaining false-positive risk, use it as `cache_if=` only on replies that should be structured (JSON); for
 free persona speech, false positives only skip caching (the reply is still returned).
 
@@ -197,8 +202,8 @@ free persona speech, false positives only skip caching (the reply is still retur
 
 ## When it works and when it does not (measured)
 
-Every number below was measured in the research runs, not in this library. This port has made **no live call**;
-its tests are offline (a mocked client, the real SDK over a mocked HTTP transport, and a mocked subprocess).
+Every number below was measured in the research runs, not in this library. Apart from the opt-in live smoke test
+(`SIMENGINE_LIVE=1`, one Haiku call, passed on 22 Oct) the library's tests are offline (a mocked client, the real SDK over a mocked HTTP transport, and a mocked subprocess).
 
 **Claude API cost per call.** At effort low with a short system prompt, Haiku 5.5 is very cheap:
 
