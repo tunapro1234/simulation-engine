@@ -7,6 +7,11 @@
          payda AYNI küme yeniden örnekleriyle birlikte toplanır (tekrar başına toplamların oranı).
   toplu  (y, p, madde) → tek sayı (AUC, macro-F1, korelasyon, ECE, ab kazananı). Bootstrap'ta döngü.
 yon: +1 büyük iyi, -1 küçük iyi. tavan: test-retest tavanı bu metrikte anlamlı mı.
+
+Dağılım görevinde Wasserstein sayısal şık konumlarını kullanır (konum/pos sütunu, sayısal secenekler/options ya da
+sayısal classes=); konum yoksa ya da konumlar eşit aralıklıysa eşit aralık (0..K-1). Ör.:
+    df["pos"] = [[0, .25, 1]] * len(df)           # şık başına konum
+    evaluate(df, primary="wasserstein")           # = bench `wd` (konumlar 0-1'e ölçeklenir)
 """
 from __future__ import annotations
 
@@ -45,8 +50,56 @@ class Metrik:
 
 
 # ------------------------------------------------------------------ diziler
+KONUM_SUTUNLARI = ("konum", "pos", "positions")   # dağılım: satır başına şık konumları
+
+
+class KonumluVektor(np.ndarray):
+    """Dağılım vektörü + şık konumları (`konum`). Yalnız gerçek vektörleri taşır; konuma bakan metrik okur."""
+
+    def __new__(cls, v, konum):
+        o = np.asarray(v, float).view(cls)
+        o.konum = np.asarray(konum, float)
+        return o
+
+    def __array_finalize__(self, obj):
+        self.konum = getattr(obj, "konum", None)
+
+
+def _sayisal(xs):
+    try:
+        x = np.array([float(v) for v in xs], float)
+    except (TypeError, ValueError):
+        return None
+    return x if len(x) >= 2 and np.isfinite(x).all() else None
+
+
+def _esit_aralik(x) -> bool:
+    d = np.diff(np.sort(x))
+    return bool(d[0] > 0 and np.allclose(d, d[0]))
+
+
+def secenek_konumlari(veri) -> list | None:
+    """Dağılım görevinde satır başına sayısal şık konumları (yoksa None). Sıra: konum/pos sütunu > sayısal
+    'secenekler' sütunu > sayısal veri.siniflar. Eşit aralıklı konumlar None döner (eşit aralık zaten varsayılan)."""
+    if veri.gorev != "dagilim":
+        return None
+    d = veri.df
+    K = [len(v) for v in d["gercek"]]
+    kaynak = [[_sayisal(v) if v is not None and not np.isscalar(v) else None for v in d[c]]
+              for c in (*KONUM_SUTUNLARI, "secenekler") if c in d]
+    if veri.siniflar:
+        kaynak.append([_sayisal(veri.siniflar)] * len(d))
+    for ham in kaynak:   # ilk sayısal kaynak kazanır
+        ham = [x if x is not None and len(x) == k and np.ptp(x) > 0 else None for x, k in zip(ham, K)]
+        if any(x is not None for x in ham):
+            out = [None if x is None or _esit_aralik(x) else x for x in ham]
+            return out if any(x is not None for x in out) else None
+    return None
+
+
 def diziler(veri, sutun: str):
-    """Veri.df'deki gercek ve verilen sütunu metrik fonksiyonlarının beklediği biçime çevir."""
+    """Veri.df'deki gercek ve verilen sütunu metrik fonksiyonlarının beklediği biçime çevir. Dağılımda sayısal ve
+    eşit aralıklı olmayan şık konumları gerçek vektörlerine `KonumluVektor` olarak iliştirilir."""
     d = veri.df
     g, s = d["gercek"], d[sutun]
     if veri.gorev == "cok_sinif":
@@ -56,7 +109,14 @@ def diziler(veri, sutun: str):
             return y, np.vstack(s.to_numpy())
         return y, s.map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy()
     if veri.gorev == "dagilim":
-        return g.to_numpy(object), s.to_numpy(object)
+        y = g.to_numpy(object)
+        kon = secenek_konumlari(veri)
+        if kon is not None:
+            y = y.copy()
+            for i, k in enumerate(kon):
+                if k is not None:
+                    y[i] = KonumluVektor(y[i], k)
+        return y, s.to_numpy(object)
     return g.to_numpy(float), s.to_numpy(float)
 
 
@@ -103,6 +163,11 @@ def ece(guven, dogru, kutu: int = 10) -> float:
         if m.any():
             top += m.sum() / n * abs(dogru[m].mean() - guven[m].mean())
     return top
+
+
+def _ortalama_sapma(y, p):
+    """Satır başına p − y; ortalaması = ort. tahmin − ort. gerçek (calibration-in-the-large, işaretli; 0 iyi)."""
+    return np.asarray(p, float) - np.asarray(y, float)
 
 
 def _ece_ikili(y, p, madde=None):
@@ -179,6 +244,23 @@ def wasserstein_sirali(a, b):
     return np.abs(np.cumsum(a - b)).sum() / max(k - 1, 1)
 
 
+def wasserstein_konumlu(a, b, konum=None) -> float:
+    """Şık konumlarında Wasserstein-1, konum aralığıyla 0-1'e ölçekli (konumlar 0-1'i kaplıyorsa bench `wd`).
+    konum None ise a'nın ya da b'nin `konum` niteliği; o da yoksa eşit aralık (wasserstein_sirali)."""
+    if konum is None:
+        konum = getattr(a, "konum", None)
+    if konum is None:
+        konum = getattr(b, "konum", None)
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if konum is None or len(konum) != len(a) or np.ptp(konum) <= 0:
+        return float(wasserstein_sirali(a, b))
+    x = np.asarray(konum, float)
+    o = np.argsort(x, kind="stable")
+    x = x[o]
+    fark = np.cumsum(a[o] - b[o])[:-1]
+    return float(np.abs(fark) @ np.diff(x) / (x[-1] - x[0]))
+
+
 def js(a, b):
     m = 0.5 * (a + b)
 
@@ -251,9 +333,14 @@ WMAPE = Metrik("wmape", "oran", _wmape, -1, aciklama="Σ|hata| / Σ|gerçek| (WA
 YANLILIK = Metrik("yanlilik", "oran", _yanlilik, -1, son=lambda v: v - 1,
                   aciklama="Σtahmin / Σgerçek − 1, işaretli (0 iyi); tanı satırı, birincil metrik olamaz")
 ORAN_METRIKLERI = ("wmape", "yanlilik")
+# calibration-in-the-large: kol başına ort. tahmin − ort. gerçek (ikili: tahmini oran − taban oranı), küme GA'sıyla.
+# Ad İngilizce: compare/paired_ci(metric="mean_bias") doğrudan bulsun.
+ORT_SAPMA = Metrik("mean_bias", "birim", _ortalama_sapma, -1,
+                   aciklama="ort. tahmin − ort. gerçek (calibration-in-the-large), işaretli (0 iyi); tanı satırı, "
+                            "birincil metrik olamaz")
 # işaretli metrikler: yönü yok (0 iyi); "daha iyi" = |değer| daha küçük. Metrik.yon iç hesap için -1 kalır,
 # rapor tablosunda yon=0 yazılır.
-ISARETLI_METRIKLER = ("yanlilik",)
+ISARETLI_METRIKLER = ("yanlilik", "mean_bias")
 
 
 # ------------------------------------------------------------------ ab (madde = test)
@@ -343,6 +430,7 @@ def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: b
             Metrik("brier", "birim", _brier_ikili, -1, aciklama="olasılık hatası (uygun skor)"),
             Metrik("logloss", "birim", _logloss_ikili, -1, aciklama="olasılık hatası (uygun skor)"),
             Metrik("ece", "toplu", _ece_ikili, -1, aciklama="10 kutu, kalibrasyon hatası"),
+            ORT_SAPMA,
         ] + ek
     if gorev == "cok_sinif":
         temel = [
@@ -364,8 +452,9 @@ def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: b
                    aciklama="1 − toplam varyasyon uzaklığı (dağılım benchmark'larında TVD; Meister ve ark.)"),
             Metrik("simbench", "toplu", _simbench, +1, tavan=True,
                    aciklama="SimBench skoru: 100·(1 − ort. TVD / tekdüze ort. TVD); tekdüze tahmin 0 alır"),
-            Metrik("wasserstein", "birim", _per(wasserstein_sirali), -1, tavan=True,
-                   aciklama="sıralı seçenekler, K−1 ile normalize (OpinionQA)"),
+            Metrik("wasserstein", "birim", _per(wasserstein_konumlu), -1, tavan=True,
+                   aciklama="sıralı seçenekler, 0-1 ölçek: sayısal şık konumları varsa (konum/pos sütunu, sayısal "
+                            "options ya da classes) konumlarda (bench wd), yoksa eşit aralık 0..K−1 (OpinionQA)"),
             Metrik("js", "birim", _per(js), -1, tavan=True, aciklama="Jensen-Shannon ıraksaması, log2"),
             Metrik("ks", "birim", _per(ks), -1, tavan=True, aciklama="kümülatif dağılım en büyük farkı"),
             Metrik("mod_eslesme", "birim", _per(_mod), +1, tavan=True, aciklama="en sık seçenek aynı mı"),
@@ -379,6 +468,7 @@ def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: b
             Metrik("mae", "birim", lambda y, p: np.abs(y - p), -1, tavan=True),
             Metrik("rmse", "birim", lambda y, p: (y - p) ** 2, -1, tavan=True, son=np.sqrt),
             Metrik("r2", "toplu", _r2, +1, tavan=True),
+            ORT_SAPMA,
         ] + ek
     if gorev == "ab":
         return [
