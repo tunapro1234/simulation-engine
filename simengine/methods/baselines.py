@@ -10,6 +10,7 @@ kind: "binary" (P(y=1) out), "multiclass" (probability matrix, columns = ``class
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -216,31 +217,150 @@ def overall_copy(overall, groups: Iterable) -> dict:
     return {g: p.copy() for g in groups}
 
 
-def segment_distributions(df: pd.DataFrame, value_col: str, segment_col: str, categories: Sequence,
-                          weight_col: str | None = None, mode: str = "overall",
-                          pairs: dict | None = None) -> dict:
-    """Distribution baselines per segment (makro `temel_c1.py`).
+def _segment_keys(df: pd.DataFrame, segment_col) -> pd.Series:
+    """One key per row: the column value, or a tuple for several columns (cross segments)."""
+    if isinstance(segment_col, str):
+        return df[segment_col]
+    cols = list(segment_col)
+    return pd.Series(list(zip(*(df[c] for c in cols))), index=df.index, dtype=object)
 
-    mode: "overall"  every segment gets the weighted overall marginal (segment ignored),
+
+def _is(keys: pd.Series, s) -> np.ndarray:
+    """keys == s as a bool array; element-wise for tuple keys (pandas would treat a tuple as list-like)."""
+    if isinstance(s, tuple):
+        return np.fromiter((k == s for k in keys), bool, len(keys))
+    return (keys == s).to_numpy()
+
+
+def _effective_n(ok: np.ndarray, w) -> float:
+    """Rows with a valid answer; with weights, Kish's effective size (sum w)^2 / sum w^2."""
+    if w is None:
+        return float(ok.sum())
+    ww = np.asarray(w, float)[ok]
+    return float(ww.sum() ** 2 / (ww ** 2).sum()) if len(ww) and (ww ** 2).sum() > 0 else 0.0
+
+
+def segment_distributions(df: pd.DataFrame, value_col: str, segment_col, categories: Sequence,
+                          weight_col: str | None = None, mode: str = "overall",
+                          pairs: dict | None = None, m: float = 20.0, prior=None,
+                          segments: Iterable | None = None) -> dict:
+    """Distribution baselines per segment (makro `temel_c1.py`; "shrunk" from the G5 rehearsal ladder, T2b).
+
+    mode: "overall"  every segment gets the weighted overall marginal (segment ignored; population copy, T1),
           "others"   a segment gets the marginal of all OTHER segments (no data from the target segment),
           "pair"     a segment gets the marginal of ``pairs[segment]`` (e.g. the same party's other age group),
-          "own"      the segment's own marginal (oracle reference when computed on held-in data).
+          "own"      the segment's own marginal (segment empirical, T2; oracle reference on held-in data),
+          "shrunk"   own marginal shrunk toward the overall: p = (n_s * own + m * overall) / (n_s + m), where
+                     n_s is the number of valid answers in the segment (Kish effective size with ``weight_col``)
+                     and ``m`` a pseudo-count. m=0 is "own", m -> inf is "overall".
+
+    ``segment_col`` may be a list of columns: segments are then cross cells and the keys are tuples. ``prior``
+    replaces the overall marginal as the shrinkage target ("shrunk" only): one distribution (e.g. a known
+    population), or a dict {segment: distribution}, which gives hierarchical shrinkage, e.g. cross cells toward
+    their one-column "shrunk" result. ``segments`` lists the keys to return (default: the ones in ``df``); a key
+    with no rows gets the target itself under "shrunk" and the uniform distribution under "own"/"pair".
+
+    "shrunk" is the LLM-free baseline to beat for segment distribution tasks: in the G5 rehearsal (segment x item
+    answer distributions, 1-TVD) shrunk segment empirical (m=20) was the strongest LLM-free arm, above the
+    population copy and the raw segment empirical, and the LLM hybrid did not beat it across 5 seeds.
+    Pick ``m`` on training cells with ``select_m``.
     """
     w = df[weight_col] if weight_col else None
+    keys = _segment_keys(df, segment_col)
+    seg_list = list(pd.unique(keys)) if segments is None else list(segments)
+    if mode == "shrunk":
+        if m < 0:
+            raise ValueError("m must be >= 0")
+        overall = weighted_distribution(df[value_col], categories, w)
+        valid = df[value_col].isin(list(categories)).to_numpy()
     out = {}
-    for s in pd.unique(df[segment_col]):
+    for s in seg_list:
         if mode == "overall":
-            m = np.ones(len(df), bool)
+            mask = np.ones(len(df), bool)
         elif mode == "others":
-            m = (df[segment_col] != s).to_numpy()
+            mask = ~_is(keys, s)
         elif mode == "pair":
-            m = (df[segment_col] == pairs[s]).to_numpy()
-        elif mode == "own":
-            m = (df[segment_col] == s).to_numpy()
+            mask = _is(keys, pairs[s])
+        elif mode in ("own", "shrunk"):
+            mask = _is(keys, s)
         else:
             raise ValueError(f"unknown mode {mode!r}")
-        out[s] = weighted_distribution(df.loc[m, value_col], categories, None if w is None else w[m])
+        own = weighted_distribution(df.loc[mask, value_col], categories, None if w is None else w[mask])
+        if mode != "shrunk":
+            out[s] = own
+            continue
+        target = overall if prior is None else np.asarray(prior[s] if isinstance(prior, dict) else prior, float)
+        n = _effective_n(valid & mask, w)
+        out[s] = target.copy() if n == 0 else (n * own + m * target) / (n + m)
     return out
+
+
+def segment_empirical(df: pd.DataFrame, value_col: str, segment_col, categories: Sequence,
+                      shrink: float = 0.0, **kw) -> dict:
+    """Segment empirical distribution (T2); ``shrink=m`` > 0 shrinks it toward the overall marginal (T2b).
+    Alias of ``segment_distributions(mode="own" / "shrunk", m=shrink)``."""
+    mode = "shrunk" if shrink > 0 else "own"
+    return segment_distributions(df, value_col, segment_col, categories, mode=mode, m=shrink, **kw)
+
+
+M_GRID = (0, 1, 2, 5, 10, 20, 50, 100, 200, 500)
+
+
+@dataclass
+class ShrinkSelection:
+    """``select_m`` result: chosen pseudo-count, mean 1-TVD per grid value, number of scored cells per fold."""
+    m: float
+    scores: dict
+    n_cells: int
+
+
+def select_m(df: pd.DataFrame, value_col, segment_col, categories, grid: Sequence[float] = M_GRID,
+             folds: int | None = 5, unit_col: str | None = None, weight_col: str | None = None,
+             min_eval: int = 1, seed: int = 0) -> ShrinkSelection:
+    """Pick ``m`` for ``mode="shrunk"`` by K-fold 1-TVD on training data only.
+
+    Units (rows, or ``unit_col`` groups such as households, so one unit never sits on both sides) are split into
+    ``folds`` folds; ``folds=None`` is leave-one-unit-out. Each fold is held out once: shrunk distributions are fit
+    on the rest (overall marginal from the rest too) and scored against the held-out segment's own empirical
+    marginal by 1 - TVD. Cells (segment x item) with fewer than ``min_eval`` held-out answers are skipped; the
+    score is the mean over scored cells and folds. ``value_col`` may be a list of item columns; ``categories`` is
+    then one shared list or a dict {column: categories}. Ties go to the smaller ``m``.
+    Note: the held-out empirical is noisy, so small folds favour larger ``m`` a little less than the truth would;
+    5 folds is the default for that reason.
+    """
+    items = [value_col] if isinstance(value_col, str) else list(value_col)
+    cats = {c: list(categories[c] if isinstance(categories, dict) else categories) for c in items}
+    units = df[unit_col].to_numpy() if unit_col else np.arange(len(df))
+    uniq = pd.unique(units)
+    k = len(uniq) if folds is None else int(folds)
+    if k < 2 or k > len(uniq):
+        raise ValueError(f"folds must be in [2, n_units={len(uniq)}], got {k}")
+    rng = np.random.default_rng(seed)
+    fold_of = dict(zip(uniq, rng.permutation(len(uniq)) % k))
+    f = np.array([fold_of[u] for u in units])
+    keys = _segment_keys(df, segment_col)
+    w = df[weight_col] if weight_col else None
+    tot = {g: [] for g in grid}
+    n_cells = 0
+    for j in range(k):
+        tr, ho = df[f != j], df[f == j]
+        k_ho = keys[f == j]
+        for c in items:
+            valid = ho[c].isin(cats[c]).to_numpy()
+            segs = [s for s in pd.unique(k_ho) if (valid & _is(k_ho, s)).sum() >= min_eval]
+            if not segs:
+                continue
+            truth = segment_distributions(ho, c, segment_col, cats[c], weight_col, mode="own", segments=segs)
+            n_cells += len(segs)
+            for g in grid:
+                pred = segment_distributions(tr, c, segment_col, cats[c], weight_col, mode="shrunk", m=g,
+                                             segments=segs)
+                tot[g] += [1.0 - 0.5 * np.abs(pred[s] - truth[s]).sum() for s in segs]
+    if not n_cells:
+        raise ValueError("no held-out cell with enough answers; lower min_eval or folds")
+    scores = {g: float(np.mean(v)) for g, v in tot.items()}
+    best = max(grid, key=lambda g: (round(scores[g], 12), -g))
+    return ShrinkSelection(m=float(best), scores=scores, n_cells=n_cells)
 
 
 # ---------------------------------------------------------------- persistence (person's own past behaviour)
