@@ -6,7 +6,7 @@ that combine an LLM prediction with a model learned from data.
 | component | what it is | verdict from the prep nights |
 |---|---|---|
 | `ConstantBaseline`, `MajorityBaseline`, `ItemMarginal`, `SegmentRate` | rate / median / class shares, per item or shrunk per segment | always report them; they are hard to beat on accuracy |
-| `uniform_distribution`, `weighted_distribution`, `overall_copy`, `segment_distributions` | distribution baselines for group-level opinion | `overall_copy` wins against the uniform distribution and against neighbour transfer |
+| `uniform_distribution`, `weighted_distribution`, `overall_copy`, `segment_distributions`, `segment_empirical`, `select_m` | distribution baselines for group-level opinion; `mode="shrunk"` is segment empirical shrunk toward the population, `m` picked by K-fold 1-TVD | `overall_copy` wins against the uniform distribution and against neighbour transfer; with segment training data, shrunk segment empirical is the LLM-free arm to beat |
 | `PersistenceBaseline`, `persistence` | "tomorrow = yesterday" from the unit's own history | strongest single signal wherever history exists |
 | `basket_tensor`, `popularity`, `personal_frequency`, `decayed_frequency`, `tifu_knn` | next-basket / repeat-purchase scorers | decayed frequency beats P-TopFreq; TIFU-KNN adds nothing |
 | `LogisticBaseline`, `LightGBMBaseline`, `KNNBaseline`, `TextKNNRegressor` | supervised tabular / text baselines | GBDT ties persistence when history is available; text kNN on effect sizes is weak |
@@ -89,6 +89,17 @@ LightGBM defaults), the persona kit (`Medyan`), the deney kit (`KomsuDeney`), ka
   WD). For the makro C1 segment task (W1): the overall marginal scores 0.206 and the marginal of the other three
   segments 0.274. The same party's other age group scores 0.040, against a 37-person survey ceiling of 0.050
   **[makro]**. Use `segment_distributions(mode=...)` for these.
+- **LLM-free distribution ladder (segment x item answer shares).** T0 uniform, T1 population copy
+  (`mode="overall"`), T2 segment empirical (`mode="own"`), T2b shrunk segment empirical (`mode="shrunk"`,
+  p = (n_s * own + m * overall) / (n_s + m), n_s = valid answers in the segment, Kish effective n with weights).
+  In the G5 rehearsal (1-TVD over segment x item cells, train households only) T2b with m = 20 was the strongest
+  LLM-free arm (seed 0: 0.912 against T1 0.906; on seed 1 T1 led), and the LLM hybrid did not beat it across
+  5 seeds (H - T2b mean -0.004, sd 0.008) **[G5]**. Report T2b as the baseline to beat for any distribution task with segment training data.
+  `select_m(train, items, segment, categories, unit_col=...)` picks m by K-fold 1-TVD over units (households, so
+  one never sits on both sides; `folds=None` is leave-one-unit-out); `segment_empirical(..., shrink=m)` is the
+  short alias. Cross segments: pass a list of columns (keys become tuples); for hierarchical shrinkage pass
+  `prior={cell: parent_distribution}`, e.g. the one-column shrunk result of the cell's first column. `segments=`
+  returns cells absent from the training rows (they get the target distribution).
 - **Persistence.** On the open e-commerce order-frequency class, persistence scores macro-F1 0.781
   [0.756, 0.805] against 0.275 for majority. The best GBDT with all features was not separable from it
   (+0.001 [-0.022, 0.023]) **[intent]**. On makro per-item opinion drift, the previous year wins on some items
