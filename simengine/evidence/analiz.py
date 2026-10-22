@@ -21,17 +21,32 @@ from .metrik import tvd
 MAKS_SEGMENT = 40
 
 
-def _beklenen(v):
-    """Sıralı seçenek dağılımının 0-1 ölçekli beklenen değeri."""
+def _konum(v, konum=None) -> np.ndarray:
+    """0-1 ölçekli şık konumları: verilen konum, yoksa v'nin `konum` niteliği (metrik.KonumluVektor; sayısal ve eşit
+    aralıksız şıklar), o da yoksa eşit aralık 0..K-1. Tahmin vektörü konumu eşi olan gerçek vektöründen alır."""
     k = len(v)
-    return float(np.dot(v, np.arange(k)) / max(k - 1, 1))
+    if konum is None:
+        konum = getattr(v, "konum", None)
+    if konum is not None and len(konum) == k and np.ptp(konum) > 0:
+        x = np.asarray(konum, float)
+        return (x - x.min()) / np.ptp(x)
+    return np.arange(k) / max(k - 1, 1)
 
 
-def _sd(v):
-    k = len(v)
-    x = np.arange(k) / max(k - 1, 1)
+def _beklenen(v, konum=None):
+    """Sıralı seçenek dağılımının 0-1 ölçekli beklenen değeri (E[konum])."""
+    return float(np.dot(np.asarray(v, float), _konum(v, konum)))
+
+
+def _sd(v, konum=None):
+    x = _konum(v, konum)
+    v = np.asarray(v, float)
     m = np.dot(v, x)
     return float(np.sqrt(max(np.dot(v, (x - m) ** 2), 0)))
+
+
+def _kon(v):
+    return getattr(v, "konum", None)
 
 
 def _entropi(v):
@@ -45,7 +60,7 @@ def yanlilik(veri, y, p, maske) -> float | None:
     if g in ("ikili", "surekli"):
         return float(np.mean(p[maske]) - np.mean(y[maske]))
     if g == "dagilim":
-        return float(np.mean([_beklenen(a) - _beklenen(b) for a, b in zip(p[maske], y[maske])]))
+        return float(np.mean([_beklenen(a, _kon(b)) - _beklenen(b) for a, b in zip(p[maske], y[maske])]))
     if g == "cok_sinif":
         K = len(veri.siniflar)
         ty = np.bincount(y[maske], minlength=K) / max(maske.sum(), 1)
@@ -136,7 +151,7 @@ def segment_fark_kor(veri, y, p, sc, maske) -> float | None:
         yy, pp = y[m].astype(float), p[m].astype(float)
     elif g == "dagilim":
         yy = np.array([_beklenen(v) for v in y[m]])
-        pp = np.array([_beklenen(v) for v in p[m]])
+        pp = np.array([_beklenen(v, _kon(t)) for v, t in zip(p[m], y[m])])
     else:
         return None
     t = pd.DataFrame({"y": yy, "p": pp, "s": sc[m]})
@@ -206,7 +221,7 @@ def _yayilim_bir(veri, y, p, satir=None, bernoulli: bool = False):
         return None, float(hp / max(hy, 1e-12))
     if g == "dagilim":
         sy = np.array([_sd(v) for v in y]) ** 2
-        sp = np.array([_sd(v) for v in p]) ** 2
+        sp = np.array([_sd(v, _kon(t)) for v, t in zip(p, y)]) ** 2
         return float(np.sqrt(sp.sum() / max(sy.sum(), 1e-12))), _oran_ort(_entropiler(p), _entropiler(y))
     return None, None
 
@@ -266,7 +281,8 @@ def yayilim(veri, sutun_dizileri: dict, B: int, tohum: int) -> dict:
         out[sutun] = {"sd_orani": oran, "sd_orani_alt": a, "sd_orani_ust": u, "entropi_orani": ent, "w1": w1}
         if veri.gorev == "dagilim":
             hy, hp = _entropiler(y), _entropiler(p)
-            ey, ep = np.array([_beklenen(v) for v in y]), np.array([_beklenen(v) for v in p])
+            ey = np.array([_beklenen(v) for v in y])
+            ep = np.array([_beklenen(v, _kon(t)) for v, t in zip(p, y)])
             te, ta = [], []
             for b in range(orn.B_toplu):
                 ii, _ = orn.satirlar(b)
