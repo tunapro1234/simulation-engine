@@ -7,6 +7,7 @@
     frame = se.sim.survey_frame(res, truth={"q1": {...}})
     report = se.evidence.evaluate(frame, ours="score", task="continuous")
     se.evidence.card(report, "card.md"); se.evidence.dashboard([report], "pano.html")
+    se.seal(predictions, "before truth")                 # one seal: = se.evidence.seal, writes .onkayit/zincir.jsonl
 
 Subpackages are imported lazily on first attribute access, so `import simengine` stays fast and optional
 dependencies (anthropic, lightgbm, sentence-transformers) are only needed by the parts that use them.
@@ -30,6 +31,10 @@ _ENTRY_POINTS = {
     "Claude": ("llm", "Claude"),
     "ClaudeCode": ("llm", "ClaudeCode"),
     "FakeLLM": ("llm", "FakeLLM"),
+    "CostLedger": ("llm", "CostLedger"),
+    "EmptyResponseError": ("llm", "EmptyResponseError"),
+    "ThinkingBudgetWarning": ("llm", "ThinkingBudgetWarning"),
+    "looks_like_refusal": ("llm", "looks_like_refusal"),
     # persona
     "Persona": ("persona", "Persona"),
     "AudienceSpec": ("persona", "AudienceSpec"),
@@ -40,18 +45,26 @@ _ENTRY_POINTS = {
     "ab_test": ("sim", "ab_test"),
     "segment_distribution": ("sim", "segment_distribution"),
     "predict_people": ("sim", "predict_people"),
+    "survey_frame": ("sim", "survey_frame"),
+    # methods
+    "GroupTransfer": ("methods", "GroupTransfer"),
+    "oof_predict": ("methods", "oof_predict"),
     # evidence
     "evaluate": ("evidence", "evaluate"),
     "card": ("evidence", "card"),
     "dashboard": ("evidence", "dashboard"),
     "summary": ("evidence", "summary"),
     "worth_humans": ("evidence", "worth_humans"),
+    "evaluate_aggregate": ("evidence", "evaluate_aggregate"),
+    "correlation_audit": ("evidence", "correlation_audit"),
+    "memorization_audit": ("evidence", "memorization_audit"),
+    "chain": ("evidence", "chain"),
     # research
     "Loop": ("research", "Loop"),
     "Space": ("research", "Space"),
     "Prereg": ("research", "Prereg"),
     "lock_prereg": ("research", "lock_prereg"),
-    "seal": ("research", "seal"),
+    "seal": ("evidence", "seal"),
     # games
     "play_games": ("games", "play"),
     "distance_to_human": ("games", "distance_to_human"),

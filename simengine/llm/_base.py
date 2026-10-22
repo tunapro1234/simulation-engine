@@ -20,16 +20,20 @@ class CachedBackend:
     model: str = "-"
 
     def __init__(self, *, cache_dir: str | os.PathLike | None = None, ledger: CostLedger | str | os.PathLike | None = None,
-                 budget_usd: float | None = None, tag: str = "", parallel: int = 4):
+                 budget_usd: float | None = None, tag: str = "", parallel: int = 4,
+                 spend_log: str | os.PathLike | None = None, agent: str | None = None):
         self.cache = DiskCache(cache_dir) if cache_dir is not None else None
         if isinstance(ledger, CostLedger):
+            if spend_log is not None or agent is not None:
+                raise ValueError("spend_log/agent configure the default ledger; with ledger=CostLedger(...) pass "
+                                 "tsv_path=/agent= to that CostLedger instead")
             self.ledger = ledger
         elif ledger is not None:
-            self.ledger = CostLedger(ledger)
+            self.ledger = CostLedger(ledger, tsv_path=spend_log, agent=agent)
         elif cache_dir is not None:
-            self.ledger = CostLedger(Path(cache_dir) / "ledger.jsonl")
+            self.ledger = CostLedger(Path(cache_dir) / "ledger.jsonl", tsv_path=spend_log, agent=agent)
         else:
-            self.ledger = CostLedger(None)
+            self.ledger = CostLedger(None, tsv_path=spend_log, agent=agent)
         self.budget_usd = budget_usd
         self.tag = tag
         self.parallel = parallel
@@ -70,6 +74,17 @@ class CachedBackend:
             self.cache.put(key, record, self.model)
 
     @staticmethod
+    def _should_cache(cache_if, text: str) -> bool:
+        """cache_if(text) -> bool decides whether a successful reply is written to the disk cache
+        (None = always). An exception inside cache_if counts as False (do not cache)."""
+        if cache_if is None:
+            return True
+        try:
+            return bool(cache_if(text))
+        except Exception:  # noqa: BLE001
+            return False
+
+    @staticmethod
     def _hit(rec: dict, model: str) -> LLMResponse:
         return LLMResponse(text=rec.get("text", ""), model=rec.get("model", model),
                            input_tokens=int(rec.get("input_tokens") or 0), output_tokens=int(rec.get("output_tokens") or 0),
@@ -85,7 +100,9 @@ class CachedBackend:
             return_exceptions: bool = False, **kw: Any) -> list[LLMResponse]:
         """Run many (system, user) prompts with a thread pool, results in input order.
         A StopError (budget, 401, spend limit) cancels the rest and is raised; finished answers are
-        cached, so the same call resumes. return_exceptions=True puts other errors in their slot."""
+        cached, so the same call resumes. return_exceptions=True puts other errors (LLMError,
+        RefusalError, EmptyResponseError, ...) in their slot. Keywords such as tag=, validate=,
+        cache_if=, thinking= are passed to every complete() call."""
         p = self.parallel if parallel is None else parallel
         return parallel_map(lambda su: self.complete(su[0], su[1], max_tokens=max_tokens, **kw), list(prompts),
                             parallel=p, return_exceptions=return_exceptions)

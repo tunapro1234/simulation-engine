@@ -24,7 +24,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from .builders import Mapping, _is_empty, from_row
+from .builders import Mapping, _is_empty, check_ids, from_row
 from .schema import Persona
 
 LEVELS = ("L0", "L1", "L2")
@@ -163,6 +163,7 @@ def from_history(table: pd.DataFrame | None = None, *, id_col: str, level: str =
             raise ValueError(f"leakage: target column(s) {sorted(bad)} are in questions")
     rows = {}
     if table is not None:
+        check_ids(table, id_col)                 # empty/NaN or duplicated ids -> ValueError with counts
         rows = {str(r[id_col]): r for _, r in table.iterrows()}
     summary, cats = None, None
     if level == "L2":

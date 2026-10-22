@@ -11,7 +11,10 @@ Ported from talp73/kod/llm/claude_api.py (httpx there; the SDK here) and openrou
 - rate limit (429) / overloaded (529) / 5xx / network errors: linear backoff, honouring retry-after;
 - HTTP 401 -> AuthError immediately; spend / usage / credit-limit errors -> SpendLimitError
   immediately (no retry, no fallback key);
-- `validate(text)` hook: ValueError/KeyError/TypeError -> the call is retried, nothing cached.
+- `validate(text)` hook: ValueError/KeyError/TypeError -> the call is retried, nothing cached;
+  `cache_if(text) -> bool` hook: False -> the reply is returned but not written to the disk cache;
+- empty text with stop_reason "max_tokens" (thinking used the budget) -> EmptyResponseError, not cached;
+  a ThinkingBudgetWarning once per instance when max_tokens < 1024 and thinking is not "off".
 The API key comes from `api_key=`, else ANTHROPIC_API_KEY, else the file named by SIMENGINE_KEY_FILE.
 Its value is never logged, cached, put in an exception or in repr().
 """
@@ -20,16 +23,24 @@ from __future__ import annotations
 import os
 import threading
 import time
+import warnings
 from typing import Any, Callable
 
 from ..types import LLMResponse
 from ._base import CachedBackend
-from .errors import AuthError, LLMError, RefusalError, SpendLimitError
+from .errors import AuthError, EmptyResponseError, LLMError, RefusalError, SpendLimitError, ThinkingBudgetWarning
 from .pricing import PRICES, Price, price_for, usage_cost
 
 LIMIT_MARKERS = ("usage limit", "spend limit", "spending limit", "credit balance", "billing")
 RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+THINKING_WARN_BELOW = 1024     # max_tokens under this with thinking on -> one ThinkingBudgetWarning per instance
+
+
+def _thinking_is_off(thinking: Any) -> bool:
+    if thinking == "off":
+        return True
+    return isinstance(thinking, dict) and thinking.get("type") == "disabled"
 
 
 def load_api_key(api_key: str | None = None) -> str:
@@ -135,6 +146,8 @@ class Claude(CachedBackend):
         Sonnet 5.5 -> between_tools; Opus 5.5 / Fable cannot disable -> ValueError) or a raw dict.
     cache_dir : local disk cache + default ledger at <cache_dir>/ledger.jsonl. None = no cache.
     ledger : CostLedger or path; overrides the default ledger location.
+    spend_log, agent : shared TSV spend log for the default ledger (CostLedger tsv_path/agent; env
+        SIMENGINE_SPEND_LOG / SIMENGINE_AGENT are read when not given).
     budget_usd : BudgetExceeded is raised before a call when the ledger total >= this.
     system_cache : put cache_control on the system block (default True).
     fallbacks : None (default) or a server-side fallback spec such as "default"; when set, the beta
@@ -150,8 +163,9 @@ class Claude(CachedBackend):
                  system_cache: bool = True, fallbacks: Any = None, max_attempts: int = 4, rate_wait: float = 15.0,
                  error_wait: float = 3.0, timeout: float = 180.0, parallel: int = 4, tag: str = "",
                  api_key: str | None = None, client: Any = None, prices: dict[str, Price] | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
-        super().__init__(cache_dir=cache_dir, ledger=ledger, budget_usd=budget_usd, tag=tag, parallel=parallel)
+                 sleep: Callable[[float], None] = time.sleep, spend_log=None, agent: str | None = None):
+        super().__init__(cache_dir=cache_dir, ledger=ledger, budget_usd=budget_usd, tag=tag, parallel=parallel,
+                         spend_log=spend_log, agent=agent)
         if effort is not None and effort not in EFFORTS:
             raise ValueError(f"effort must be one of {EFFORTS} or None")
         self.model = model
@@ -170,6 +184,7 @@ class Claude(CachedBackend):
         self._client = client
         self._client_lock = threading.Lock()
         self._sleep = sleep
+        self._budget_warned = False
 
     def __repr__(self) -> str:   # never shows the key
         return (f"Claude(model={self.model!r}, effort={self.effort!r}, cache={'on' if self.cache else 'off'}, "
@@ -239,18 +254,35 @@ class Claude(CachedBackend):
             return c.messages.create(**params)
         return c.beta.messages.create(**params, betas=["server-side-fallback-2026-07-01"], fallbacks=self.fallbacks)
 
+    def _warn_thinking_budget(self, max_tokens: int, thinking: Any) -> None:
+        if self._budget_warned or max_tokens >= THINKING_WARN_BELOW or _thinking_is_off(thinking):
+            return
+        self._budget_warned = True
+        shown = "default (adaptive)" if thinking is None else repr(thinking)
+        warnings.warn(f"{self.model}: max_tokens={max_tokens} with thinking on (thinking={shown}); thinking "
+                      "tokens count toward max_tokens, so the reply can come back empty (stop_reason=max_tokens). "
+                      "Pass thinking='off' (Haiku / Sonnet 5.5) or raise max_tokens (research runs used 2000).",
+                      ThinkingBudgetWarning, stacklevel=3)
+
     # ------------------------------------------------------------ LLM protocol
     def complete(self, system: str, user: str, *, max_tokens: int | None = None, **kw: Any) -> LLMResponse:
-        """One call (or a cache hit). Extra keywords: tag, sample, validate, effort, thinking,
-        system_cache, output_config, and any other messages.create parameter."""
+        """One call (or a cache hit). Extra keywords: tag (ledger/TSV tag), sample, validate,
+        cache_if, effort, thinking, system_cache, output_config, and any other messages.create parameter.
+
+        validate(text): raising ValueError/KeyError/TypeError retries the call (nothing cached; LLMError
+        after max_attempts). cache_if(text) -> bool: False returns the reply without caching it and without
+        a retry (raw["not_cached"] = True), e.g. cache_if=lambda t: not looks_like_refusal(t)."""
         tag = kw.pop("tag", self.tag)
         validate = kw.pop("validate", None)
+        cache_if = kw.pop("cache_if", None)
+        thinking_arg = kw.get("thinking", self.thinking)
         params, key_params = self.build_request(system, user, max_tokens, **kw)
         key = self._key(self.model, system, user, key_params)
         rec = self._cache_get(key)
         if rec is not None:
             self._bump(cache_hits=1)
             return self._hit(rec, self.model)
+        self._warn_thinking_budget(params["max_tokens"], thinking_arg)
         last = ""
         for attempt in range(1, self.max_attempts + 1):
             self.check_budget()
@@ -296,6 +328,12 @@ class Claude(CachedBackend):
                 self._bump(errors=1)
                 raise RefusalError(f"refusal (stop_details={d.get('stop_details')})")
             text = _text(d)
+            if not text.strip() and d.get("stop_reason") == "max_tokens":
+                self._bump(errors=1)
+                raise EmptyResponseError(
+                    f"{self.model}: empty reply, stop_reason=max_tokens (max_tokens={params['max_tokens']}, "
+                    f"{out} output tokens billed): thinking used the whole budget. Pass thinking='off' "
+                    "(Haiku / Sonnet 5.5) or raise max_tokens. Not cached.")
             if validate is not None:
                 try:
                     validate(text)
@@ -303,13 +341,16 @@ class Claude(CachedBackend):
                     last = f"validation: {e}"[:200]
                     self._bump(retries=1)
                     continue
-            self._cache_put(key, {"text": text, "model": self.model, "input_tokens": inp, "output_tokens": out,
-                                  "cache_read_tokens": cr, "cost_usd": cost, "raw": raw, "system": system,
-                                  "user": user, "params": key_params})
+            if self._should_cache(cache_if, text):
+                self._cache_put(key, {"text": text, "model": self.model, "input_tokens": inp, "output_tokens": out,
+                                      "cache_read_tokens": cr, "cost_usd": cost, "raw": raw, "system": system,
+                                      "user": user, "params": key_params})
+            else:
+                raw["not_cached"] = True
             return LLMResponse(text=text, model=self.model, input_tokens=inp, output_tokens=out, cache_read_tokens=cr,
                                cost_usd=cost, cached=False, raw=raw)
         self._bump(errors=1)
         raise LLMError(f"Claude call failed after {self.max_attempts} attempts: {last}")
 
 
-__all__ = ["Claude", "load_api_key", "classify_error", "LIMIT_MARKERS"]
+__all__ = ["Claude", "load_api_key", "classify_error", "LIMIT_MARKERS", "THINKING_WARN_BELOW"]

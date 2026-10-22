@@ -224,7 +224,7 @@ attached via `prereg=`), and, when the primary metric ranks or correlates (AUC, 
 note if a cross-fitted average baseline (`taban_marjinal`, `taban_demografi`) lands below chance: a leave-one-out
 mean moves against the held-out truth, which is expected and not a bug. `lang="en"` drops the Turkish badge reason
 and original headline; ladder and audit labels stay Turkish. `evaluate(prereg=<dir>)` warns when the directory has
-no `zincir.jsonl` (the CLI stops with an error).
+neither `zincir.jsonl` (evidence.seal / `se.seal`) nor `chain.jsonl` (research.seal).
 
 Default primary metric per task when `primary` is not given: binary / multiclass `accuracy` (`macro_f1` when the
 majority class is above 60 %), distribution `one_minus_tvd`, continuous `pearson` (`one_minus_mae` when the truth
@@ -318,6 +318,107 @@ Tests: `tests/test_evidence_extras.py` (21 tests, synthetic data, < 1 s): varian
 counts, tests and md/html rendering; published-finding deltas with missing values; N/A exclusion; coefficient
 recovery on same vs sign-flipped processes.
 
+## Options added after the port (gap fixes)
+
+All are keyword arguments with backward-compatible defaults; report keys stay Turkish, `summary()` adds English
+fields.
+
+**One seal.** `se.seal` is `simengine.evidence.seal` (registry `.onkayit/zincir.jsonl`).
+`simengine.research.seal` keeps its own chain (`.prereg/chain.jsonl`). `ev.chain(dir)` / `evaluate(prereg=dir)`
+read both formats. Research records keep their English keys and also get `sira`, `zaman_utc`, `satir`, `aciklama`
+and `"zincir": "chain.jsonl"`. When a default directory (`.onkayit` / `.prereg`) holds no chain, the sibling default
+is tried. `ev.chain_paths(dir)` lists the chain files that were found. `seal`, `verify`, `verify_chain` and
+`grade` accept `registry_dir=` as an alias of `registry=` (the name older `se.seal` calls used; passing two
+different directories raises `TypeError`). `research.verify_seal` / `grade_sealed` also find seals made with
+`se.seal` (the `zincir.jsonl` in the same directory, or in the sibling default directory).
+```python
+se.seal(pred_df, "before truth")                    # .onkayit/zincir.jsonl
+se.seal(pred_df, "before truth", registry_dir=".prereg")   # alias: .prereg/zincir.jsonl
+se.research.verify_seal(pred_df, registry_dir=".prereg")["matched"]   # True: reads both chain files
+ev.evaluate(df, ours="llm", prereg=".prereg")      # a research.seal chain is attached too
+```
+
+**Memorization audit for numbers.** `memorization_audit(..., tolerance=0.02, relative=False)`: with
+`relative=True` the tolerance is a share of the expected value (0.05 = ±5 %), for 0-100 scales. An item may carry its
+own `"tolerance"`. For aggregates (country means and similar), use `correlation_audit(truth, named, blind, llm=...)`.
+It asks for each key twice, once with the study named and once blind. It compares Spearman(named, truth) −
+Spearman(blind, truth) with a paired key bootstrap, and gives `durum="uyari"` when the CI lower bound is above
+`margin`. Each arm is an answer dict or a `{key}` template. Templates get a "best guess" sentence, so models do not
+refuse with "I can't recall". `audit_prompts(study, quantity)` builds both templates. The result can be passed to
+`evaluate(memorization=...)`. Defaults: `max_tokens=1024` and `thinking="auto"`, which passes `thinking="off"`
+when the backend accepts it (Claude Haiku / Sonnet), so thinking cannot use up the budget of a one-number reply
+(`thinking=None` keeps the backend default; any other value is passed as is). An empty reply
+(`EmptyResponseError`) or another `LLMError` for one key makes that key unparsed instead of aborting the audit:
+`n_failed` counts them and `errors` holds up to five messages.
+```python
+named, blind = ev.audit_prompts("'<study title>' (<authors>, <journal> <year>)", "mean support (0-100)")
+audit = ev.correlation_audit(truth_by_country, named, blind, llm=llm, samples=3)
+audit["n_failed"], audit["n_unparsed_named"]
+```
+
+**Speed on large frames.**
+- *Multiplier subsample.* For single-item frames above `multiplier_max_rows=2000` rows, the PPI++ multiplier runs
+  on a fixed-seed subsample of that many rows. The report records this in `orneklem["alt_orneklem"]`, the card
+  notes it, and `None` uses the whole table. Large frames with `multiplier=True` raise a `UserWarning`.
+- *Unit bootstrap.* From 2,000 rows (`bedel.HIZLI_ESIK`, equal to `MULTIPLIER_MAX_ROWS`), `bedel.olc` draws one
+  labelled index set per column and reuses it across the unit bootstrap (`hizli_bootstrap: True`). So it applies to
+  the 2,000-row multiplier subsample and to larger tables. Below 2,000 rows, the point estimate and the CI are
+  identical to the original (`hizli=` forces either path).
+- *Aggregate metrics.* Above 5,000 rows, Spearman and the binary aggregate metrics (AUC, macro-F1, kappa, balanced
+  accuracy, ECE) are bootstrapped from row multiplicities instead of expanded resamples. The values are the same
+  up to float rounding.
+- *Measured.* With 42,000 rows, 8 methods and the default B, a continuous/Spearman run takes about 11 s and a
+  binary/AUC run about 12 s, against 34 s and 82 s before. The multiplier at 2,000 rows went from 62 s to 6 s.
+
+**Declared baselines and the full ladder.** `baselines_oof=[...]` names prediction columns that were trained on the
+target labels but cross-fitted (for example a GBDT or ridge). Like `unlabeled_baselines`, they become `baseline`
+rungs, and the badge and headline compare ours with the strongest baseline, declared or automatic. An unknown name
+only warns. When nothing is declared and the strongest baseline is random or marginal, the following are added: an
+audit "yalnız basit tabanlar", a limit line, the card flag "yalnız basit tabanlar", and
+`summary()["only_trivial_baselines"]`. `report["tabanlar"]` lists declared, automatic and strongest baselines. The
+ladder now lists every `pred_` column, where the original showed at most 6.
+```python
+ev.evaluate(df, ours="hybrid", raw="llm", baselines_oof=["ridge"], unlabeled_baselines=["persistence"])
+```
+
+**Model/oracle ceiling.** `ceiling_col="pred_oracle"` (or any column name) gives a model ceiling in place of the
+human `retest`. The column leaves the method list and gives the ceiling and gap closed for every metric.
+`report["tavan_turu"]` is `"model"` and `summary()["ceiling_kind"]` is `"oracle/model"`, where a retest gives
+`"human retest"`. The card row reads "Model/oracle tavanı", and the leakage audit is phrased for a model ceiling.
+`ceiling_label=` names the ceiling. If a `retest` column is also present, it is ignored and a note says so.
+```python
+ev.evaluate(df, ours="hybrid", raw="llm", ceiling_col="pred_oracle", ceiling_label="GBDT on all features")
+```
+
+**Group-level evaluation.** `aggregate_by="group"` (or any column, such as `"country"`) averages truth, predictions,
+retest and model ceiling per group (and per item / split when present). The task becomes continuous and the
+bootstrap resamples groups. `report["toplama"]` holds `{by, n_rows, n_groups, n_eval_rows}`, and a limit line notes
+the reduction. This is for binary and continuous truth only. `ev.evaluate_aggregate(df, "country", ...)` is a
+shorthand. The automatic baselines (overall mean, demographic segment) are then cross-fitted over group rows. The
+out-of-fold mean moves against the held-out groups' own mean, so on a rank metric (Spearman) these rungs can be
+clearly below 0 even with no information. The limit line says so and `report["toplama"]` has
+`auto_baselines_cross_fitted_bias: True`. For a meaningful comparison, declare a group-level baseline that was
+cross-fitted the same way (`baselines_oof=` / `unlabeled_baselines=`).
+```python
+ev.evaluate(df, ours="llm", aggregate_by="country", primary="spearman")   # e.g. 20 countries
+```
+
+**Awaiting truth.** Rows with missing truth are dropped, and the note gives how many. When the truth column is
+absent or entirely missing (on test rows), `evaluate` returns an "awaiting truth" report with the same keys:
+- the badge `bekliyor` (`summary()["badge"] == "awaiting truth"`)
+- `gercek_bekleniyor: True`
+- `tahmin_ozeti`, the per-method prediction summary (`summary()["predictions"]`)
+- the attached seals; the card says when the predictions are not sealed
+- an empty ladder and empty results
+
+The Markdown card adds a "Predictions (awaiting truth)" table, the dashboard shows a predictions section, and
+`simengine evaluate` accepts such a frame. A frame that has truth but whose `split` (`bolum`) column has no test
+row (accepted: `test`, `deger`, `degerlendirme`, `holdout`; for example `split="cv"`) raises
+`ValueError("no test rows in split ...")`. It is not reported as awaiting truth.
+```python
+se.seal(pred_df, "before truth"); rep = ev.evaluate(pred_df, ours="llm", prereg=".onkayit")  # no truth column
+```
+
 ## When not to trust a number
 - Few items (< 20): only PPI++ is shown. Bayes shrinkage and "simulation alone" depend on hitting a single mean.
 - A method above the human ceiling: check leakage first.
@@ -332,11 +433,16 @@ recovery on same vs sign-flipped processes.
   - `ezber` uses the LLM protocol instead of a `claude -p` subprocess, and its CLI is dropped.
   - `denetim.ezber` closes its file handle.
   - Docstring and comment paths were neutralised.
+  - Additive gap fixes (see "Options added after the port"): missing-truth handling in `sema`, the ladder lists every
+    method, the multiplicity bootstrap path in `bootstrap`, the reused index draw in `bedel`, and the declared-baseline,
+    model-ceiling, subsample and awaiting-truth branches in `cekirdek`. The equivalence test removes only these
+    additive keys and audits before it compares with the original.
 - Not ported:
   - the `python -m kanit` CLI (`rapor`, `birlestir`, `bedel`), which belongs to the integrator's
     `simengine evaluate|card` (`worth_humans(df)` reproduces `kanit bedel`)
   - the dataset adaptors (`adaptor/oe.py`, `adaptor/twin.py`, which belong to bench)
   - `kod/lig.py`, which is outside the package
 - `python -m simengine.evidence.onkayit {muhurle|dogrula|zincir|notla}` still works.
-- Tests *(this port)*: 49 tests run in about 28 s (the 28 ported tests, 15 API tests and 6 equivalence
+- Tests *(this port)*: 100 evidence tests run in about 37 s (ported, API, extras, the gap tests in
+  `test_evidence_gaps.py` and 6 equivalence
   tests, which skip when the original is absent).

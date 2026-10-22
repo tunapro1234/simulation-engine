@@ -23,7 +23,7 @@ signal.
 
 | component | file | what it does |
 |---|---|---|
-| `survey`, `survey_frame` | `survey.py` | Survey panel. Likert questions get a free-text answer plus a direct 1-5 score, and optionally SSR on the text. Multiple-choice questions get an option letter. Half of the batches see the questions in reverse order. Control arms run by default. The result has bootstrap CIs per arm, a segment breakdown and quotes. |
+| `survey`, `survey_frame` | `survey.py` | Survey panel. Likert questions get a free-text answer plus a direct 1-5 score, and optionally SSR on the text. Numeric questions (`kind="numeric"`, `min`/`max`, e.g. a 0-100 slider) get a number. Multiple-choice questions get an option letter. `free_text=False` drops the free-text field. Each persona can see its own stimulus (`stimulus_col=` or `context={pid: text}`). Soft refusals are re-asked once and counted apart from parse failures. Control arms run by default. The result has bootstrap CIs per arm, a segment breakdown and quotes. See "Survey options" below. |
 | `SSR`, `SCALES` | `ssr.py` | Semantic similarity rating (Maier et al. 2025). It embeds the answer text, compares it with 5 anchor sentences, and returns a distribution and an expected score (or `to_probability`). `sentence-transformers` is imported lazily. The model loads offline from a local cache. `encoder=` takes any texts-to-vectors function. |
 | `ab_test`, `ab_frame` | `ab.py` | PAARS-style A/B test on a persona panel. Each persona gives a 1-10 score per variant, a choice and a reason. Half of the panel sees the variants reversed, which gives the position effect. Output: winner, preference share, bootstrap win probability, sign test, control arms, `confidence` (`confidence_check`), and a direction check when `truth` is given. |
 | `paars_decision` | `ab.py` | Forced-choice decision from per-persona A/B scores, with a confidence threshold (0.65). |
@@ -37,7 +37,8 @@ signal.
 | `PredictionSpec`, `AMAZON`, `prompt_l0/l1/l2/ssr`, `profile_text`, `history_text` | `prediction.py` | All prompt wording. `PredictionSpec()` is neutral. `AMAZON` reproduces the measured talp73 prompts exactly (checked string-for-string against `talp73/kod/llm/istem.py` and `ssr.py`). |
 | `batch_calibrate` | `prediction.py` | Label-free batch calibration: `logit(p) − mean_item logit(p) + logit(prior_rate)`, clipped at 1e-3. It matches `talp73/kod/llm/kalibre.py` to 0.0 max abs difference on a random check. |
 | `retest_stats` | `prediction.py` | Test-retest of repeated samples: within-cell sd, share of identical cells, pairwise r, per-item signal vs noise, Spearman-Brown. |
-| `ask_panel`, `build_prompts`, `Usage` | `panel.py` | Batched persona questioning: one JSON object per persona id. It accepts an array, a single object, an `{id: {...}}` mapping or a wrapper. It remaps ids by position only when no id matched and the counts are equal. Missing answers are counted, not invented. |
+| `ask_panel`, `build_prompts`, `Usage` | `panel.py` | Batched persona questioning: one JSON object per persona id. It accepts an array, a single object, an `{id: {...}}` mapping or a wrapper. It remaps ids by position only when no id matched and the counts are equal. Missing answers are counted, not invented. Soft refusals are detected, kept out of the disk cache and re-asked once with `REFRAME_NOTE`. Every call carries a ledger `tag`. |
+| `looks_like_refusal`, `REFRAME_NOTE` | `panel.py` | Refusal check used by `ask_panel`: `simengine.llm.looks_like_refusal`, or a small local regex if that import fails. It is only applied to replies that have no usable JSON answer. `REFRAME_NOTE` is the research-forecast wording used for the re-ask. |
 | `schema_responder` | `panel.py` | Deterministic `FakeLLM` responder for every prompt in this module (dry runs and tests). It is never a measurement. |
 | `as_personas`, `PersonaView`, `control_personas`, `control_plan` | `personas.py` | Duck-typed persona adapter for TALP-schema dicts, objects with `to_dict()`, flat dicts and strings. Control arms: `no_persona` gets a neutral "typical adult consumer" text. `persona_swap` applies a cyclic shift: each persona keeps its own id, name and tagline and takes the next persona's content. `control_plan` keeps the control arms within the main arm's call count. |
 | `FieldSpec`, `validate_answers`, `ask_constrained`, `ConstrainedResult`, `completion_summary` | `constrained.py` | Schema-constrained JSON answers (int / float / choice / text, bounds, choices by value or display text). A failed check re-prompts with the error text, up to 8 calls; 4+ fields are asked one at a time with the earlier answers in the prompt. A field that never validates stays missing and is logged. `completion_summary` gives n_planned, n_completed and per-field failure counts per condition. |
@@ -89,6 +90,102 @@ f = sim.batch_calibrate(f, prior_rates=out_of_sample_rates, col="pred_L1")
 from simengine.evidence import evaluate
 report = evaluate(f, title="L1 purchase", ours="L1")
 ```
+
+## Survey options
+
+Each of these came from the D2 blind rehearsal (22 Oct, `SIMENGINE-EKSIK.md` #6-#9).
+
+**Numeric questions and `free_text=False`.** A question with `kind="numeric"` (also accepted: `number`,
+`slider`) asks for a number in `[min, max]`. The defaults are 0 and 100. `labels=[at_min, at_max]` names the
+two ends. A value outside the range, or a value that cannot be parsed, counts as unparsed. It is never clipped
+into range. `free_text` (per question, or for the whole survey) defaults to True. With False, the Likert answer
+sentence or the numeric reason is not asked for, which cuts most of the output tokens. SSR then has no text, so
+only the direct score is used, and a warning says so. In the rehearsal, the free text was about 2,600 output
+tokens per call, most of the cost.
+
+```python
+q = {"id": "pol", "text": "How much do you support this policy?", "kind": "numeric", "min": 0, "max": 100,
+     "labels": ["fully oppose", "fully support"], "free_text": False}
+res = sim.survey(panel, [q], llm=llm)
+res["questions"][0]["overall"]["mean"]      # {value, low, high, n}; also "median", "sd"
+res["questions"][0]["unparsed"]             # answers out of range or unreadable
+sim.survey_frame(res)                        # pred_value (persona), pred_no_persona, pred_persona_swap
+```
+
+**Per-person stimulus.** Use `stimulus_col="message"` to read each persona's own stimulus from a flat-dict key,
+a TALP facet (`from_table` puts every column there), an identity field, a trait, or an attribute. You can also
+pass `context={persona_id: text}`. A string `context` is still shown to everyone. Control arms keep each id's
+own stimulus. With `stimulus_batching="group"` (the default), only personas with the same stimulus share a
+batch, and that stimulus goes into the shared context block. This costs a few more calls (at least one per
+distinct stimulus). With `"inline"`, stimuli are mixed in one batch, and each one is shown under its person as
+`Shown to this person: ...`. The result has `stimuli` ({pid: text}), and the person-level frame has a
+`stimulus` column. With `stimulus_col=`, that field is removed from the profile text of every arm, so the
+stimulus appears once per person (as context) and the `persona_swap` body does not carry the next persona's
+stimulus.
+
+```python
+res = sim.survey(panel, ["Would you share this post?"], llm=llm, stimulus_col="condName",
+                 context="You are scrolling your social media feed.")
+```
+
+**Soft refusals.** In the rehearsal, Haiku 5.5 answered 59 of 150 survey batches with a plain-text refusal
+("I can't produce this as a survey dataset ..."). These had `stop_reason` end_turn and no error. Without the
+fix, 137 of 602 personas went unanswered and the refusals were cached. Now `ask_panel` treats a reply with no
+usable JSON answer that reads like a refusal (or a `RefusalError` slot) as refused. It passes
+`cache_if=` to the backend, so the refusal is returned but not cached and a rerun asks again. It then re-asks
+that batch once, with `REFRAME_NOTE` ("This is a research forecast. Estimate how a person with these
+characteristics would most likely answer; give your best guess ...") added to the system and user prompts. The
+re-ask has a different prompt, so it gets its own cache entry. Options:
+`refusal_retry=False` skips the re-ask, and `cache_refusals=True` keeps refusals in the cache.
+The survey result reports refusals and parse failures separately:
+
+| key | meaning |
+|---|---|
+| `refused` | main-arm personas left unanswered because their batch was still refused after the re-ask |
+| `unparsed` | main-arm personas left unanswered for any other reason (no JSON, missing id, ...) |
+| `refusal_rate` | share of main-arm first-pass batches that were refused |
+| `unparsed_items` | persona × question answers that were present but invalid (e.g. out of range) |
+| `refusals` | per arm: `calls`, `refused_calls`, `recovered_calls`, `refusal_rate`, `refused_personas` |
+
+The warnings list both counts, for example `137 personas unanswered (12 refused after the reframed re-ask,
+125 unparsed or missing)`. `usage` also has `refused_calls`, `reframed_calls`, `recovered_calls`, `refused`
+and `refusal_rate`. `Usage.missing` no longer includes refused personas. We have not yet measured how many
+refusals the re-ask recovers.
+
+**Empty replies and failed calls.** An `EmptyResponseError` slot (thinking used the whole `max_tokens`) is
+re-asked once with `max_tokens=max(2 * max_tokens, 4000)` (at most 32000), or with `empty_retry_kw=`. A batch
+that still has no reply, or that failed with another `LLMError`, counts as unparsed instead of aborting the
+survey. `usage` reports `empty_calls`, `empty_recovered`, `error_calls` and `last_error`, and a warning is
+added. The survey raises the first error only when no main-arm persona got an answer. Programming errors
+(anything that is not an `LLMError`) are still raised.
+
+```python
+res = sim.survey(panel, qs, llm=llm, empty_retry_kw={"thinking": "off"})   # Haiku: re-ask without thinking
+res["usage"]["empty_calls"], res["usage"]["error_calls"]
+```
+
+**Numeric answers.** `"1e2"` parses as 100. When every answer is between -1 and 1 on a scale wider than 1
+(for example 0.75 on a 0-100 slider), a warning says the model may be answering with fractions.
+Prompts without any free-text field no longer carry the "Free-text fields in ..." line.
+
+**Shared call path (`ask_many`).** `segment_distribution`, `persona_distribution`, `predict_people` and
+`ab_many` call `sim.panel.ask_many`, the same path as `ask_panel`. Soft refusals are kept out of the cache
+and re-asked once with `REFRAME_NOTE_GENERIC` ("This is a research forecast. Give your best estimate, in the
+requested JSON format."). Empty replies are re-asked with a larger budget. A cell or person still without a
+reply counts as invalid / failed. Each of these runners takes `ask_kw=` (`refusal_retry`, `cache_refusals`,
+`empty_retry`, `empty_retry_kw`), and `ab_many` also takes `usage=`.
+
+```python
+res = sim.segment_distribution(llm, segs, qs, ask_kw={"empty_retry_kw": {"thinking": "off"}})
+res["usage"]["refused_calls"], res["usage"]["empty_calls"], res["invalid"]
+statuses = []
+replies = sim.ask_many(llm, prompts, max_tokens=300, statuses=statuses)   # None where refused/empty/failed
+```
+
+**Cost per arm.** `ask_panel` passes `tag=` to `llm.map`. `survey` uses `survey:persona`,
+`survey:no_persona` and `survey:persona_swap`. If the backend has its own `tag`, the two are joined as
+`<backend tag>:survey:<arm>`. Other runners use their `ask_panel` tag, for example `strategy:<scenario>`.
+`ask_panel(..., llm_tag=...)` overrides it.
 
 ## When it works and when it does not (measured)
 
@@ -279,7 +376,10 @@ Deviations from replicant, all deliberate:
 
 ## Tests
 `tests/test_sim_parse.py`, `test_sim_panel.py`, `test_sim_runners.py`, `test_sim_distribution.py`,
-`test_sim_prediction.py`, `test_sim_evaluate.py`, `test_sim_constrained.py` (74 tests, offline, FakeLLM, under 1 s):
+`test_sim_prediction.py`, `test_sim_evaluate.py`, `test_sim_constrained.py`, `test_sim_survey_gaps.py` (refusals,
+numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
+profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line)
+(109 tests, offline, FakeLLM, under 1 s):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'

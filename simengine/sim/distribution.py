@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from ._stats import to_jsonable
-from .panel import Usage
+from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many
 from .parse import normalize_probs, parse_distribution, parse_json, unwrap
 from .personas import as_personas
 
@@ -96,13 +96,17 @@ def distribution_prompt(framing: str, group: str, question: dict, *, population:
 
 def segment_distribution(llm, segments, questions, *, population: str = "adults", source: str | None = None,
                          when: str | None = None, framings: Mapping[str, str] | None = None,
-                         max_tokens: int = 300, fallback: str = "uniform") -> dict:
+                         max_tokens: int = 300, fallback: str = "uniform", ask_kw: dict | None = None) -> dict:
     """One call per segment x question x framing; vectors averaged over framings.
 
     segments: {key: group description} or a list of descriptions. framings default: FRAMINGS_NAMED when
     `source` is given (the pre-registered arm), else FRAMINGS_HIDDEN. An invalid answer becomes a uniform
     vector before averaging (fallback='uniform', as in the measured kit) or is skipped (fallback='skip').
-    Returns {"dist": {segment: {question_id: [p...]}}, "cells": [...], "invalid": n, "calls": n, "usage"}."""
+    Returns {"dist": {segment: {question_id: [p...]}}, "cells": [...], "invalid": n, "calls": n, "usage"}.
+    Calls go through `sim.panel.ask_many`: a soft refusal is not cached and is re-asked once with a
+    research-forecast note; an empty reply (EmptyResponseError) is re-asked once with a larger max_tokens; a cell
+    still without a reply counts as invalid (usage refused_calls / empty_calls / error_calls). `ask_kw` passes
+    options to ask_many (refusal_retry, cache_refusals, empty_retry, empty_retry_kw)."""
     segs = _segments(segments)
     qs = _questions(questions)
     framings = dict(framings or (FRAMINGS_NAMED if source else FRAMINGS_HIDDEN))
@@ -110,10 +114,10 @@ def segment_distribution(llm, segments, questions, *, population: str = "adults"
     prompts = [("", distribution_prompt(framings[v], segs[s], q, population=population, source=source, when=when))
                for v, s, q in jobs]
     usage = Usage()
-    resp = llm.map(prompts, max_tokens=max_tokens) if prompts else []
+    resp = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="distribution",
+                    reframe=REFRAME_NOTE_GENERIC, **(ask_kw or {}))
     cells, acc, invalid = [], {}, 0
     for (v, s, q), r in zip(jobs, resp):
-        usage.add(r, "distribution")
         k = len(q["options"])
         p = parse_distribution(getattr(r, "text", None), k, q["options"])
         if p is None:
@@ -135,7 +139,7 @@ def _person_block(questions) -> str:
 
 
 def persona_distribution(llm, personas, questions, *, setting: str = "a survey of adults", batch: int = 12,
-                         session: str = "s1", max_tokens: int | None = None) -> dict:
+                         session: str = "s1", max_tokens: int | None = None, ask_kw: dict | None = None) -> dict:
     """Per-persona probability vectors, many respondents per call (k2.py arm (iii), OLAS_ISTEM, generalised:
     `setting` replaces the measured "a public opinion survey of US adults in October 2020, ..." line; tables are
     filled within segment).
@@ -162,8 +166,9 @@ def persona_distribution(llm, personas, questions, *, setting: str = "a survey o
     usage = Usage()
     person: dict[str, dict] = {}
     invalid = 0
-    for (_, ids), r in zip(plan, llm.map([p for p, _ in plan], max_tokens=max_tokens)):
-        usage.add(r, "persona_distribution")
+    resp = ask_many(llm, [p for p, _ in plan], max_tokens=max_tokens, usage=usage, tag="persona_distribution",
+                    reframe=REFRAME_NOTE_GENERIC, **(ask_kw or {}))
+    for (_, ids), r in zip(plan, resp):
         js = parse_json(getattr(r, "text", None))
         js = js if isinstance(js, dict) else {}
         for pid in ids:

@@ -25,6 +25,7 @@ import pandas as pd
 
 GOREVLER = ("ikili", "cok_sinif", "dagilim", "surekli", "ab")
 ON_EK = "tahmin_"
+TEST_ADLARI = ["test", "deger", "degerlendirme", "holdout"]
 
 
 def _vektor(x):
@@ -114,12 +115,24 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
     notlar = []
     tam = df.reset_index(drop=True).copy()
     if "bolum" in tam:
-        test_maske = tam["bolum"].astype(str).str.lower().isin(["test", "deger", "degerlendirme", "holdout"])
+        test_maske = tam["bolum"].astype(str).str.lower().isin(TEST_ADLARI)
         egitim = tam[~test_maske].reset_index(drop=True)
         d = tam[test_maske].reset_index(drop=True)
+        if len(d) == 0:
+            raise ValueError(_test_yok_mesaji(tam))
         notlar.append(f"bolum sütunu: {len(d)} test, {len(egitim)} eğitim satırı; metrikler yalnız testte")
     else:
         egitim, d = None, tam
+    # gerçeği eksik satırlar (henüz açılmamış ya da yanıtsız) değerlendirilemez: sayısıyla düşürülür
+    eks = _eksik(d["gercek"])
+    if eks.any():
+        if eks.all():
+            raise ValueError("'gercek' sütununun tamamı eksik: gerçek yok (evaluate bu durumda 'awaiting truth' "
+                             "raporu döner)")
+        notlar.append(f"gerçeği eksik satırlar düşürüldü: {int(eks.sum())} / {len(d)}")
+        d = d[~eks].reset_index(drop=True)
+    if egitim is not None and len(egitim):
+        egitim = egitim[~_eksik(egitim["gercek"])].reset_index(drop=True)
     gorev = gorev or gorev_bul(d, tsut)
     if gorev not in GOREVLER:
         raise ValueError(f"bilinmeyen görev: {gorev} ({GOREVLER})")
@@ -161,6 +174,32 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
     segs = [c for c in d.columns if c == "segment" or c.startswith("seg_")]
     return Veri(df=d, gorev=gorev, yontemler=[c[len(ON_EK):] for c in tsut], siniflar=siniflar,
                 segmentler=segs, egitim=egitim, tam=tam, notlar=notlar)
+
+
+def _eksik(seri: pd.Series) -> np.ndarray:
+    """None / NaN / boş metin hücreleri (vektör hücreleri eksik sayılmaz)."""
+    return np.array([v is None or (isinstance(v, str) and not v.strip()) or (np.isscalar(v) and pd.isna(v))
+                     for v in seri], dtype=bool)
+
+
+def gercek_yok(df: pd.DataFrame) -> bool:
+    """Gerçek sütunu yok ya da (bolum varsa test satırlarında) tamamen eksik mi: mühürlü, gerçeği bekleyen tahmin."""
+    if "gercek" not in df.columns or len(df) == 0:
+        return True
+    g = df["gercek"]
+    if bool(_eksik(g).all()):
+        return True
+    if "bolum" in df.columns:
+        g = g[df["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()]
+        if len(g) == 0:
+            raise ValueError(_test_yok_mesaji(df))
+    return bool(_eksik(g).all())
+
+
+def _test_yok_mesaji(df: pd.DataFrame) -> str:
+    vals = sorted({str(v) for v in df["bolum"].dropna().unique()})[:8]
+    return (f"no test rows in split column 'bolum' (values: {vals}; accepted test names: {TEST_ADLARI}); "
+            "rename the evaluation rows or drop the column")
 
 
 def _normalle(v):

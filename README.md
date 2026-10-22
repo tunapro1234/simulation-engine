@@ -51,13 +51,35 @@ df = pd.read_csv("data/musteriler.csv")                              # kişi ba�
 panel = se.persona.from_table(df, id_col="uid", segment="income_tier", forbidden=["hedef"])
 llm = se.FakeLLM(se.sim.schema_responder())   # gerçek: se.llm.Claude(model="claude-haiku-5-5", budget_usd=2)
 res = se.sim.survey(panel, "Online alışverişten keyif alırım.", llm=llm)
+se.seal(se.sim.survey_frame(res), "anket tahminleri, gerçek açılmadan önce")   # tek mühür -> .onkayit/zincir.jsonl
 frame = se.sim.survey_frame(res, {"q1": dict(zip(df.uid, df.hedef))}).dropna(axis=1, how="all")
 frame["pred_persistence"] = frame.group.map(dict(zip(df.uid, df.gecen_yil)))
-rep = se.evaluate(frame, title="keyif", ours="score", task="continuous", unlabeled_baselines=["persistence"])
+rep = se.evaluate(frame, title="keyif", ours="score", task="continuous", unlabeled_baselines=["persistence"],
+                  prereg=".onkayit")
 print(se.evidence.summary(rep)["headline_en"]); se.card(rep, "runs/kart.md"); se.dashboard([rep], "runs/pano.html")
 ```
 
 Çalışan sürümü: `python examples/quickstart.py` (çevrimdışı, ~4 sn). Uçtan uca demo: `simengine demo`.
+
+`se.seal` ile `se.evidence.seal` aynı işlevdir (tek mühür); `evaluate(prereg=...)` ve `--prereg` hem bunun
+`zincir.jsonl`'ini hem `se.research.seal`'in `chain.jsonl`'ini okur.
+
+Kör provadan (D2, 22 Eki) sonra eklenenler, her biri bir iki satır (ayrıntı modül belgelerinde):
+
+- **Haiku düşünme bütçesi:** küçük `max_tokens` + açık düşünme boş metin döndürebilir; `thinking="off"` ver.
+  1024'ün altında `ThinkingBudgetWarning`, `max_tokens`'ta kesilen boş yanıtta `EmptyResponseError` (önbelleğe yazılmaz).
+- **Ortak harcama logu:** `SIMENGINE_SPEND_LOG` / `SIMENGINE_AGENT` ortam değişkenleri ya da `Claude(spend_log=, agent=)`;
+  her gerçek çağrı için bir TSV satırı (zaman, ajan, model, giriş, çıkış, usd, etiket).
+- **Yumuşak ret:** `se.looks_like_refusal`; `survey` reti önbelleğe yazmaz, bir kez farklı çerçeveyle yeniden sorar,
+  `refused` / `unparsed` / `refusal_rate` alanlarını ayrı verir. Kendi çağrında `complete(..., cache_if=...)`.
+- **Anket:** `kind="numeric"` (0-100 kaydırıcı, `min`/`max`), `free_text=False`, kişi başı uyarıcı (`stimulus_col=`
+  ya da `context={pid: metin}`); `from_table` boş/tekrarlı id'de sayısıyla durur, `id_col=None` satır numarası verir.
+- **Grup aktarımı:** `se.GroupTransfer` (grup düzeyi ridge + kişi sapması, isteğe bağlı LLM grup önseli) ve
+  `se.oof_predict(model, df, features=, target=, group=)` (grup dışarıda çapraz uydurma).
+- **Kanıt:** `baselines_oof=` (etiketle eğitilmiş, çapraz uydurmalı tabanlar; rozet en güçlü tabana karşı),
+  `ceiling_col=` (model/oracle tavanı), `aggregate_by=` / `se.evaluate_aggregate` (grup düzeyi), büyük tabloda
+  çarpan 2.000 satırlık alt örneklemle, gerçek yokken mühürlü `awaiting truth` kartı; sayısal ezber için
+  `se.correlation_audit` ve `memorization_audit(tolerance=, relative=True)`.
 
 ## Komut satırı
 
@@ -65,6 +87,7 @@ print(se.evidence.summary(rep)["headline_en"]); se.card(rep, "runs/kart.md"); se
 simengine demo                                                   # sentetik veri, FakeLLM -> runs/demo/
 simengine evaluate data/frame.csv --ours stack --raw llm --task binary --primary auc \
     --unlabeled-baselines persistence --prereg .onkayit            # -> runs/frame-evidence/
+simengine evaluate data/test_frame.csv --ours stack --task binary --primary auc --prereg .onkayit   # gerçek yok: awaiting truth
 simengine card runs/demo/report.json --dashboard runs/pano.html --lang en
 simengine bench list -v                                          # görevler, kabul edilen seçenekler, dosya düzeni
 simengine bench run gss upworthy:split=holdout --data-root <veri-kökü>
@@ -74,8 +97,12 @@ simengine loop examples/loop.json --max-turns 10
 - `--primary` verilmezse görev varsayılanı kullanılır: binary/multiclass `accuracy` (en sık sınıf > %60 ise
   `macro_f1`), distribution `one_minus_tvd`, continuous `pearson` (gerçek değer 0-1 aralığındaysa `one_minus_mae`),
   ab `pair_sign`. Ön kayıtta yazdığın metriği her zaman `--primary` ile ver; `evaluate` verilmediğinde uyarır.
-- Çıktılar varsayılan olarak `runs/` altına yazılır (git dışı). `--prereg` dizininde `zincir.jsonl` yoksa
-  `evaluate` hata verir; `se.evidence.seal(...)` varsayılan olarak `.onkayit/` dizinine yazar.
+- Çıktılar varsayılan olarak `runs/` altına yazılır (git dışı). `--prereg` dizininde ne `zincir.jsonl` ne
+  `chain.jsonl` varsa `evaluate` hata verir; `se.seal(...)` (= `se.evidence.seal`) varsayılan olarak `.onkayit/`
+  dizinine yazar.
+- `evaluate` ek seçenekleri: `--baselines-oof T1,T2`, `--ceiling-col pred_oracle --ceiling-label oracle`,
+  `--aggregate-by group`, `--multiplier-max-rows N` (0 = tüm tablo), `--no-multiplier`. `truth` sütunu yoksa ya da
+  tümü boşsa `awaiting truth` kartı yazılır (çıkış kodu 0).
 - Rozetler: `high confidence`, `inconclusive`, `below baseline` (bizim − en güçlü taban GA'sı tümüyle sıfırın
   altında; araştırma kuralında bu da "kararsız" sayılır), `awaiting truth`.
 
@@ -94,9 +121,11 @@ simengine loop examples/loop.json --max-turns 10
 | `simengine.bench` | 10 kıyas görevi: 7 veri görevi (bank marketing, GSS, Open e-commerce, OpinionQA, SimBench, Twin-2K-500, Upworthy) + 3 oyun görevi (`econ_games_b01`, `ertan_wtp` veri istemez; `beebench_b01_prior` yerel b01 tablosunu okur) | [bench](docs/modules/bench.md) |
 | `simengine.cli` | `evaluate`, `card`, `bench`, `loop`, `demo` | bu dosya |
 
-Kısayollar: `se.Claude`, `se.FakeLLM`, `se.from_table`, `se.survey`, `se.ab_test`, `se.segment_distribution`,
-`se.predict_people`, `se.evaluate`, `se.card`, `se.dashboard`, `se.worth_humans`, `se.Loop`, `se.Space`, `se.Prereg`,
-`se.seal`, `se.play_games`, `se.distance_to_human`. Alt paketler ilk erişimde yüklenir.
+Kısayollar: `se.Claude`, `se.FakeLLM`, `se.CostLedger`, `se.EmptyResponseError`, `se.ThinkingBudgetWarning`,
+`se.looks_like_refusal`, `se.from_table`, `se.survey`, `se.survey_frame`, `se.ab_test`, `se.segment_distribution`,
+`se.predict_people`, `se.GroupTransfer`, `se.oof_predict`, `se.evaluate`, `se.evaluate_aggregate`, `se.card`,
+`se.dashboard`, `se.worth_humans`, `se.memorization_audit`, `se.correlation_audit`, `se.seal`, `se.chain`, `se.Loop`,
+`se.Space`, `se.Prereg`, `se.play_games`, `se.distance_to_human`. Alt paketler ilk erişimde yüklenir.
 
 Örnekler (`examples/`): `quickstart.py`, `ab_test.py`, `segment_distribution.py`, `research_loop.py` + `loop.json`,
 `abm_adoption.py`, `econ_games.py` (persona yöntemleri → oyunlar → insana uzaklık → kıyas → kimi cezalandırmalı

@@ -35,15 +35,20 @@ panel = se.persona.from_table(df, id_col="uid", segment="income_tier", forbidden
 llm = se.FakeLLM(se.sim.schema_responder())
 res = se.sim.survey(panel, [{"id": "q1", "text": "I enjoy shopping online.", "kind": "likert5"}], llm=llm, B=300)
 
-# 4. EvalFrame: truth + pred_<method> per person, plus a label-free baseline the LLM must beat.
+# 4. Seal the predictions before the truth is joined (one seal API: se.seal = se.evidence.seal).
+registry = out / ".onkayit"
+rec = se.seal(se.sim.survey_frame(res), "quickstart predictions before truth", registry=registry)
+print("sealed:", str(rec.get("sha256"))[:12])
+
+# 5. EvalFrame: truth + pred_<method> per person, plus a label-free baseline the LLM must beat.
 frame = se.sim.survey_frame(res, truth={"q1": dict(zip(df.uid, df.enjoys_online.astype(float)))})
 frame = frame.dropna(axis=1, how="all")                       # SSR columns are empty when SSR is off
 last = dict(zip(df.uid, df.orders_last_year))
 frame["pred_persistence"] = [float(np.clip(1.5 + last[g] / 3, 1, 5)) for g in frame.group]
 
-# 5. Evidence: baseline ladder, paired cluster-bootstrap CIs, audits, card, dashboard.
+# 6. Evidence: baseline ladder, paired cluster-bootstrap CIs, audits, seal table, card, dashboard.
 report = se.evidence.evaluate(frame, title="quickstart (FakeLLM)", ours="score", task="continuous",
-                              unlabeled_baselines=["persistence"], B=300)
+                              unlabeled_baselines=["persistence"], B=300, prereg=registry)
 print(se.evidence.summary(report)["headline"])
 print(se.evidence.card(report, out / "card.md")[:600])
 se.evidence.dashboard([report], out / "dashboard.html")

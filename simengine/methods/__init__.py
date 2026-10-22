@@ -21,6 +21,7 @@ from .next_action import (Markov2Baseline, NextActionRanker, add_history, attach
                           hit_at_k, markov2_score, negative_sample, top1, transition_priors)
 from .twin import (TwinStack, base_predict, binned_median, column_correlation, donor_sample,
                    pooled_logistic_oof)
+from .transfer import GroupTransfer, oof_predict
 from ._util import lightgbm_available
 
 __all__ = [
@@ -48,5 +49,7 @@ __all__ = [
     "fit_mixture_weights", "MixtureFit", "UnidentifiedWarning", "identifiability", "mixture", "probe_types",
     "ProbeGame", "choice_game", "numeric_game", "dictator_game", "charness_rabin_games",
     "CR_GAMES", "CR_HUMAN_LEFT", "ENGEL_DICTATOR", "THEORY_TYPES", "HUMANIZING_PREFIX", "HORTON_GPT4O_WEIGHTS",
+    # group transfer + out-of-fold helper
+    "GroupTransfer", "oof_predict",
     "lightgbm_available",
 ]

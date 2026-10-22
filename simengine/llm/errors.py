@@ -31,4 +31,14 @@ class RefusalError(LLMError):
     """The model answered with stop_reason == "refusal". Not cached."""
 
 
-__all__ = ["LLMError", "StopError", "AuthError", "SpendLimitError", "BudgetExceeded", "RefusalError"]
+class EmptyResponseError(LLMError):
+    """The reply has no text and stop_reason == "max_tokens": thinking used the whole output budget.
+    The call is billed (ledger row) but not cached and not retried (the same request would fail again)."""
+
+
+class ThinkingBudgetWarning(UserWarning):
+    """max_tokens is small while thinking is on; thinking tokens count toward max_tokens."""
+
+
+__all__ = ["LLMError", "StopError", "AuthError", "SpendLimitError", "BudgetExceeded", "RefusalError",
+           "EmptyResponseError", "ThinkingBudgetWarning"]

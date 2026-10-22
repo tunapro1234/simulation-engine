@@ -1,7 +1,8 @@
 """simengine.sim: LLM simulation runners.
 
 Runners (each returns a JSON-safe dict; a matching *_frame turns it into an EvalFrame):
-  survey / survey_frame               survey panel, Likert (direct score + optional SSR) and multiple choice
+  survey / survey_frame               survey panel, Likert (direct score + optional SSR), numeric and choice;
+                                      per-person stimuli, refusal re-ask and accounting
   ab_test / ab_frame / ab_many        A/B test on a persona panel (PAARS-style), many-test batch prompt
   roundtable / roundtable_frame       multi-round group discussion
   strategy / strategy_frame           2+ scenarios x segment
@@ -21,7 +22,8 @@ from .ab import ab_frame, ab_many, ab_test, confidence_check, paars_decision
 from .constrained import ConstrainedResult, FieldSpec, ask_constrained, completion_summary, validate_answers
 from .distribution import (DIST_TEMPLATE, FRAMINGS_HIDDEN, FRAMINGS_NAMED, distribution_frame, distribution_prompt,
                            persona_distribution, segment_distribution, w1_ordinal)
-from .panel import Usage, ask_panel, build_prompts, schema_responder
+from .panel import (REFRAME_NOTE, REFRAME_NOTE_GENERIC, Usage, ask_many, ask_panel, build_prompts, looks_like_refusal,
+                    schema_responder)
 from .parse import normalize_probs, parse_distribution, parse_item_probs, parse_json, parse_text_fields
 from .personas import PersonaView, as_persona, as_personas, control_personas, control_plan
 from .prediction import (AMAZON, PredictionSpec, batch_calibrate, history_text, predict_people, prediction_frame,
@@ -40,7 +42,8 @@ __all__ = [
     "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE",
     "PredictionSpec", "AMAZON", "predict_people", "prediction_frame", "prompt_l0", "prompt_l1", "prompt_l2",
     "prompt_ssr", "profile_text", "history_text", "batch_calibrate", "retest_stats",
-    "ask_panel", "build_prompts", "Usage", "schema_responder",
+    "ask_panel", "ask_many", "build_prompts", "Usage", "schema_responder", "looks_like_refusal", "REFRAME_NOTE",
+    "REFRAME_NOTE_GENERIC",
     "PersonaView", "as_persona", "as_personas", "control_personas", "control_plan",
     "parse_json", "normalize_probs", "parse_distribution", "parse_item_probs", "parse_text_fields",
     "FieldSpec", "ConstrainedResult", "validate_answers", "ask_constrained", "completion_summary",

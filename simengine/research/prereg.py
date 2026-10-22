@@ -485,6 +485,42 @@ def _chain_read(registry_dir) -> list:
         return [json.loads(s) for s in f if s.strip()]
 
 
+EVIDENCE_CHAIN_NAME = "zincir.jsonl"     # chain written by simengine.evidence.seal / se.seal (Turkish keys)
+_DEFAULT_REGISTRIES = (".prereg", ".onkayit")
+_EVIDENCE_TO_EN = {"sira": "seq", "zaman": "time", "zaman_utc": "time_utc", "satir": "rows", "sutun": "cols",
+                   "sutunlar": "columns", "aciklama": "description", "kaynak": "source", "arsiv": "archive",
+                   "onceki": "prev", "onceki_kayit": "prev_record", "kayit_hash": "record_hash"}
+
+
+def _seal_records(registry_dir) -> list:
+    """Seal records for verify_seal / grade_sealed: this module's chain.jsonl plus an evidence-format zincir.jsonl
+    (se.seal / evidence.seal) in the same directory, its records given English key aliases and
+    "chain": "zincir.jsonl". When the directory holds neither and is a default name ('.prereg' / '.onkayit'), the
+    sibling default directory is read, so a seal made with either API is found. Oldest first within each file."""
+    def read(d: Path) -> list:
+        out = list(_chain_read(d))
+        z = d / EVIDENCE_CHAIN_NAME
+        if z.exists():
+            with open(z, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        r = json.loads(line)
+                        r2 = dict(r)
+                        for tr, en in _EVIDENCE_TO_EN.items():
+                            if tr in r and en not in r2:
+                                r2[en] = r[tr]
+                        r2["chain"] = EVIDENCE_CHAIN_NAME
+                        out.append(r2)
+        return out
+    d = Path(registry_dir)
+    recs = read(d)
+    if not recs and d.name in _DEFAULT_REGISTRIES:
+        for other in _DEFAULT_REGISTRIES:
+            if other != d.name:
+                recs = read(d.parent / other)
+    return recs
+
+
 def _record_hash(prev_record_hash, rec: dict) -> str:
     body = {k: v for k, v in rec.items() if k != "record_hash"}
     return _sha(((prev_record_hash or "") + _json(body)).encode("utf-8"))
@@ -533,9 +569,10 @@ def seal(predictions, description: str, registry_dir=".prereg", *, git_commit: b
 
 
 def verify_seal(predictions, sha256: str | None = None, registry_dir=".prereg") -> dict:
-    """Does the prediction's canonical hash match `sha256`, or any record in the chain? Returns {matched, record, sha256}."""
+    """Does the prediction's canonical hash match `sha256`, or any record in the chain? Returns {matched, record, sha256}.
+    Reads seals of both APIs (this module's chain.jsonl and se.seal's zincir.jsonl, see `_seal_records`)."""
     sha = _sha(canonical_bytes(predictions))
-    hits = [k for k in _chain_read(registry_dir) if k["sha256"] == sha]
+    hits = [k for k in _seal_records(registry_dir) if k.get("sha256") == sha]
     rec = hits[0] if hits else None
     matched = (sha == sha256.lower()) if sha256 else rec is not None
     return {"matched": matched, "record": rec, "sha256": sha}

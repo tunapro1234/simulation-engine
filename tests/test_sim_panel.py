@@ -120,6 +120,7 @@ class TestAskPanel(unittest.TestCase):
         out = ask_panel(FakeLLM(responder), self.ps, "t", self.fields, batch=2, usage=u)
         self.assertEqual({k: v["score"] for k, v in out.items()}, {"u0": 3, "u1": 4, "u2": 5})
         self.assertEqual((u.missing, u.unparsed_calls), (2, 1))
+        self.assertEqual((u.refused, u.refused_calls), (0, 0))      # a bare "I can't." is not a soft refusal
 
     def test_positional_remap_only_when_no_id_matches(self):
         def responder(system, user):

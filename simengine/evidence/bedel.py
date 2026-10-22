@@ -17,14 +17,24 @@ from __future__ import annotations
 import numpy as np
 
 SUTUN_BOOT_ESIK = 20
+# birim bootstrap'ında en az bu kadar birimli sütunda hızlı yol (ortak etiketli örneklem indeksleri). evaluate'in
+# alt örneklem boyuyla (api.MULTIPLIER_MAX_ROWS = 2000) aynı: 2000 satırdan küçük veri özgün yoldan, birebir aynı GA ile.
+HIZLI_ESIK = 2000
 
 
-def _mse(y, f, n, R, rng):
+def _indeks(N, n, R, rng):
+    """R tekrar × n etiketli birim, iadesiz (her satırda farklı n birim)."""
+    return np.argpartition(rng.random((R, N)), n, axis=1)[:, :n]
+
+
+def _mse(y, f, n, R, rng, idx=None):
     """Tek sütun: (klasik MSE, PPI++ MSE), θ = y'nin kitle ortalaması. Klasik MSE kapalı form (iadesiz örneklem
-    varyansı S²(1 − n/N)/n); çarpık sütunlarda Monte Carlo oranının gürültüsünü yarıya indirir."""
+    varyansı S²(1 − n/N)/n); çarpık sütunlarda Monte Carlo oranının gürültüsünü yarıya indirir.
+    idx: önceden çekilmiş (R, n) etiketli örneklem indeksleri (hızlı bootstrap'ta tekrarlar arasında ortak)."""
     N = len(y)
     mu, fm = y.mean(), f.mean()
-    idx = np.argpartition(rng.random((R, N)), n, axis=1)[:, :n]
+    if idx is None:
+        idx = _indeks(N, n, R, rng)
     ys, fs = y[idx], f[idx]
     yb, fb = ys.mean(1), fs.mean(1)
     cov = ((ys - yb[:, None]) * (fs - fb[:, None])).sum(1) / (n - 1)
@@ -62,8 +72,14 @@ def _rho2(y, f):
     return float(np.corrcoef(y, f)[0, 1] ** 2) if f.std() > 0 else 0.0
 
 
-def olc(sutunlar, n: int = 100, R: int = 400, B: int = 200, tohum: int = 0) -> dict:
-    """sutunlar: [(y, f), ...] — her biri bir sütunun (soru/kitle) gerçek ve önsel değerleri."""
+def olc(sutunlar, n: int = 100, R: int = 400, B: int = 200, tohum: int = 0, hizli: bool | None = None) -> dict:
+    """sutunlar: [(y, f), ...] — her biri bir sütunun (soru/kitle) gerçek ve önsel değerleri.
+
+    hizli: birim bootstrap'ında (< SUTUN_BOOT_ESIK sütun) her tekrar için yeni (1000, N) rastgele matris ve argpartition
+    yerine sütun başına bir kez çekilen (1000, n) etiketli örneklem indeksleri bütün bootstrap tekrarlarında ortak
+    kullanılır (ortak rastgele sayılar). Nokta kestirimi değişmez; GA'nın Monte Carlo gürültüsü azalır, süre ~N/n kat
+    kısalır. None (varsayılan): en büyük sütun en az HIZLI_ESIK (2000) birimliyse açık, yani yalnız evaluate'in 2000
+    satırlık alt örnekleminde ya da daha büyük veride; 2000'den küçük veride nokta ve GA özgün kanit ile aynı."""
     rng = np.random.default_rng(tohum)
     S, ix = _hazir(sutunlar, n, indeks=True)
     if not S:
@@ -89,14 +105,19 @@ def olc(sutunlar, n: int = 100, R: int = 400, B: int = 200, tohum: int = 0) -> d
         rb = np.sqrt(r2[k].mean(1))
         nokta["ga_turu"] = "sütun bootstrap"
     else:
+        if hizli is None:
+            hizli = int(Ns.max()) >= HIZLI_ESIK
+        ortak = [_indeks(len(y), n, 1000, rng) for y, _ in S] if hizli else [None] * len(S)
         cb, rb = [], []
         for _ in range(B):
             Sb = [(y[i], f[i]) for y, f in S for i in [rng.integers(0, len(y), len(y))]]
-            a, b, _ = np.array([_mse(y, f, n, 1000, rng) for y, f in Sb]).T
+            a, b, _ = np.array([_mse(y, f, n, 1000, rng, idx=ix_) for (y, f), ix_ in zip(Sb, ortak)]).T
             cb.append(a.sum() / b.sum())
             rb.append(np.sqrt(np.mean([_rho2(y, f) for y, f in Sb])))
         cb, rb = np.array(cb), np.array(rb)
         nokta["ga_turu"] = "birim bootstrap"
+        if hizli:
+            nokta["hizli_bootstrap"] = True   # ortak etiketli örneklem indeksleri (bkz. olc docstring)
     nokta["carpan_ga"] = [float(np.percentile(cb, 2.5)), float(np.percentile(cb, 97.5))]
     nokta["rho_ga"] = [float(np.percentile(rb, 2.5)), float(np.percentile(rb, 97.5))]
     nokta["teorik"] = float(1 / (1 - nokta["rho"] ** 2))

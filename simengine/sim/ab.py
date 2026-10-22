@@ -17,7 +17,7 @@ import pandas as pd
 
 from ._stats import (ALL, Emitter, bootstrap_ci, bootstrap_distribution, bootstrap_win, field_name, pick_quotes,
                      resolve_choice, sign_test, split_halves, to_jsonable, to_number)
-from .panel import Usage, ask_panel
+from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many, ask_panel
 from .parse import parse_json
 from .personas import as_personas, choose_lang, control_personas, control_plan, normalize_controls
 
@@ -299,12 +299,16 @@ JSON only."""
 
 
 def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYSTEM_MANY,
-            template: str = MANY_TEMPLATE, max_tokens: int | None = None) -> pd.DataFrame:
+            template: str = MANY_TEMPLATE, max_tokens: int | None = None, ask_kw: dict | None = None,
+            usage: Usage | None = None) -> pd.DataFrame:
     """Many pairwise A/B tests, all personas per call (port of sahne/prova/upworthy.py `oyla`).
     tests: DataFrame or list of dicts with columns test_id, a, b (texts). Returns one row per test:
     test_id, p_a = (votes for A + 0.5) / (votes + 1) (Laplace), n_votes, votes (list of dicts).
     The prompt defaults to the headline wording of the measured run; pass `system`/`template` for other content
-    (template fields: {readers}, {tests})."""
+    (template fields: {readers}, {tests}).
+    Calls go through `sim.panel.ask_many` (soft refusals not cached and re-asked once, empty replies re-asked with
+    a larger max_tokens, a failed call gives no votes); `ask_kw` passes its options, `usage` collects the counts."""
+    usage = usage if usage is not None else Usage()
     ps = as_personas(personas)
     df = pd.DataFrame(tests).reset_index(drop=True)
     for c in ("test_id", "a", "b"):
@@ -320,7 +324,8 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
     if max_tokens is None:
         max_tokens = min(16000, 200 + 45 * len(ps) * max(1, tests_per_call))
     votes: dict[str, list] = {}
-    for r in llm.map(prompts, max_tokens=max_tokens):
+    for r in ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="ab_many", reframe=REFRAME_NOTE_GENERIC,
+                      **(ask_kw or {})):
         data = parse_json(getattr(r, "text", None))
         for x in (data if isinstance(data, list) else []):
             if not isinstance(x, dict) or "|" not in str(x.get("id")):

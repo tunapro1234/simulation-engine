@@ -66,6 +66,16 @@ Ported from the TALP prep branches (read-only research code):
 - With only `id_col`, `auto_mapping` takes over. Columns named like TALP fields become identity and traits:
   `age` (numeric) becomes an age band, and `gender`/`sex` is normalized. **Every other column becomes a facet,
   so always put the target in `forbidden`.**
+- **Ids are checked first.** If the id column has empty/NaN values or duplicates, `from_table` (and
+  `from_history` with a `table`) raises `ValueError` with the counts and a fix hint, before building anything.
+  An empty id never becomes the string `"None"` or `"nan"`. `check_ids(df, id_col)` runs the same check on its
+  own. With `id_col=None` (or `Mapping(id_col=None)`), the rows are numbered instead: `"row0"`, `"row1"`, ...,
+  where the number is the row's position in `df` before sampling, so a sampled panel keeps stable ids.
+
+  ```python
+  sp.from_table(df, id_col="ResponseId")   # ValueError: id column 'ResponseId' (602 rows): 512 empty/NaN ids. ...
+  panel = sp.from_table(df, id_col=None, forbidden=["target"])   # ids row0, row1, ...
+  ```
 - `narrate(source, personas, context=...)`: an LLM writes the name, tagline, backstory and voice, and leaves
   the facets alone. Without `context`, the LLM may invent the sector.
 - `to_frames(personas)` returns `(people, features)`. `people` has `id`, `seg_*`, `segment` and

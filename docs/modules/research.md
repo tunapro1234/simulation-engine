@@ -162,3 +162,20 @@ ctrl = se.research.control_arm(loop, "random", workdir="runs/knn-random").run(fi
 
 seal(predictions_df, "forecast before truth", registry_dir="prereg")   # then grade_sealed(...) once truth exists
 ```
+
+## Seal: research vs evidence
+
+The top-level `se.seal` is `simengine.evidence.seal`, which writes `.onkayit/zincir.jsonl`.
+`simengine.research.seal` is unchanged: it has its own schema and writes `.prereg/chain.jsonl` with English keys.
+`verify_seal` and `grade_sealed` also read an evidence-format `zincir.jsonl` (written by `se.seal`) in the same
+directory, or in the sibling default directory when `.prereg` holds no chain. Those records get English aliases
+(`seq`, `time_utc`, `rows`, `description`, ...) and `"chain": "zincir.jsonl"`. `verify_chain` still checks only
+this module's `chain.jsonl`. Example: `se.seal(df, "x"); se.research.verify_seal(df)["matched"]` is True.
+`simengine.evidence.evaluate(prereg=dir)` and `evidence.chain(dir)` read both formats, so a research seal is attached
+to the evidence report too:
+```python
+from simengine.research import seal
+import simengine.evidence as ev
+seal(pred_df, "forecast before truth")                          # .prereg/chain.jsonl
+rep = ev.evaluate(df, ours="llm", prereg=".prereg")             # seals listed on the card
+```

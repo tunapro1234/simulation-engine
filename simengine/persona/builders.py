@@ -14,6 +14,11 @@ unchanged), LLM-written narrative goes to `authored`. A card can show "from data
     personas = narrate(source, personas, lang="tr")             # optional: LLM backstory (batched, cheap)
 
     personas = from_table(df, id_col="user_id", forbidden=["bought_next_month"])   # automatic mapping
+    personas = from_table(df, id_col=None, forbidden=["target"])     # no usable id column: ids row0, row1, ...
+
+IDS: `from_table` checks the id column first and raises ValueError with the number of empty/NaN and duplicated
+ids (an empty id never becomes the string "None" or "nan"). `id_col=None` uses the row number (position in the
+table before sampling) as the id: "row0", "row1", ...
 
 LEAKAGE RULE: facets hold only what is known BEFORE the prediction time. The target label never goes in;
 `from_row` raises if a facet source column is listed in `forbidden`.
@@ -34,7 +39,7 @@ TALP_FIELDS = ("age_band", "gender", "income_tier", "household_composition", "us
 
 @dataclass
 class Mapping:
-    id_col: str                                          # row id column
+    id_col: str | None                                   # row id column; None = row number ("row<i>")
     fields: dict = field(default_factory=dict)           # talp_field -> column | (column, dict | fn | None) | fn(row)
     facets: dict = field(default_factory=dict)           # facet_name -> column | fn(row)
     text: dict = field(default_factory=dict)             # authored field -> fn(row) (template narrative, no LLM)
@@ -98,9 +103,26 @@ def _plain(v):
     return v.item() if hasattr(v, "item") and not isinstance(v, (str, bytes)) else v
 
 
-def from_row(row, mapping: Mapping) -> Persona:
-    """One row (dict or pandas Series) -> Persona. Out-of-enum TALP values are dropped silently."""
+ROW_ID_PREFIX = "row"
+
+
+def _id_text(v) -> str:
+    return str(_plain(v))
+
+
+def from_row(row, mapping: Mapping, *, pid: str | None = None) -> Persona:
+    """One row (dict or pandas Series) -> Persona. Out-of-enum TALP values are dropped silently.
+    `pid` overrides the id column (from_table passes the row number when `mapping.id_col` is None).
+    An empty/NaN id raises ValueError (it never becomes the string "None")."""
     get = row.get if hasattr(row, "get") else row.__getitem__
+    if pid is None:
+        if mapping.id_col is None:
+            raise ValueError("mapping.id_col is None: pass pid= (from_table numbers the rows for you)")
+        raw = get(mapping.id_col)
+        if _is_empty(raw) or not _id_text(raw).strip():
+            raise ValueError(f"empty id in column {mapping.id_col!r}; fill it, drop the row, or use "
+                             "from_table(..., id_col=None) to number the rows")
+        pid = _id_text(raw)
     cell = {}
     for name, spec in mapping.fields.items():
         col, convert = spec if isinstance(spec, tuple) else (spec, None)
@@ -120,7 +142,6 @@ def from_row(row, mapping: Mapping) -> Persona:
             continue
         facets[name] = _plain(v)
         claims[name] = {"contract_id": mapping.source_name, "scope": src if isinstance(src, str) else name}
-    pid = str(get(mapping.id_col))
     authored = {k: f(row) for k, f in mapping.text.items()}
     seg = mapping.segment
     if callable(seg):
@@ -145,7 +166,7 @@ def from_row(row, mapping: Mapping) -> Persona:
     })
 
 
-def auto_mapping(df: pd.DataFrame, id_col: str, forbidden=(), locale: str = "en-US",
+def auto_mapping(df: pd.DataFrame, id_col: str | None, forbidden=(), locale: str = "en-US",
                  source_name: str = "data", segment=None) -> Mapping:
     """Guess a Mapping: columns named like TALP fields (and `age`, `sex`) become identity/traits, every other
     column except `id_col` and `forbidden` becomes a facet. Pass the target column(s) in `forbidden`."""
@@ -167,6 +188,27 @@ def auto_mapping(df: pd.DataFrame, id_col: str, forbidden=(), locale: str = "en-
                    locale=locale, source_name=source_name)
 
 
+def check_ids(df: pd.DataFrame, id_col: str) -> None:
+    """Raise ValueError when `id_col` is missing or has empty/NaN or duplicated values (counts in the message)."""
+    if id_col not in df.columns:
+        raise ValueError(f"id column {id_col!r} is not in the table; pass id_col=None to number the rows")
+    col = df[id_col]
+    empty = col.map(lambda v: _is_empty(v) or not _id_text(v).strip())
+    keys = col[~empty].map(_id_text)
+    dup_rows = keys.duplicated(keep=False)
+    n_empty, n_dup_rows = int(empty.sum()), int(dup_rows.sum())
+    if n_empty or n_dup_rows:
+        parts = []
+        if n_empty:
+            parts.append(f"{n_empty} empty/NaN ids")
+        if n_dup_rows:
+            parts.append(f"{n_dup_rows} rows share {int(keys[dup_rows].nunique())} duplicated ids "
+                         f"(e.g. {keys[dup_rows].iloc[0]!r})")
+        raise ValueError(f"id column {id_col!r} ({len(df)} rows): " + "; ".join(parts) +
+                         f". Drop or fix those rows (e.g. df.dropna(subset=[{id_col!r}]).drop_duplicates({id_col!r})),"
+                         " or pass id_col=None to use row numbers as ids.")
+
+
 def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str | None = None,
                fields: dict | None = None, facets: dict | None = None, text: dict | None = None,
                segment=None, forbidden=(), locale: str = "en-US", source_name: str = "data",
@@ -175,10 +217,11 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
 
     Either pass a `Mapping`, or keyword pieces of one (`id_col` + `fields`/`facets`/...). With only `id_col`
     the mapping is guessed by `auto_mapping` (every non-forbidden column becomes a facet, so put the target in
-    `forbidden`). `n` samples n rows (`seed`); with `stratify` (a column) the sample is proportional-stratified."""
+    `forbidden`). `n` samples n rows (`seed`); with `stratify` (a column) the sample is proportional-stratified.
+
+    The id column is checked first: empty/NaN or duplicated ids raise ValueError with their counts. `id_col=None`
+    (or a Mapping with id_col None) numbers the rows instead: "row<i>", i = position in `df` before sampling."""
     if mapping is None:
-        if id_col is None:
-            raise ValueError("from_table needs a Mapping or id_col")
         if fields is None and facets is None:
             mapping = auto_mapping(df, id_col, forbidden, locale, source_name, segment)
             if text:
@@ -187,6 +230,10 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
             mapping = Mapping(id_col=id_col, fields=dict(fields or {}), facets=dict(facets or {}),
                               text=dict(text or {}), segment=segment, forbidden=list(forbidden),
                               locale=locale, source_name=source_name)
+    if mapping.id_col is None:
+        df = df.reset_index(drop=True)          # index label = row number, kept through sampling
+    else:
+        check_ids(df, mapping.id_col)
     if n is not None and n < len(df):
         if stratify and stratify in df:
             share = df[stratify].value_counts(normalize=True)
@@ -195,6 +242,8 @@ def from_table(df: pd.DataFrame, mapping: Mapping | None = None, *, id_col: str 
             df = pd.concat(parts).head(n)
         else:
             df = df.sample(n, random_state=seed)
+    if mapping.id_col is None:
+        return [from_row(r, mapping, pid=f"{ROW_ID_PREFIX}{i}") for i, r in df.iterrows()]
     return [from_row(r, mapping) for _, r in df.iterrows()]
 
 
@@ -264,5 +313,5 @@ def to_frames(personas) -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.DataFrame(rows), pd.DataFrame(feats, columns=["id", "item", "value"])
 
 
-__all__ = ["Mapping", "from_row", "from_table", "auto_mapping", "narrate", "age_band", "gender_value",
+__all__ = ["Mapping", "from_row", "from_table", "check_ids", "auto_mapping", "narrate", "age_band", "gender_value",
            "to_frames", "TALP_FIELDS", "NARRATE_TASK"]

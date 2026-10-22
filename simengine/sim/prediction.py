@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ._stats import to_jsonable
-from .panel import Usage
+from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many
 from .parse import parse_item_probs, parse_text_fields
 from .personas import as_personas
 from .ssr import SCALES, SSR
@@ -235,7 +235,7 @@ def _profiles(people, spec: PredictionSpec, questions=None) -> dict[str, str]:
     return {p.pid: p.text("en") for p in as_personas(people)}
 
 
-def _call_all(llm, jobs, parse, *, max_tokens, retries, sample_kw, usage, tag):
+def _call_all(llm, jobs, parse, *, max_tokens, retries, sample_kw, usage, tag, ask_kw=None):
     """jobs: [(key, sample, (system, user))] -> {key: {sample: parsed}}, failures, retried count."""
     out: dict = {}
     pending = list(jobs)
@@ -250,8 +250,9 @@ def _call_all(llm, jobs, parse, *, max_tokens, retries, sample_kw, usage, tag):
         for s, group in by_sample.items():
             prompts = [(sy, us + (RETRY_SUFFIX.format(n=attempt + 1) if attempt else "")) for _, _, (sy, us) in group]
             kw = {sample_kw: s} if sample_kw and s else {}
-            for (key, smp, pr), r in zip(group, llm.map(prompts, max_tokens=max_tokens, **kw)):
-                usage.add(r, tag)
+            rs = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag=tag, reframe=REFRAME_NOTE_GENERIC,
+                          **{**kw, **(ask_kw or {})})
+            for (key, smp, pr), r in zip(group, rs):
                 try:
                     out.setdefault(key, {})[smp] = parse(getattr(r, "text", None))
                 except ValueError as e:
@@ -266,7 +267,7 @@ def predict_people(llm, people=None, items: Sequence[str] = (), *, level: str = 
                    spec: PredictionSpec | None = None, histories: Mapping[str, Any] | None = None,
                    questions: Mapping[str, str] | None = None, samples: int = 1, l0_samples: int = 10,
                    max_tokens: int = 2000, retries: int = 1, sample_kw: str | None = "sample",
-                   ssr: SSR | None = None) -> dict:
+                   ssr: SSR | None = None, ask_kw: dict | None = None) -> dict:
     """Run one prediction arm. level: 'L0' (people optional; l0_samples independent samples, averaged, one
     prior for everyone), 'L1', 'L2' (needs `histories`: {pid: text or history_text summary}), 'SSR'.
 
@@ -274,7 +275,10 @@ def predict_people(llm, people=None, items: Sequence[str] = (), *, level: str = 
     set sample_kw=None for a backend that rejects the keyword). An unparsable or incomplete reply is re-asked up
     to `retries` times with a short 'JSON only' suffix; persons still failing are listed in 'failed'.
     Returns {"level", "items", "p": {pid | "_all": {item: p}}, "samples": [{unit, sample, item, p}], "failed",
-    "retried", "usage"} (JSON-serialisable)."""
+    "retried", "usage"} (JSON-serialisable).
+    Calls go through `sim.panel.ask_many`: a soft refusal is not cached and is re-asked once with a
+    research-forecast note, an empty reply (EmptyResponseError) once with a larger max_tokens; a person still
+    without a reply goes through the normal `retries` and then into 'failed'. `ask_kw` passes ask_many options."""
     level = level.upper()
     if level not in ("L0", "L1", "L2", "SSR"):
         raise ValueError("level must be L0, L1, L2 or SSR")
@@ -311,7 +315,7 @@ def predict_people(llm, people=None, items: Sequence[str] = (), *, level: str = 
     else:
         parse = lambda t: parse_item_probs(t, items, strict=True)  # noqa: E731
     got, failed, retried = _call_all(llm, jobs, parse, max_tokens=max_tokens, retries=retries,
-                                     sample_kw=sample_kw, usage=usage, tag=f"predict:{level}")
+                                     sample_kw=sample_kw, usage=usage, tag=f"predict:{level}", ask_kw=ask_kw)
     if level == "SSR":
         ssr = ssr or SSR()
         cells = [(k, s, it, d[it]) for k, by in got.items() for s, d in by.items() for it in items]

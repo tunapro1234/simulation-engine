@@ -1,8 +1,10 @@
 """degerlendir(): uzun tablo → özet sözlüğü (OZET-SEMA.md). Pano ve JSON bunu kullanır."""
 from __future__ import annotations
 
+import dataclasses as _dc
 import datetime as _dt
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -11,28 +13,41 @@ from . import analiz, denetim, kalibrasyon, merdiven
 from . import kart as _kart
 from .bootstrap import Orneklem, ga, hesapla, p_degeri
 from .metrik import BIRINCIL, aile, diziler
-from .sema import ON_EK, hazirla
+from .sema import ON_EK, _normalle, _sinif_vektoru, _vektor, _vektor_mu, gercek_yok, hazirla
 
 SURUM = "0.1"
 
 
-def _diz(veri, sutun):
-    """(y, p, maske). 'tekrar' eksik olabilir → maske."""
+def _diz(veri, sutun, kaynak: str | None = None):
+    """(y, p, maske). 'tekrar' (ya da kaynak= ile verilen model/oracle tavan sütunu) eksik olabilir → maske."""
     d = veri.df
-    if sutun != "tekrar":
+    if sutun != "tekrar" and kaynak is None:
         y, p = diziler(veri, sutun)
         return y, p, None
+    kaynak = kaynak or "tekrar"
     if veri.gorev == "dagilim":
-        maske = np.array([v is not None and not (np.isscalar(v) and pd.isna(v)) for v in d["tekrar"]])
+        maske = np.array([v is not None and not (np.isscalar(v) and pd.isna(v)) for v in d[kaynak]])
         y, _ = diziler(veri, "gercek")
-        return y, d["tekrar"].to_numpy(object), maske
+        p = d[kaynak].to_numpy(object)
+        if kaynak != "tekrar":  # tekrar hazirla'da çözüldü; model tavanı burada çözülür
+            p = np.array([_normalle(_vektor(v)) if m else None for v, m in zip(p, maske)], dtype=object)
+        return y, p, maske
     if veri.gorev == "cok_sinif":
         kod = {k: i for i, k in enumerate(veri.siniflar)}
         y, _ = diziler(veri, "gercek")
-        p = d["tekrar"].map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy()
+        s = d[kaynak]
+        if kaynak != "tekrar" and _vektor_mu(s):
+            maske = np.array([v is not None and not (np.isscalar(v) and pd.isna(v)) for v in s])
+            K = len(veri.siniflar)
+            p = np.vstack([_sinif_vektoru(_vektor(v), veri.siniflar) if m else np.full(K, 1 / K)
+                           for v, m in zip(s, maske)])
+            return y, p, maske
+        p = s.map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy()
         return y, p, p >= 0
     y = d["gercek"].to_numpy(float)
-    p = pd.to_numeric(d["tekrar"], errors="coerce").to_numpy(float)
+    p = pd.to_numeric(d[kaynak], errors="coerce").to_numpy(float)
+    if veri.gorev == "ikili" and kaynak != "tekrar":
+        p = np.clip(p, 0, 1)
     return y, p, np.isfinite(p)
 
 
@@ -70,6 +85,33 @@ def _teorik(veri, orneklem):
         oz["teorik"] = [{"n": n, "carpan": 1 / (1 - (1 - n / N) * rho ** 2)} for n in orneklem["n_listesi"] if n < N]
 
 
+def _carpan_verisi(veri, en_fazla, tohum):
+    """Tek maddeli (kitle ortalaması) çarpan büyük tabloda yavaş: en_fazla satırlık sabit tohumlu alt örneklem.
+    Döner (veri, not | None). Çok maddeli tabloda madde başına satır gerektiği için alt örneklem alınmaz."""
+    d = veri.df
+    tek = "madde" not in d or d["madde"].nunique() <= 1
+    if not en_fazla or not tek or len(d) <= en_fazla:
+        return veri, None
+    ix = np.sort(np.random.default_rng([tohum, 2000]).choice(len(d), int(en_fazla), replace=False))
+    alt = _dc.replace(veri, df=d.iloc[ix].reset_index(drop=True))
+    return alt, (f"PPI++ çarpanı {len(d)} satırın sabit tohumlu (tohum={tohum}) {int(en_fazla)} satırlık rastgele alt "
+                 f"örnekleminde hesaplandı (hız; kitle = alt örneklem, sonlu kitle düzeltmesi buna göre). Tam tablo için "
+                 f"multiplier_max_rows=None.")
+
+
+def _model_tavan_asimi(nokta, tekrar, yontemler, M):
+    """Model/oracle tavanını anlamlı aşan yöntem: sızıntı değil, tavanın zayıf olduğunu gösterir."""
+    asan = []
+    for s in yontemler:
+        if M.ad in tekrar.get(s, {}) and M.ad in tekrar.get("tavan", {}):
+            a, _ = ga(M.yon * (tekrar[s][M.ad] - tekrar["tavan"][M.ad]))
+            if np.isfinite(a) and a > 0:
+                asan.append(s)
+    return {"kontrol": "model/oracle tavanını aşan yöntem", "durum": "uyari" if asan else "tamam", "deger": len(asan),
+            "ayrinti": (f"model/oracle tavanını anlamlı aşan: {asan}; tavan zayıf ya da yöntem tavanın görmediği bilgiyi "
+                        "kullanıyor (sızıntıya bakın)" if asan else "hiçbir yöntem model/oracle tavanını anlamlı aşmıyor")}
+
+
 def _f(x, b=3):
     return "—" if x is None or not np.isfinite(x) else f"{x:.{b}f}".replace(".", ",")
 
@@ -83,9 +125,22 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 siniflar: list | None = None, baseline: bool = True,
                 carpan_yontemler: list[str] | None = None, dongusel: list[str] | None = None,
                 duzey: str | None = None, girdi_kaynagi: str | None = None,
-                etiketsiz_tabanlar: list[str] | None = None) -> dict:
+                etiketsiz_tabanlar: list[str] | None = None, oof_tabanlar: list[str] | None = None,
+                tavan_sutun: str | None = None, tavan_etiket: str | None = None,
+                carpan_en_fazla: int | None = 2000) -> dict:
     """bizim/ham: tahmin_ ön eki olmadan yöntem adı. bizim verilmezse SON yöntem (önceden belirlenmeli;
-    en iyiyi sonradan seçmek iyimser yanlılık yaratır, denetimde işaretlenir)."""
+    en iyiyi sonradan seçmek iyimser yanlılık yaratır, denetimde işaretlenir).
+
+    oof_tabanlar: hedef etiketiyle eğitilmiş ama çapraz uydurmalı (kat dışı, OOF) tahmin sütunları; etiketsiz
+    tabanlar gibi taban basamağı olur. Rozet ve manşet en güçlü tabana (otomatik + bildirilen) karşı; hiç bildirilmiş
+    taban yokken en güçlüsü rastgele/marjinal ise kart "yalnız basit tabanlar" der.
+    tavan_sutun: df'deki model/oracle tavan sütunu (tahmin_ ön eksiz); verilirse insan tekrar tavanının yerine geçer.
+    carpan_en_fazla: tek maddeli (kitle ortalaması) çarpan bu kadar satırdan büyükse sabit tohumlu alt örneklemde
+    hesaplanır (None: alt örneklem yok)."""
+    if gercek_yok(df):
+        return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
+                        etiketler=etiketler, birincil=birincil, onkayit=onkayit, sinirlar=sinirlar, duzey=duzey,
+                        girdi_kaynagi=girdi_kaynagi, tohum=tohum, B=B)
     veri = hazirla(df, gorev, yontemler, siniflar)
     d = veri.df
     etiketler = dict(etiketler or {})
@@ -117,11 +172,24 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             c = f"taban_{ad}"
             d[c] = deg if not isinstance(deg, list) else pd.Series(deg, dtype=object).to_numpy()
             turler[c], etiket[c] = "baseline", et
+    taban_turu = {c: "otomatik" for c in turler}
     for y_ in veri.yontemler:
         c = ON_EK + y_
-        # etiketsiz_tabanlar: hedef etiketi görmeyen basit kurallar (ör. kalıcılık) taban sayılır
-        turler[c] = "baseline" if y_ in (etiketsiz_tabanlar or []) else "yontem"
+        # etiketsiz_tabanlar: hedef etiketi görmeyen basit kurallar (ör. kalıcılık) taban sayılır;
+        # oof_tabanlar: etiketle eğitilmiş ama çapraz uydurmalı (kat dışı) tabanlar
+        if y_ in (etiketsiz_tabanlar or []):
+            turler[c], taban_turu[c] = "baseline", "etiketsiz"
+        elif y_ in (oof_tabanlar or []):
+            turler[c], taban_turu[c] = "baseline", "oof"
+        else:
+            turler[c] = "yontem"
         etiket[c] = etiketler.get(y_, y_)
+    bilinmeyen = [y_ for y_ in list(etiketsiz_tabanlar or []) + list(oof_tabanlar or []) if y_ not in veri.yontemler]
+    if bilinmeyen:
+        warnings.warn(f"declared baseline column(s) not in the table, ignored: {bilinmeyen} (need pred_<name>)",
+                      UserWarning, stacklevel=3)
+    if not bizim_sec_oto and taban_turu.get(ON_EK + bizim, "otomatik") != "otomatik":
+        warnings.warn(f"'ours' ({bizim}) is also declared as a baseline", UserWarning, stacklevel=3)
     kalibre = kalibre if kalibre is not None else [bizim] + ([ham] if ham else [])
     kalib_sutun = {}
     if veri.gorev != "ab" and olasilik:
@@ -139,17 +207,29 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         kontrol_sutun[ON_EK + y_] = c
     sutunlar = list(turler)
     girdiler = {c: _diz(veri, c) for c in sutunlar}
-    if "tekrar" in d:
+    tavan_turu = None
+    if tavan_sutun:
+        if tavan_sutun not in d:
+            raise ValueError(f"tavan sütunu tabloda yok: {tavan_sutun}")
+        girdiler["tavan"] = _diz(veri, "tavan", kaynak=tavan_sutun)
+        tavan_turu = "model"
+        turler["tavan"], etiket["tavan"] = "tavan", f"Model/oracle tavanı ({tavan_etiket or tavan_sutun})"
+        tavan_metrik = list(metrikler)  # model tavanı bir tahmindir: her metrik anlamlı
+        if "tekrar" in d:
+            veri.notlar.append("tavan: model/oracle sütunu kullanıldı; 'tekrar' (insan test-retest) tavanı yok sayıldı")
+    elif "tekrar" in d:
         girdiler["tavan"] = _diz(veri, "tekrar")
+        tavan_turu = "insan_tekrar"
         turler["tavan"], etiket["tavan"] = "tavan", "İnsan tavanı (test-retest)"
         tavan_metrik = [m for m in metrikler if m.tavan]
     else:
         tavan_metrik = []
+    tavan_adi = "model/oracle tavanı" if tavan_turu == "model" else "insan tavanı"
 
     # ---- bootstrap (eşleşik)
     madde_kod = pd.factorize(d["madde"])[0] if madde_var else None
     orn = Orneklem(veri.kume, B=B, B_toplu=B_toplu, tohum=tohum, madde_kume=veri.kume_adi == "madde")
-    tavan_girdi = {"tavan": girdiler.pop("tavan")} if "tekrar" in d else {}
+    tavan_girdi = {"tavan": girdiler.pop("tavan")} if "tavan" in girdiler else {}
     nokta, tekrar = hesapla(orn, girdiler, metrikler, madde_kod, agirlik)
     if tavan_girdi:
         n2, t2 = hesapla(orn, tavan_girdi, tavan_metrik, madde_kod, agirlik)
@@ -176,11 +256,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
 
     # ---- merdiven
     yontem_c = [ON_EK + y for y in veri.yontemler if turler[ON_EK + y] != "baseline"]
-    if len(yontem_c) <= 6:
-        secili = yontem_c
-    else:  # kalabalıkta ham + bizim + bizi geçen her yöntem (sessizce düşürülmez)
-        bd = M.yon * deg(ON_EK + bizim)
-        secili = list(dict.fromkeys([ON_EK + y for y in [ham, bizim] if y] + [c for c in yontem_c if M.yon * deg(c) > bd]))
+    # merdivende BÜTÜN tahmin sütunları (eskiden > 6 yöntemde yalnız ham + bizim + bizi geçenler kalıyordu)
+    secili = yontem_c
     # persona-swap: bizim yöntemin karıştırılmış (başka kişinin bilgisiyle) sürümü, tabanlarla yöntemler arasında
     adim = [c for c in turler if turler[c] == "baseline"] + \
         ([kontrol_sutun[ON_EK + bizim]] if ON_EK + bizim in kontrol_sutun else []) + secili
@@ -201,6 +278,9 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     bc = ON_EK + bizim
     tabanlar = [c for c in turler if turler[c] == "baseline" and np.isfinite(deg(c))]
     en_iyi_b = max(tabanlar, key=lambda c: M.yon * deg(c)) if tabanlar else None
+    bildirilen = [c for c in tabanlar if taban_turu.get(c) in ("etiketsiz", "oof")]
+    # hiç taban bildirilmediyse ve en güçlüsü rastgele/marjinal ise rozet yalnız basit bir tabana karşıdır: açıkça yazılır
+    yalniz_basit = bool(en_iyi_b) and not bildirilen and en_iyi_b in ("taban_rastgele", "taban_marjinal")
     rakipler = [c for c in yontem_c if c != bc and np.isfinite(deg(c))]
     en_iyi_r = max(rakipler, key=lambda c: M.yon * deg(c)) if rakipler else None
 
@@ -246,7 +326,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         parca.append(f"{manset['ham']['etiket']} {_f(manset['ham']['deger'])}")
     parca.append(f"{etiket[bc]} {_f(deg(bc))} [{_f(manset['bizim']['alt'])}–{_f(manset['bizim']['ust'])}]")
     if manset["tavan"]:
-        parca.append(f"insan tavanı {_f(manset['tavan']['deger'])}")
+        parca.append(f"{tavan_adi} {_f(manset['tavan']['deger'])}")
     cumle = f"{birincil}: " + " · ".join(parca)
     if manset["bosluk_kapanan"]:
         k_ = manset["bosluk_kapanan"]
@@ -300,7 +380,7 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     # ---- segment, yayılım, örnekler
     sec = [c for c in dict.fromkeys([bc] + ([ON_EK + ham] if ham else []) + ([en_iyi_b] if en_iyi_b else [])) if c]
     seg_diz = {c: girdiler[c] for c in sec}
-    if "tavan" in girdiler and M.tavan:
+    if "tavan" in girdiler and (M.tavan or tavan_turu == "model"):
         seg_diz["tavan"] = girdiler["tavan"]
     w = np.ones(len(d)) if agirlik is None else agirlik
     segment = analiz.segment_analizi(veri, seg_diz, M, w, B=min(B, 500), tohum=tohum) if veri.segmentler else {}
@@ -336,7 +416,15 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                     "ayrinti": f"de-meaned R² {_f(v_)} [{_f(a_)}, {_f(u_)}]"
                                + ("" if a_ > 0 else " · kişiye özgü sapmalar madde ortalamasından kötü ya da ayırt edilemiyor; "
                                   "genlik kalibrasyonu gerekebilir")})
-    den.append(denetim.tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
+    if tavan_turu == "model":
+        den.append(_model_tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
+    else:
+        den.append(denetim.tavan_asimi(nokta, tekrar, yontem_c + kalib_sutun.get(bc, []), M))
+    if yalniz_basit:
+        den.append({"kontrol": "yalnız basit tabanlar", "durum": "uyari", "deger": None,
+                    "ayrinti": f"bildirilmiş taban yok; en güçlü taban {etiket[en_iyi_b]} (otomatik rastgele/marjinal). "
+                               "Rozet bu basit tabana karşı: gerçek tabanları unlabeled_baselines= (etiketsiz) ya da "
+                               "baselines_oof= (etiketle eğitilmiş, çapraz uydurmalı) ile bildirin"})
     den.append(denetim.cokus(yay, bc))
     dz = denetim.dengesizlik(veri)
     if dz:
@@ -370,9 +458,13 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                                        + ". Bireysel tahmin karşılaştırması (kat dışı) geçerli; 'kaç insana bedel' döngüsel olurdu."})
             hed = {c: etiket[c] for c in dict.fromkeys(ON_EK + y if not y.startswith(ON_EK) else y for y in sec if y)
                    if c in etiket}
-            orneklem = _orn.carpan(veri, hed, tohum=tohum)
+            veri_c, alt_not = _carpan_verisi(veri, carpan_en_fazla, tohum)
+            orneklem = _orn.carpan(veri_c, hed, tohum=tohum)
             if orneklem:
-                _teorik(veri, orneklem)
+                _teorik(veri_c, orneklem)
+                if alt_not:
+                    orneklem["alt_orneklem"] = {"n": len(veri_c.df), "N": len(d), "tohum": tohum}
+                    orneklem.setdefault("notlar", []).append(alt_not)
                 if "madde" not in d or d["madde"].nunique() < 20:
                     # az maddede Bayes n0 ve "yalnız simülasyon" eşdeğeri ortalamayı şans eseri tutturmaya bağlı: gösterilmez
                     for oz_ in orneklem["yontemler"].values():
@@ -391,17 +483,27 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         "Maddeler sabit kabul edilir: GA yeni kişilere genellemeyi ölçer, yeni sorulara değil.",
         "Baseline'lar ve kalibrasyon çapraz uydurmalıdır (aynı grubun satırı kendi eşlemesini görmez).",
     ]
-    if manset["tavan"]:
+    if manset["tavan"] and tavan_turu == "model":
+        sinir.append("Tavan bir model/oracle tahminidir (insan test-retest değil): ulaşılabilir bir üst sınır değil, "
+                     "kıyas noktasıdır; kapanan boşluk bu tavana göredir ve tavanı aşmak sızıntı anlamına gelmez.")
+    elif manset["tavan"]:
         sinir.append("Tavan, aynı birimin ikinci ölçümüyle uyumdur. Gürültüsüz bir tahmin edici bunu aşabilir; "
                      "tavana oran %100'ü geçerse önce sızıntıya bakılır.")
     if veri.gorev in ("ikili", "cok_sinif"):
         sinir.append("Doğruluk sınıf payına duyarlıdır; kappa ve dengeli doğruluk birlikte okunmalı.")
     sinir += ([dengesiz_not] if dengesiz_not else []) + list(sinirlar or [])
+    if yalniz_basit:  # sona: özgün sınır sırası (kart ilk üçünü alır) değişmesin
+        sinir.append("Yalnız basit tabanlar (rastgele/marjinal): bildirilmiş güçlü bir taban olmadan rozet iyimserdir.")
 
     kart = {"n_satir": len(d), "n_kume": int(veri.kume.max()) + 1, "kume_adi": veri.kume_adi,
             "n_madde": int(d["madde"].nunique()) if madde_var else None, "B": B, "tohum": tohum,
             "segmentler": veri.segmentler, "notlar": veri.notlar,
             "yontemler": veri.yontemler, "bizim": bizim, "ham": ham}
+    taban_ozet = {"bildirilen": [c for c in turler if taban_turu.get(c) in ("etiketsiz", "oof")],
+                  "etiketsiz": [c for c in turler if taban_turu.get(c) == "etiketsiz"],
+                  "oof": [c for c in turler if taban_turu.get(c) == "oof"],
+                  "otomatik": [c for c in turler if turler[c] == "baseline" and taban_turu.get(c) == "otomatik"],
+                  "en_guclu": en_iyi_b, "yalniz_basit": yalniz_basit}
     ozet = {
         "baslik": baslik, "veri_adi": veri_adi, "gorev": veri.gorev,
         "duzey": duzey or ("makro" if veri.gorev in ("dagilim", "ab") else "mikro"),
@@ -412,7 +514,93 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         "sonuclar": sonuclar, "merdiven": merd, "manset": manset, "orneklem": orneklem,
         "karsilastirmalar": karsi, "kalibrasyon": kal, "segment": segment, "yayilim": yay,
         "denetim": den, "ornekler": orn_ler, "onkayit": onkayit or [], "sinirlar": sinir,
+        "tabanlar": taban_ozet, "tavan_turu": tavan_turu,
     }
     ozet = _temiz(ozet)
     ozet["kanit_kart"] = _temiz(_kart.kart(ozet, muhur=(onkayit or [None])[-1]))  # sahne kart.py ile aynı şema
+    return ozet
+
+
+def _tahmin_ozeti(seri: pd.Series) -> dict:
+    """Bir tahmin sütununun gerçeksiz özeti: sayısal → dağılım istatistikleri, etiket → en sık sınıflar."""
+    v = seri.to_numpy(object)
+    eksik = int(sum(x is None or (np.isscalar(x) and pd.isna(x)) for x in v))
+    out = {"n": int(len(v)), "eksik": eksik}
+    dolu = seri.dropna()
+    if dolu.empty:
+        return out
+    ilk = dolu.iloc[0]
+    if isinstance(ilk, (list, tuple, np.ndarray, dict)) or (isinstance(ilk, str) and ilk.lstrip().startswith(("[", "{"))):
+        out["tur"] = "vektor"
+        return out
+    x = pd.to_numeric(dolu, errors="coerce")
+    if x.notna().all():
+        q = np.percentile(x.to_numpy(float), [0, 25, 50, 75, 100])
+        out.update({"tur": "sayi", "ortalama": float(x.mean()), "sd": float(x.std(ddof=1)) if len(x) > 1 else None,
+                    "en_kucuk": float(q[0]), "q25": float(q[1]), "medyan": float(q[2]), "q75": float(q[3]),
+                    "en_buyuk": float(q[4])})
+    else:
+        pay = dolu.astype(str).value_counts(normalize=True).head(5)
+        out.update({"tur": "etiket", "en_sik": {str(k): float(p) for k, p in pay.items()}})
+    return out
+
+
+def bekleyen(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | None = None,
+             yontemler: list[str] | None = None, bizim: str | None = None, ham: str | None = None,
+             etiketler: dict | None = None, birincil: str | None = None, onkayit: list | None = None,
+             sinirlar: list | None = None, duzey: str | None = None, girdi_kaynagi: str | None = None,
+             tohum: int = 0, B: int = 1000) -> dict:
+    """Gerçek yok (sütun yok ya da tümü eksik): kalibrasyon, merdiven ve bootstrap atlanır. Rapor mühür kayıtlarını ve
+    tahmin özetini taşır; kart rozeti 'bekliyor' (awaiting truth). Şema degerlendir() ile aynı anahtarlar."""
+    etiketler = dict(etiketler or {})
+    tsut = [ON_EK + y for y in yontemler] if yontemler else [c for c in df.columns if isinstance(c, str) and c.startswith(ON_EK)]
+    eksik = [c for c in tsut if c not in df.columns]
+    if eksik:
+        raise ValueError(f"eksik tahmin sütunları: {eksik}")
+    if not tsut:
+        raise ValueError("en az bir 'tahmin_<yontem>' sütunu gerekli")
+    d = df
+    if "bolum" in d.columns:
+        from .sema import TEST_ADLARI
+        d = d[d["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()]
+    adlar = [c[len(ON_EK):] for c in tsut]
+    bizim_oto = bizim is None
+    bizim = bizim or adlar[-1]
+    ozetler = {c: {"etiket": etiketler.get(c[len(ON_EK):], c[len(ON_EK):]), **_tahmin_ozeti(d[c])} for c in tsut}
+    kume_adi = next((s for s in ("grup", "madde") if s in d.columns), "satir")
+    n_kume = int(d[kume_adi].nunique()) if kume_adi != "satir" else len(d)
+    muhurler = list(onkayit or [])
+    den = [{"kontrol": "gerçek", "durum": "atlandi", "deger": None,
+            "ayrinti": ("'gercek' (truth) sütunu yok" if "gercek" not in df.columns else "'gercek' (truth) sütununun tamamı eksik")
+                       + ": kalibrasyon, taban merdiveni, bootstrap ve çarpan atlandı"},
+           {"kontrol": "mühür", "durum": "tamam" if muhurler else "uyari", "deger": len(muhurler),
+            "ayrinti": (f"{len(muhurler)} mühür kaydı eklendi; son sha256 {str(muhurler[-1].get('sha256'))[:12]}"
+                        if muhurler else "mühür kaydı yok: tahmini gerçek açılmadan önce seal() ile mühürleyin "
+                                         "ve evaluate(prereg=<dizin>) verin")}]
+    if bizim_oto:
+        den.append({"kontrol": "seçim yanlılığı", "durum": "uyari", "deger": None,
+                    "ayrinti": "'bizim' yöntem açıkça belirtilmedi (son sütun alındı); yöntemi önceden belirleyin"})
+    bc = ON_EK + bizim
+    manset = {"ham": None, "bizim": {"sutun": bc, "etiket": etiketler.get(bizim, bizim), "deger": None, "alt": None, "ust": None},
+              "en_iyi_baseline": None, "en_iyi_rakip": None, "taban_tavana_oran": None, "tavan": None,
+              "tavana_oran": None, "bosluk_kapanan": None,
+              "cumle": f"Gerçek henüz yok: {len(d)} satır tahmin" + (" mühürlü" if muhurler else " (mühürsüz)")
+                       + "; kart gerçek gelince dolar."}
+    if ham:
+        manset["ham"] = {"sutun": ON_EK + ham, "etiket": etiketler.get(ham, ham), "deger": None, "alt": None, "ust": None}
+    sinir = ["Gerçek sonuç yok: bu kart yalnız mühür ve tahmin özetidir, başarı iddiası taşımaz."] + list(sinirlar or [])
+    kart = {"n_satir": len(d), "n_kume": n_kume, "kume_adi": kume_adi,
+            "n_madde": int(d["madde"].nunique()) if "madde" in d.columns else None, "B": B, "tohum": tohum,
+            "segmentler": [], "notlar": [], "yontemler": adlar, "bizim": bizim, "ham": ham}
+    ozet = {
+        "baslik": baslik, "veri_adi": veri_adi, "gorev": gorev, "duzey": duzey or "mikro",
+        "tutma_birimi": kume_adi, "girdi_kaynagi": girdi_kaynagi,
+        "olusturma": _dt.datetime.now().astimezone().isoformat(timespec="seconds"), "surum": SURUM,
+        "kart": kart, "birincil": birincil, "metrikler": [], "sonuclar": {}, "merdiven": [], "manset": manset,
+        "orneklem": None, "karsilastirmalar": [], "kalibrasyon": {}, "segment": {}, "yayilim": {}, "denetim": den,
+        "ornekler": [], "onkayit": muhurler, "sinirlar": sinir, "tabanlar": None, "tavan_turu": None,
+        "gercek_bekleniyor": True, "tahmin_ozeti": ozetler,
+    }
+    ozet = _temiz(ozet)
+    ozet["kanit_kart"] = _temiz(_kart.kart(ozet, muhur=(muhurler or [None])[-1]))
     return ozet

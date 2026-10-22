@@ -14,7 +14,25 @@ from unittest import mock
 from simengine.llm import (PRICES, AuthError, BudgetExceeded, Claude, ClaudeCode, CostLedger, DiskCache, FakeLLM,
                            LLMError, RefusalError, SpendLimitError, cache_key, classify_error, complete_json, cost_usd,
                            json_extract, load_api_key, parallel_map, price_for, usage_cost)
+from simengine.llm import ThinkingBudgetWarning
 from simengine.types import LLM
+
+_warn_ctx = None
+
+
+def setUpModule():
+    """These tests use small max_tokens with default thinking on purpose; the warning is tested in
+    test_llm_gaps.py, so it is muted here."""
+    global _warn_ctx
+    import warnings
+    _warn_ctx = warnings.catch_warnings()
+    _warn_ctx.__enter__()
+    warnings.simplefilter("ignore", ThinkingBudgetWarning)
+
+
+def tearDownModule():
+    if _warn_ctx is not None:
+        _warn_ctx.__exit__(None, None, None)
 
 
 # ---------------------------------------------------------------- fakes

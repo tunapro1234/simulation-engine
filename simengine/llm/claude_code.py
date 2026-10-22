@@ -52,8 +52,9 @@ class ClaudeCode(CachedBackend):
                  max_calls: int | None = None, budget_usd: float | None = None, use_system_prompt: bool = True,
                  extra_args: Sequence[str] = (), max_attempts: int = 3, error_wait: float = 10.0,
                  parallel: int = 4, tag: str = "", runner: Callable[..., Any] | None = None,
-                 sleep: Callable[[float], None] = time.sleep):
-        super().__init__(cache_dir=cache_dir, ledger=ledger, budget_usd=budget_usd, tag=tag, parallel=parallel)
+                 sleep: Callable[[float], None] = time.sleep, spend_log=None, agent: str | None = None):
+        super().__init__(cache_dir=cache_dir, ledger=ledger, budget_usd=budget_usd, tag=tag, parallel=parallel,
+                         spend_log=spend_log, agent=agent)
         self.model = model
         self.timeout = timeout
         self.language = language
@@ -125,6 +126,7 @@ class ClaudeCode(CachedBackend):
     def complete(self, system: str, user: str, *, max_tokens: int = 256, **kw: Any) -> LLMResponse:
         tag = kw.pop("tag", self.tag)
         validate = kw.pop("validate", None)
+        cache_if = kw.pop("cache_if", None)
         sample = kw.pop("sample", 0)
         if kw:
             raise TypeError(f"ClaudeCode.complete: unsupported arguments {sorted(kw)}")
@@ -192,9 +194,12 @@ class ClaudeCode(CachedBackend):
                     continue
             raw = {"usage": u, "list_price_usd": lp, "seconds": round(sec, 2), "session_id": env.get("session_id"),
                    "attempt": attempt}
-            self._cache_put(key, {"text": text, "model": self.model, "input_tokens": inp, "output_tokens": out,
-                                  "cache_read_tokens": cr, "cost_usd": 0.0, "raw": raw, "system": system, "user": user,
-                                  "params": key_params})
+            if self._should_cache(cache_if, text):
+                self._cache_put(key, {"text": text, "model": self.model, "input_tokens": inp, "output_tokens": out,
+                                      "cache_read_tokens": cr, "cost_usd": 0.0, "raw": raw, "system": system,
+                                      "user": user, "params": key_params})
+            else:
+                raw["not_cached"] = True
             return LLMResponse(text=text, model=self.model, input_tokens=inp, output_tokens=out, cache_read_tokens=cr,
                                cost_usd=0.0, cached=False, raw=raw)
         self._bump(errors=1)

@@ -1,6 +1,7 @@
 """`simengine` command line: evaluate | card | bench | loop | demo.
 
     simengine evaluate frame.csv --ours hybrid --raw llm --primary auc        # -> runs/frame-evidence/{report.json,card.md,...}
+    simengine evaluate test.csv --ours hybrid --prereg .onkayit                # no truth yet -> sealed "awaiting truth" card
     simengine card runs/card1/report.json -o card.md                           # Markdown (or *.json card dict)
     simengine bench list
     simengine bench run gss opinionqa_groups:split=dev --data-root /path/to/catalogue
@@ -117,21 +118,30 @@ def _space_from_json(cfg: dict):
 def cmd_evaluate(a) -> int:
     from . import evidence as ev
     from .evidence.onkayit import ZINCIR_ADI
-    if a.prereg and not (Path(a.prereg) / ZINCIR_ADI).exists():
-        print(f"error: --prereg {a.prereg!r} has no {ZINCIR_ADI}; se.evidence.seal() writes to '.onkayit' unless "
-              "you pass registry=...", file=sys.stderr)
+    from .evidence.api import RESEARCH_CHAIN
+    if a.prereg and not ev.chain_paths(a.prereg):
+        print(f"error: --prereg {a.prereg!r} has no {ZINCIR_ADI} (se.seal / se.evidence.seal, default '.onkayit') "
+              f"or {RESEARCH_CHAIN} (se.research.seal, default '.prereg'); pass the directory the seal was written "
+              "to", file=sys.stderr)
         return 2
     df = _read_table(a.table)
+    mmr = a.multiplier_max_rows
+    extra = {} if mmr is None else {"multiplier_max_rows": (mmr or None)}
     report = ev.evaluate(df, title=a.title or Path(a.table).stem, ours=a.ours, raw=a.raw, task=a.task,
                          primary=a.primary, B=a.B, B_aggregate=a.B_aggregate, seed=a.seed, dataset=a.dataset or "",
                          cutoff=a.cutoff, methods=_csv_list(a.methods), circular=_csv_list(a.circular),
                          unlabeled_baselines=_csv_list(a.unlabeled_baselines), calibrate=_csv_list(a.calibrate),
-                         prereg=a.prereg, multiplier=not a.no_multiplier)
+                         baselines_oof=_csv_list(a.baselines_oof), ceiling_col=a.ceiling_col,
+                         ceiling_label=a.ceiling_label, aggregate_by=a.aggregate_by,
+                         prereg=a.prereg, multiplier=not a.no_multiplier, **extra)
     out = Path(a.out or Path("runs") / (Path(a.table).with_suffix("").name + "-evidence"))
     paths = _write_outputs(report, out, lang=a.lang)
     s = ev.summary(report)
     print(s.get("headline_en") if a.lang == "en" else s.get("headline", ""))
     print(f"badge: {s.get('badge')} (primary metric: {s.get('primary_metric')})")
+    if s.get("badge") == "awaiting truth" and not a.prereg:
+        print("note: awaiting truth and no --prereg: seal the predictions first (se.seal(...)) and pass the "
+              "registry directory, so the card carries the seal hashes.", file=sys.stderr)
     if not a.primary:
         print(f"warning: --primary not given; graded on the task default '{s.get('primary_metric')}'. Pass the "
               "metric you pre-registered, e.g. --primary auc.", file=sys.stderr)
@@ -301,7 +311,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--dataset")
     e.add_argument("--methods", help="comma list of methods to include (default: every pred_* column)")
     e.add_argument("--unlabeled-baselines", help="comma list of label-free prediction columns (baseline rungs)")
+    e.add_argument("--baselines-oof", dest="baselines_oof",
+                   help="comma list of baselines trained on the target labels but cross-fitted (out-of-fold); "
+                        "the badge compares ours with the strongest declared or automatic baseline")
     e.add_argument("--circular", help="comma list of priors trained on the target labels (no worth-N-humans)")
+    e.add_argument("--ceiling-col", dest="ceiling_col",
+                   help="model/oracle ceiling column (pred_x or any column) instead of the human retest ceiling")
+    e.add_argument("--ceiling-label", dest="ceiling_label", help="name of the ceiling on the card")
+    e.add_argument("--aggregate-by", dest="aggregate_by",
+                   help="evaluate at group level: average truth and predictions per this column (e.g. group), "
+                        "bootstrap over groups; binary/continuous only")
     e.add_argument("--calibrate", help="comma list of methods to recalibrate")
     e.add_argument("--cutoff", help="model training cutoff for the contamination audit (needs a time column)")
     e.add_argument("--prereg", help="seal registry directory to attach")
@@ -309,6 +328,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200)
     e.add_argument("--seed", type=int, default=0)
     e.add_argument("--no-multiplier", action="store_true", help="skip the PPI++ multiplier block (faster)")
+    e.add_argument("--multiplier-max-rows", dest="multiplier_max_rows", type=int,
+                   help="single-item frames above this many rows compute the multiplier on a fixed-seed subsample "
+                        "(default 2000; 0 = whole table, slow)")
     e.add_argument("--out", help="output directory (default runs/<table>-evidence)")
     e.add_argument("--lang", choices=["mixed", "en"], default="mixed",
                    help="card language: mixed (English + research Turkish labels) or en")

@@ -263,7 +263,9 @@ def _manset(o: _Ozet) -> str:
         kutular.append('<div class="kutu k-norm"><div class="kad">Kapanan boşluk</div><div class="kdeger">—</div>'
                        '<div class="kalt">tavan yok: test-retest ölçülmemiş</div></div>')
     for anahtar, ad, sinif in (("en_iyi_baseline", "En güçlü taban", "k-base"), ("en_iyi_rakip", "En güçlü diğer yöntem", "k-ham"),
-                               ("bizim", "Bizim yöntem", "k-bizim"), ("tavan", "İnsan tavanı", "k-tavan")):
+                               ("bizim", "Bizim yöntem", "k-bizim"),
+                               ("tavan", "Model/oracle tavanı" if o.oz.get("tavan_turu") == "model" else "İnsan tavanı",
+                                "k-tavan")):
         d = m.get(anahtar)
         if not d:
             continue
@@ -944,10 +946,23 @@ def _kanit_karti(o: _Ozet) -> str:
             + _tablo(["Satır", "Değer [%95 GA]", "Not"], sat) + "</section>")
 
 
+def _tahminler(o: _Ozet) -> str:
+    """Gerçek bekleyen rapor: tahmin sütunlarının özeti (metrik yok)."""
+    t = o.oz.get("tahmin_ozeti") or {}
+    if not t:
+        return ""
+    sat = [[f'{_e(p.get("etiket"))} <code>{_e(c)}</code>', tam(p.get("n")), tam(p.get("eksik")), _e(sayi(p.get("ortalama"))),
+            _e(sayi(p.get("sd"))), _e(sayi(p.get("en_kucuk"))), _e(sayi(p.get("medyan"))), _e(sayi(p.get("en_buyuk"))),
+            _e(", ".join(f"{a} {yuzde(b)}" for a, b in (p.get("en_sik") or {}).items()))] for c, p in t.items()]
+    return _bolum("Tahmin özeti (gerçek bekleniyor)",
+                  _tablo(["Sütun", "n", "Eksik", "Ortalama", "Sd", "En küçük", "Medyan", "En büyük", "En sık"], sat, "sayisal"),
+                  "Gerçek sonuç henüz yok: metrik, merdiven ve güven aralığı gerçek açılınca hesaplanır.")
+
+
 def _ozet_html(oz: dict, i: int) -> str:
     o = _Ozet(oz, i)
     bas = oz.get("baslik") or oz.get("veri_adi") or f"Özet {i + 1}"
-    govde = "".join(f(o) for f in (_kanit_karti, _manset, _orneklem, _merdiven, _metrik_tablosu, _farklar, _kalibrasyon, _segment,
+    govde = "".join(f(o) for f in (_kanit_karti, _tahminler, _manset, _orneklem, _merdiven, _metrik_tablosu, _farklar, _kalibrasyon, _segment,
                                    _yayilim, _denetim, _ornekler, _onkayit, _sinirlar))
     return f'<article class="ozet" id="ozet-{i + 1}"><h2>{_e(bas)}</h2>{_kart(o)}{govde}</article>'
 

@@ -5,6 +5,11 @@ budget gate sums the whole log) as JSONL instead of TSV. Fields per line:
     time, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, tag
 (+ `list_price_usd` for subscription calls through `claude -p`, whose `cost_usd` is 0).
 `path=None` keeps the ledger in memory (budget still enforced for this process only).
+
+Optional shared spend log (TSV, the research fleet's `harcama.log` layout, see `kod/ortak.py`
+`HarcamaLedger` in the D2 rehearsal): `tsv_path=` (or env SIMENGINE_SPEND_LOG) appends one tab-separated
+line per real call, columns `TSV_COLUMNS`, no header, under flock. `agent=` (or env SIMENGINE_AGENT)
+fills the agent column. The JSONL ledger stays the budget authority; the TSV is write-only.
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import json
 import os
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Callable
 
@@ -21,9 +27,64 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 
+SPEND_LOG_ENV = "SIMENGINE_SPEND_LOG"
+AGENT_ENV = "SIMENGINE_AGENT"
+DEFAULT_AGENT = "simengine"
+# column layout of the shared TSV spend log (one line per real call, no header)
+TSV_COLUMNS = ("time", "agent", "model", "input_tokens", "output_tokens", "usd", "tag")
+
+
+def _tsv_field(v) -> str:
+    return " ".join(str(v).split("\t")).replace("\r", " ").replace("\n", " ")
+
+
+def tsv_model(model: str) -> str:
+    """Model column of the TSV: a bare Claude id gets the provider prefix ("claude-x" -> "anthropic/claude-x");
+    already prefixed names ("anthropic/...", "claude-p/...") are kept."""
+    m = str(model)
+    return f"anthropic/{m}" if m.startswith("claude-") and "/" not in m else m
+
+
+def tsv_line(row: dict, agent: str, tag_prefix: str = "") -> str:
+    """One TSV line (with newline) for a ledger row, columns TSV_COLUMNS, usd with 6 decimals."""
+    vals = {"time": row.get("time", ""), "agent": agent, "model": tsv_model(row.get("model", "")),
+            "input_tokens": int(row.get("input_tokens") or 0), "output_tokens": int(row.get("output_tokens") or 0),
+            "usd": f"{float(row.get('cost_usd') or 0.0):.6f}", "tag": f"{tag_prefix}{row.get('tag', '')}"}
+    return "\t".join(_tsv_field(vals[c]) for c in TSV_COLUMNS) + "\n"
+
+
+def _append_locked(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        if fcntl:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            f.flush()
+        finally:
+            if fcntl:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
+
 class CostLedger:
-    def __init__(self, path: str | os.PathLike | None = None):
+    """JSONL ledger (budget source) plus an optional shared TSV spend log.
+
+        CostLedger(".cache/ledger.jsonl", tsv_path="spend.log", agent="team-a", tag_prefix="d2/")
+
+    tsv_path / agent default to the env vars SIMENGINE_SPEND_LOG / SIMENGINE_AGENT (agent falls back to
+    "simengine"). tsv_path=False disables the TSV even when the env var is set. A failed TSV write
+    warns once and never fails the call (the spend is already in the JSONL ledger).
+    """
+
+    def __init__(self, path: str | os.PathLike | None = None, *, tsv_path: str | os.PathLike | bool | None = None,
+                 agent: str | None = None, tag_prefix: str = ""):
         self.path = Path(path) if path is not None else None
+        if tsv_path is None:
+            tsv_path = os.environ.get(SPEND_LOG_ENV, "").strip() or None
+        self.tsv_path = Path(os.path.expanduser(str(tsv_path))) if tsv_path not in (None, False, "") else None
+        self.agent = agent if agent else (os.environ.get(AGENT_ENV, "").strip() or DEFAULT_AGENT)
+        self.tag_prefix = tag_prefix
+        self._tsv_warned = False
         self._lock = threading.Lock()
         self._mem: list[dict] = []
         self._offset = 0          # bytes of the file already summed
@@ -41,18 +102,20 @@ class CostLedger:
             if self.path is None:
                 self._mem.append(row)
                 self._total += row["cost_usd"]
-                return row
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as f:
-                if fcntl:
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                try:
-                    f.write(line)
-                    f.flush()
-                finally:
-                    if fcntl:
-                        fcntl.flock(f, fcntl.LOCK_UN)
+            else:
+                _append_locked(self.path, line)
+        if self.tsv_path is not None:
+            self._write_tsv(row)
         return row
+
+    def _write_tsv(self, row: dict) -> None:
+        try:
+            _append_locked(self.tsv_path, tsv_line(row, self.agent, self.tag_prefix))
+        except OSError as e:
+            if not self._tsv_warned:
+                self._tsv_warned = True
+                warnings.warn(f"spend log {self.tsv_path} not writable ({type(e).__name__}); "
+                              "the JSONL ledger still has the row", RuntimeWarning, stacklevel=3)
 
     # ------------------------------------------------------------ read
     def rows(self) -> list[dict]:
@@ -109,4 +172,4 @@ class CostLedger:
         return out
 
 
-__all__ = ["CostLedger"]
+__all__ = ["CostLedger", "TSV_COLUMNS", "SPEND_LOG_ENV", "AGENT_ENV", "tsv_line", "tsv_model"]

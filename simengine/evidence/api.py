@@ -41,9 +41,10 @@ from . import onkayit as _onkayit
 from . import orneklem as _orneklem
 from . import pano as _pano
 from .cekirdek import SURUM, degerlendir
-from .sema import ON_EK, hazirla
+from .sema import ON_EK, gercek_yok, hazirla
 
 VERSION = SURUM
+MULTIPLIER_MAX_ROWS = 2000   # single-item PPI++ multiplier above this many rows: fixed-seed subsample
 
 # ------------------------------------------------------------------ name translation
 TASK_TO_INTERNAL = {"binary": "ikili", "multiclass": "cok_sinif", "distribution": "dagilim",
@@ -80,6 +81,7 @@ BELOW_BASELINE = "below baseline"
 RANK_METRICS = {"auc": 0.5, "pearson": 0.0, "spearman": 0.0, "madde_ici_kor": 0.0, "spearman_ici": 0.0,
                 "etki_korelasyonu": 0.0, "kappa": 0.0, "r2": 0.0, "demeaned_r2": 0.0}
 STATUS_TO_ENGLISH = {"tamam": "ok", "uyari": "warning", "hata": "error", "atlandi": "skipped"}
+CEILING_KIND = {"insan_tekrar": "human retest", "model": "oracle/model"}
 ROW_TO_ENGLISH = {"taban": "Strongest simple baseline", "ham": "Raw method", "kalibre": "Ours",
                   "tavan": "Human retest ceiling", "bosluk": "Gap closed (ours - base)/(ceiling - base)",
                   "bedel": "Worth N humans (+100 real answers)"}
@@ -138,7 +140,9 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              prereg: list | str | os.PathLike | None = None, classes: list | None = None, baselines: bool = True,
              multiplier_methods: Sequence[str] | None = None, circular: Sequence[str] | None = None,
              level: str | None = None, source: str | None = None,
-             unlabeled_baselines: Sequence[str] | None = None) -> dict:
+             unlabeled_baselines: Sequence[str] | None = None, baselines_oof: Sequence[str] | None = None,
+             ceiling_col: str | None = None, ceiling_label: str | None = None, aggregate_by: str | None = None,
+             multiplier_max_rows: int | None = MULTIPLIER_MAX_ROWS) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -151,6 +155,17 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     prereg: list of seal records, or a registry directory (its chain is attached to the report).
     circular: priors trained on the same population's target labels; excluded from "worth N humans".
     unlabeled_baselines: prediction columns that never saw target labels (e.g. persistence) -> baseline rungs.
+    baselines_oof: prediction columns trained on the target labels but cross-fitted (out-of-fold) -> baseline rungs.
+        The badge and headline compare ours with the strongest baseline (automatic + declared). When nothing is
+        declared and the strongest is the random/marginal rung, the card says "only trivial baselines".
+    ceiling_col: a model/oracle ceiling column ("pred_x" or any column name) instead of the human `retest`
+        ceiling; the card labels the ceiling type and the gap closed is computed from it. ceiling_label names it.
+    aggregate_by: evaluate at group level ("group" or any column): truth and predictions are averaged per group
+        (and per item / split when present) and the bootstrap resamples groups. Binary/continuous tasks only.
+    multiplier_max_rows: single-item frames larger than this compute the PPI++ multiplier on a fixed-seed
+        subsample of this many rows (None: whole table, slow). A warning is raised for large frames.
+    Missing truth: rows with no truth are dropped (noted); when the truth column is absent or all missing the
+    report is an "awaiting truth" card (seals + prediction summary; no ladder, calibration or bootstrap).
     """
     tmp = None
     ezber_json = None
@@ -162,22 +177,110 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     elif memorization is not None:
         ezber_json = str(memorization)
     if prereg is not None and not isinstance(prereg, list):
-        chain_file = Path(prereg) / _onkayit.ZINCIR_ADI
-        if not chain_file.exists():
-            warnings.warn(f"prereg registry {str(prereg)!r} has no {_onkayit.ZINCIR_ADI}: no seal is attached "
-                          f"(seal() writes to '.onkayit' unless you pass registry=...)", UserWarning, stacklevel=2)
-        prereg = _onkayit._zincir_oku(prereg)
+        if not chain_paths(prereg):
+            warnings.warn(f"prereg registry {str(prereg)!r} has no {_onkayit.ZINCIR_ADI} (evidence.seal / se.seal) "
+                          f"or {RESEARCH_CHAIN} (research.seal): no seal is attached", UserWarning, stacklevel=2)
+        prereg = chain(prereg)
+    d = to_internal(df)
+    methods_i = _methods(methods)
+    labels_i = {_method(k): v for k, v in (labels or {}).items()}
+    tavan_sutun = tavan_etiket = None
+    if ceiling_col is not None:
+        d, tavan_sutun, tavan_etiket = _ceiling_column(d, ceiling_col, ceiling_label, labels_i, ours, raw)
+        if methods_i:
+            methods_i = [m for m in methods_i if ON_EK + m != ceiling_col and m != _method(ceiling_col)]
+    toplama = None
+    if aggregate_by is not None:
+        d, toplama = _aggregate(d, aggregate_by, _task(task))
+        task = "continuous"
+        limits = list(limits or []) + [toplama["note"]]
+        level = level or "grup"
+    if multiplier and len(d) > (multiplier_max_rows or MULTIPLIER_MAX_ROWS) and not gercek_yok(d):
+        tek = "madde" not in d or d["madde"].nunique() <= 1
+        warnings.warn(
+            f"evaluate: {len(d)} rows with multiplier=True. " + (
+                f"The PPI++ 'worth N humans' multiplier is computed on a fixed-seed {multiplier_max_rows}-row "
+                "subsample (noted on the card)." if tek and multiplier_max_rows else
+                "The PPI++ multiplier runs on the whole table and can take minutes.")
+            + " Pass multiplier=False to skip it.", UserWarning, stacklevel=2)
     try:
-        return degerlendir(
-            to_internal(df), title, dataset, gorev=_task(task), yontemler=_methods(methods), bizim=_method(ours),
-            ham=_method(raw), etiketler={_method(k): v for k, v in (labels or {}).items()}, birincil=_metric(primary),
+        rep = degerlendir(
+            d, title, dataset, gorev=_task(task), yontemler=methods_i, bizim=_method(ours),
+            ham=_method(raw), etiketler=labels_i, birincil=_metric(primary),
             B=B, B_toplu=B_aggregate, tohum=seed, kalibre=_methods(calibrate), kesim=cutoff, ezber_json=ezber_json,
             carpan=multiplier, sinirlar=list(limits) if limits else None, onkayit=prereg, siniflar=classes,
             baseline=baselines, carpan_yontemler=_methods(multiplier_methods), dongusel=_methods(circular),
-            duzey=level, girdi_kaynagi=source, etiketsiz_tabanlar=_methods(unlabeled_baselines))
+            duzey=level, girdi_kaynagi=source, etiketsiz_tabanlar=_methods(unlabeled_baselines),
+            oof_tabanlar=_methods(baselines_oof), tavan_sutun=tavan_sutun, tavan_etiket=tavan_etiket,
+            carpan_en_fazla=multiplier_max_rows)
     finally:
         if tmp:
             os.unlink(tmp)
+    if toplama:
+        rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
+    return rep
+
+
+def evaluate_aggregate(df: pd.DataFrame, by: str = "group", title: str = "", ours: str | None = None,
+                       raw: str | None = None, **kw) -> dict:
+    """Group-level evaluation: `evaluate(df, ..., aggregate_by=by)` (e.g. 20 countries, Spearman, bootstrap over
+    groups)."""
+    return evaluate(df, title, ours, raw, aggregate_by=by, **kw)
+
+
+def _ceiling_column(d: pd.DataFrame, col: str, label, labels: dict, ours, raw):
+    """Move the ceiling column out of the method columns -> (frame, internal column, label)."""
+    cands = [col, COLUMN_TO_INTERNAL.get(col, col)]
+    if col.startswith(PRED_PREFIX):
+        cands.append(ON_EK + col[len(PRED_PREFIX):])
+    cands.append(ON_EK + col)
+    src = next((c for c in cands if c in d.columns), None)
+    if src is None:
+        raise ValueError(f"ceiling_col {col!r} is not a column of the frame")
+    name = _method(src) if src.startswith(ON_EK) else src
+    if name in (_method(ours), _method(raw)):
+        raise ValueError(f"ceiling_col {col!r} is also ours/raw")
+    d = d.rename(columns={src: "tavan_model"})
+    return d, "tavan_model", label or labels.get(name, name)
+
+
+def _aggregate(d: pd.DataFrame, by: str, task: str | None):
+    """Average truth, predictions, retest and model ceiling per group (x item x split when present)."""
+    col = COLUMN_TO_INTERNAL.get(by, by)
+    if col not in d.columns:
+        raise ValueError(f"aggregate_by {by!r} is not a column of the frame")
+    if task in ("cok_sinif", "dagilim", "ab"):
+        raise ValueError(f"aggregate_by works for binary/continuous tasks, not {TASK_TO_ENGLISH.get(task, task)}")
+    keys = [col] + [k for k in ("madde", "bolum") if k in d.columns and k != col]
+    num = [c for c in d.columns if c in ("gercek", "tekrar", "tavan_model") or (isinstance(c, str) and c.startswith(ON_EK))]
+    out = d[keys].copy()
+    for c in num:
+        x = pd.to_numeric(d[c], errors="coerce")
+        if c != "gercek" and x.isna().all() and d[c].notna().any():
+            raise ValueError(f"aggregate_by needs numeric columns; {c!r} is not numeric")
+        out[c] = x
+    if "gercek" in d.columns and out["gercek"].isna().all() and d["gercek"].notna().any():
+        raise ValueError("aggregate_by needs a numeric truth (binary or continuous)")
+    g = out.groupby(keys, sort=True, dropna=False)
+    agg = g[num].mean().reset_index()
+    agg.insert(len(keys), "n_satir", g.size().to_numpy())
+    # segment columns constant within the group survive (first value)
+    segs = [c for c in d.columns if isinstance(c, str) and (c == "segment" or c.startswith("seg_"))]
+    for c in segs:
+        s = d.groupby(keys, sort=True, dropna=False)[c]
+        if (s.nunique(dropna=False) <= 1).all():
+            agg[c] = s.first().to_numpy()
+    if col != "grup":
+        agg["grup"] = agg[col].astype(str)
+    n_groups = int(agg[col].nunique())
+    note = (f"Grup düzeyi değerlendirme (aggregate_by={by}): {len(d)} satır {n_groups} grubun ortalamasına indirildi "
+            f"(eşit satır ağırlığı, {len(agg)} değerlendirme satırı); bootstrap gruplar üzerinden. Grup içi örneklem "
+            "gürültüsü ortalamalarda kalır. Otomatik tabanlar (genel ortalama, demografi) grup satırları üzerinde "
+            "çapraz uydurmalıdır: kat dışı ortalama tutulan grupların ortalamasıyla ters ilişkili olduğundan sıra "
+            "metriklerinde (Spearman) bilgisizken bile sıfırın belirgin altında çıkabilir; anlamlı karşılaştırma için "
+            "baselines_oof / unlabeled_baselines ile grup düzeyi bir taban bildirin.")
+    return agg, {"by": by, "column": col, "n_rows": int(len(d)), "n_groups": n_groups, "n_eval_rows": int(len(agg)),
+                 "auto_baselines_cross_fitted_bias": True, "note": note}
 
 
 def save_json(report: dict, path) -> Path:
@@ -222,6 +325,11 @@ def _f3(x) -> str:
 def _headline_en(s: dict) -> str | None:
     """English one-line headline built from the summary fields (dot decimals)."""
     o, b = s.get("ours"), s.get("best_baseline")
+    if s.get("awaiting_truth"):
+        z = s.get("seals") or []
+        return (f"awaiting truth: predictions of {len(s.get('predictions') or {})} method(s)"
+                + (f", sealed ({len(z)} record(s), last sha256 {str(z[-1].get('sha256'))[:12]})" if z else ", NOT sealed")
+                + "; no metric until the truth is opened")
     if not o or o.get("value") is None:
         return None
     ci = lambda d: f" [{_f3(d.get('lo'))}, {_f3(d.get('hi'))}]" if d.get("lo") is not None and d.get("hi") is not None else ""
@@ -234,7 +342,10 @@ def _headline_en(s: dict) -> str | None:
         if d.get("alt") is not None and d.get("ust") is not None:
             out += f" [{d['alt']:+.3f}, {d['ust']:+.3f}] (paired, positive = better)"
     c = s.get("ceiling")
-    out += f"; human retest ceiling {_f3(c['value'])}" if c and c.get("value") is not None else "; no human retest ceiling"
+    kind = s.get("ceiling_kind") or "human retest"
+    out += f"; {kind} ceiling {_f3(c['value'])}" if c and c.get("value") is not None else "; no human retest ceiling"
+    if s.get("only_trivial_baselines"):
+        out += "; only trivial baselines (random/marginal) were compared"
     return out
 
 
@@ -264,6 +375,12 @@ def summary(report: dict) -> dict:
                    for r in report.get("merdiven") or []],
         "headline": m.get("cumle"),
         "seals": _seals(report),
+        "ceiling_kind": CEILING_KIND.get(report.get("tavan_turu") or ("insan_tekrar" if m.get("tavan") else None)),
+        "declared_baselines": list((report.get("tabanlar") or {}).get("bildirilen") or []),
+        "only_trivial_baselines": bool((report.get("tabanlar") or {}).get("yalniz_basit")),
+        "awaiting_truth": bool(report.get("gercek_bekleniyor")),
+        "predictions": report.get("tahmin_ozeti"),
+        "aggregate": report.get("toplama"),
     }
     out["headline_en"] = _headline_en(out)
     return out
@@ -325,21 +442,34 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     badge = _badge_english(k)
     if s.get("below_baseline"):
         badge += " (ours − strongest baseline CI is entirely below 0; research rule: inconclusive)"
+    if s.get("only_trivial_baselines"):
+        badge += (" (only trivial baselines: random/marginal; declare real ones with unlabeled_baselines= or "
+                  "baselines_oof=)")
     out.append(f"**Badge: {badge}.** " + ("" if en else reason))
     if k.get("etiketler"):
         out.append("")
         out.append("Flags: " + ", ".join(_dot(e, lang) for e in k["etiketler"]))
-    meta = f"Task: {s['task']} · primary metric: {s['primary_metric']} (`{s['primary_metric_internal']}`) · " \
-           f"clusters: {k.get('n')}"
+    meta = (f"Task: {s['task'] or '—'} · primary metric: {s['primary_metric'] or '—'}"
+            + (f" (`{s['primary_metric_internal']}`)" if s['primary_metric_internal'] else "") + f" · clusters: {k.get('n')}")
     if k.get("kaynak"):
         meta += f" · source: {_md(k.get('kaynak'))}"
+    if s.get("aggregate"):
+        a = s["aggregate"]
+        meta += f" · level: group (aggregate_by={a.get('by')}: {a.get('n_rows')} rows -> {a.get('n_groups')} groups)"
+    if s.get("ceiling_kind"):
+        meta += f" · ceiling: {s['ceiling_kind']}"
+    if s.get("declared_baselines"):
+        meta += " · declared baselines: " + ", ".join(f"`{c}`" for c in s["declared_baselines"])
     out += ["", meta, ""]
     if s.get("headline_en"):
         out += [f"Summary: {s['headline_en']}", ""]
     out += ["| Row | Method | Value [95% CI] | Note |", "|---|---|---|---|"]
     for r in k.get("satirlar") or []:
         u = r.get("birim") or ""
-        out.append(f"| {ROW_TO_ENGLISH.get(r['tur'], r['tur'])} | {_md(r.get('etiket'))} | "
+        row = ROW_TO_ENGLISH.get(r['tur'], r['tur'])
+        if r["tur"] == "tavan" and s.get("ceiling_kind") == "oracle/model":
+            row = "Oracle/model ceiling"
+        out.append(f"| {row} | {_md(r.get('etiket'))} | "
                    f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)} | {_dot(r.get('not'), lang)} |")
     f = k.get("fark")
     if f and f.get("fark") is not None:
@@ -353,6 +483,14 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
             p = "—" if r.get("p") is None else f"{r['p']:.3f}"
             out.append(f"| {_md(r.get('etiket'))} (`{r.get('sutun')}`) | {r.get('tur')} | "
                        f"{_num(r.get('deger'))}{_ci(r.get('alt'), r.get('ust'))} | {d} | {p} |")
+    if s.get("predictions"):
+        out += ["", "## Predictions (awaiting truth)", "", "| Column | n | missing | mean | sd | min | median | max | top labels |",
+                "|---|---|---|---|---|---|---|---|---|"]
+        for c, p in s["predictions"].items():
+            top = ", ".join(f"{_md(a)} {100 * b:.0f}%" for a, b in (p.get("en_sik") or {}).items())
+            out.append(f"| {_md(p.get('etiket'))} (`{c}`) | {p.get('n')} | {p.get('eksik')} | {_num(p.get('ortalama'))} | "
+                       f"{_num(p.get('sd'))} | {_num(p.get('en_kucuk'))} | {_num(p.get('medyan'))} | "
+                       f"{_num(p.get('en_buyuk'))} | {top or ('vector' if p.get('tur') == 'vektor' else '—')} |")
     if s["audits"]:
         out += ["", "## Audits", "", "| Check | Status | Detail |", "|---|---|---|"]
         for a in s["audits"]:
@@ -548,46 +686,103 @@ def split_audit(df: pd.DataFrame, task: str | None = None) -> list[dict]:
 
 
 def memorization_audit(items: list[dict], llm_or_caller, *, max_calls: int = _ezber.EN_FAZLA, B: int = 1000,
-                       seed: int = 0) -> dict:
+                       seed: int = 0, tolerance: float = 0.02, relative: bool = False) -> dict:
     """Completion-gap memorization test: hit rate on real items − hit rate on control (scrambled) items, item
     bootstrap 95 % CI; lower bound > 0 -> 'uyari' (memorization suspected).
     items: [{"prompt"|"istem", "expected"|"beklenen", "control"|"kontrol": bool}].
-    llm_or_caller: a simengine LLM (e.g. FakeLLM) or a str -> str callable."""
+    llm_or_caller: a simengine LLM (e.g. FakeLLM) or a str -> str callable.
+    tolerance / relative: numeric hit tolerance (absolute ±0.02 by default, for 0-1 shares); relative=True makes it
+    a share of the expected value (0-100 or any scale). For numeric aggregates use `correlation_audit` instead."""
     og = [{"istem": o.get("istem", o.get("prompt")), "beklenen": o.get("beklenen", o.get("expected")),
            "kontrol": bool(o.get("kontrol", o.get("control", False)))} for o in items]
     cagir = _ezber.llm_caller(llm_or_caller) if hasattr(llm_or_caller, "complete") else llm_or_caller
-    return _ezber.olc(og, cagir, en_fazla=max_calls, B=B, tohum=seed)
+    return _ezber.olc(og, cagir, en_fazla=max_calls, B=B, tohum=seed, tolerance=tolerance, relative=relative)
 
 
 answer_hit = _ezber.isabet
+correlation_audit = _ezber.correlation_audit
+audit_prompts = _ezber.audit_prompts
 
 # ------------------------------------------------------------------ pre-registration (kanit.onkayit)
 canonical_bytes = _onkayit.kanonik_bayt
 
 
-def seal(predictions, description: str, registry: str | os.PathLike = ".onkayit", git_commit: bool = False) -> dict:
-    """Seal a prediction table before the truth is revealed: SHA-256 of a canonical CSV + timestamp + hash chain."""
-    return _onkayit.muhurle(predictions, description, registry, git_commit)
+def _registry(registry, registry_dir):
+    """`registry_dir=` is accepted as an alias of `registry=` (the name research.seal and older se.seal used)."""
+    if registry_dir is None:
+        return registry if registry is not None else ".onkayit"
+    if registry is not None and Path(registry) != Path(registry_dir):
+        raise TypeError("pass registry= or registry_dir= (alias), not both")
+    return registry_dir
 
 
-def verify(predictions, sha256: str | None = None, registry: str | os.PathLike = ".onkayit") -> dict:
+def seal(predictions, description: str, registry: str | os.PathLike | None = None, git_commit: bool = False, *,
+         registry_dir: str | os.PathLike | None = None) -> dict:
+    """Seal a prediction table before the truth is revealed: SHA-256 of a canonical CSV + timestamp + hash chain.
+    registry (default '.onkayit'; `registry_dir=` is an accepted alias) gets `zincir.jsonl` + a gzip copy."""
+    return _onkayit.muhurle(predictions, description, _registry(registry, registry_dir), git_commit)
+
+
+def verify(predictions, sha256: str | None = None, registry: str | os.PathLike | None = None, *,
+           registry_dir: str | os.PathLike | None = None) -> dict:
     """Does the table still match a sealed hash? -> {"eslesti" (matched), "kayit" (record), "sha256"}."""
-    return _onkayit.dogrula(predictions, sha256, registry)
+    return _onkayit.dogrula(predictions, sha256, _registry(registry, registry_dir))
 
 
-def verify_chain(registry: str | os.PathLike = ".onkayit") -> dict:
+def verify_chain(registry: str | os.PathLike | None = None, *, registry_dir: str | os.PathLike | None = None) -> dict:
     """Recompute every link of the seal chain -> {"gecerli" (valid), "n", "kirik" (broken indices)}."""
-    return _onkayit.zincir_dogrula(registry)
+    return _onkayit.zincir_dogrula(_registry(registry, registry_dir))
 
 
-def grade(predictions, truth, keys: list[str], registry: str | os.PathLike = ".onkayit", **kw) -> dict:
+def grade(predictions, truth, keys: list[str], registry: str | os.PathLike | None = None, *,
+          registry_dir: str | os.PathLike | None = None, **kw) -> dict:
     """Verify the seal, then join predictions with the truth on `keys` (raises ValueError if not sealed)."""
-    return _onkayit.notla(predictions, truth, keys, registry, **kw)
+    return _onkayit.notla(predictions, truth, keys, _registry(registry, registry_dir), **kw)
+
+
+RESEARCH_CHAIN = "chain.jsonl"          # simengine.research.seal (default registry '.prereg')
+_DEFAULT_REGISTRIES = (".onkayit", ".prereg")
+_RESEARCH_TO_INTERNAL = {"seq": "sira", "time": "zaman", "time_utc": "zaman_utc", "rows": "satir", "cols": "sutun",
+                         "columns": "sutunlar", "description": "aciklama", "source": "kaynak", "archive": "arsiv",
+                         "prev": "onceki", "prev_record": "onceki_kayit", "record_hash": "kayit_hash"}
+
+
+def chain_paths(registry: str | os.PathLike = ".onkayit") -> list[Path]:
+    """Existing seal-chain files for a registry directory: `zincir.jsonl` (evidence.seal, also `se.seal`) and
+    `chain.jsonl` (research.seal). When the directory holds neither and is one of the two default names
+    ('.onkayit' / '.prereg'), the sibling default directory is tried, so a seal made with either API is found."""
+    p = Path(registry)
+    found = [f for f in (p / _onkayit.ZINCIR_ADI, p / RESEARCH_CHAIN) if f.exists()]
+    if not found and p.name in _DEFAULT_REGISTRIES:
+        for other in _DEFAULT_REGISTRIES:
+            if other != p.name:
+                q = p.parent / other
+                found = [f for f in (q / _onkayit.ZINCIR_ADI, q / RESEARCH_CHAIN) if f.exists()]
+    return found
 
 
 def chain(registry: str | os.PathLike = ".onkayit") -> list[dict]:
-    """Seal records of a registry (pass to evaluate(prereg=...))."""
-    return _onkayit._zincir_oku(registry)
+    """Seal records of a registry (pass to evaluate(prereg=...)). Reads both chain formats (see `chain_paths`):
+    evidence records are returned unchanged; research records keep their English keys and get the evidence names
+    (`sira`, `zaman_utc`, `satir`, `aciklama`, ...) added, plus `"zincir": "chain.jsonl"`."""
+    out = []
+    files = chain_paths(registry)
+    for f in files:
+        if f.name == _onkayit.ZINCIR_ADI:
+            out.extend(_onkayit._zincir_oku(f.parent))
+        else:
+            with open(f, encoding="utf-8") as fh:
+                recs = [json.loads(s) for s in fh if s.strip()]
+            for r in recs:
+                r2 = dict(r)
+                for en, tr in _RESEARCH_TO_INTERNAL.items():
+                    if en in r and tr not in r2:
+                        r2[tr] = r[en]
+                r2["zincir"] = RESEARCH_CHAIN
+                out.append(r2)
+    if len(files) > 1:
+        out.sort(key=lambda r: str(r.get("zaman_utc") or r.get("zaman") or ""))
+    return out
 
 
 # ------------------------------------------------------------------ card pieces

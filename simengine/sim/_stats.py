@@ -34,13 +34,13 @@ def to_jsonable(x: Any) -> Any:
 
 
 def to_number(x: Any, lo: float | None = None, hi: float | None = None) -> float | None:
-    """LLM value -> float ("7", "7/10", 7.0, "70%", "7,5"); clipped to [lo, hi]; None if unparseable."""
+    """LLM value -> float ("7", "7/10", 7.0, "70%", "7,5", "1e2"); clipped to [lo, hi]; None if unparseable."""
     if isinstance(x, bool) or x is None:
         return None
     if isinstance(x, (int, float, np.integer, np.floating)):
         v = float(x)
     else:
-        m = re.search(r"-?\d+(?:[.,]\d+)?", str(x))
+        m = re.search(r"-?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?", str(x))
         if not m:
             return None
         v = float(m.group(0).replace(",", "."))

@@ -40,8 +40,8 @@ llm = se.FakeLLM(se.sim.schema_responder())          # se.llm.Claude(model="clau
 pred = se.sim.segment_distribution(llm, segments, questions, population="adults in the country")
 registry = tempfile.mkdtemp(prefix="simengine-seal-")
 frame = se.sim.distribution_frame(pred, truth=None)
-rec = se.evidence.seal(frame[["unit", "pred_llm_dist"]].astype(str), "segment distribution before truth",
-                       registry=registry)
+rec = se.seal(frame[["unit", "pred_llm_dist"]].astype(str), "segment distribution before truth",
+              registry=registry)
 print("sealed:", str(rec.get("sha256"))[:12])
 
 # 2. Truth + baselines: uniform, and the overall marginal copied to every segment (segment ignored). The overall

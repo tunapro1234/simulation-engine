@@ -17,6 +17,7 @@ that combine an LLM prediction with a model learned from data.
 | `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout` | conditional multinomial logit for conjoint / discrete choice | 0.509 new-person accuracy on camera conjoint (HB 0.519, HB not ported) |
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank | 26.94 vs **31.60** exact next action on OPeRA |
 | `fit_mixture_weights`, `probe_types`, `identifiability`, `mixture` | theory-persona mixture calibration (Homo Silicus types, GSA selection): simplex grid fit, identifiability warning, held-out validation | reproduces the edsl-test fit (.36 / .50 / .14, train SSE .089); held-out dictator RMSE **.315**, i.e. the calibrated mixture does not transfer |
+| `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -27,6 +28,7 @@ that combine an LLM prediction with a model learned from data.
 - **[web]** = `uretim/web/RAPOR.md` (OPeRA next action)
 - **[makro]** = `uretim/makro/RAPOR.md`, **[llmabm]** = `uretim/makro/llmabm/RAPOR.md`
 - **[dongu]** = `uretim/dongu/GUNLUK.md` (OpinionQA group loop)
+- **[prova-d2]** = `uretim/prova/d2/NOTLAR.md` and `SIMENGINE-EKSIK.md` (blind rehearsal: new-country survey answers; code `kod/cv.py`, `cv_biz3.py`, `tahmin.py`)
 
 Every number below comes from those files. This port re-measured nothing. The tests
 (`tests/test_methods_*.py`) only check behaviour on synthetic data.
@@ -347,6 +349,103 @@ menus, so no identifiability warning was raised.
   with the calibrated group, both votes banned all punishment (`NOTES.md`, v2 results). The edsl-test fix is to add probes with prior unfair
   behaviour (ultimatum responder, a public-goods punishment stage) and to re-check the warning.
 - All evidence comes from one model (gpt-oss-120b) and 10 reps per cell. Nothing was measured on Claude.
+
+## Group transfer and out-of-fold predictions (`transfer.py`)
+
+Task shape: survey answers exist for people in some groups (countries, regions, schools); predict the answers of
+people in **new** groups from their demographics. There is no earlier wave, so persistence does not apply, and a
+random-row CV leaks each group's level into training. Report group-held-out CV.
+
+```python
+import simengine.methods as M
+feats = ["age", "education", "income", "gender"]                 # person features; df also has "country", "y"
+
+# out-of-fold predictions, no country in both train and test of a fold (GroupKFold); KFold when group=None
+oof_person = M.oof_predict(M.LightGBMBaseline(kind="continuous"), df, features=feats, target="y", group="country")
+oof_gt = M.oof_predict(M.GroupTransfer(group_features=llm_country_prior), df,        # prior: DataFrame indexed by country
+                       features=feats, target="y", group="country")
+
+# final model on all training countries, predictions for the new ones
+gt = M.GroupTransfer("country", group_features=llm_country_prior).fit(train[feats + ["country"]], train.y)
+gt.predict(test[feats + ["country"]])          # person-level
+gt.predict_groups(test[feats + ["country"]])   # stage A level per new country (rate for binary targets)
+```
+
+`oof_predict(model, df, *, features, target, group=None, n_splits=5, seed=0, method="predict")`
+- `model`: any object with `fit(X, y)` / `predict(X)` (sklearn estimator, simengine baseline, `GroupTransfer`) or a
+  zero-argument factory. It is cloned (or deep-copied) per fold. If `fit` / `predict` accept `groups=`, the fold's
+  group labels are passed, which is how `GroupTransfer` gets the groups.
+- `group` given: `GroupKFold(n_splits)`, deterministic as in the D2 code, so `seed` is unused. Fewer groups than
+  `n_splits` raises `ValueError`. Without `group`: `KFold(shuffle=True, random_state=seed)`.
+- `method="predict_proba"` keeps the positive-class column of a two-column output (sklearn classifiers). simengine
+  binary baselines already return P(y=1) from `predict`.
+- It returns a float Series aligned with `df.index`. Rows with a missing target (or group) are not trained on and
+  stay NaN. `.attrs["fold"]` holds each row's fold number, -1 when the row was not predicted. The Series can go
+  straight into an EvalFrame `pred_<method>` column.
+- Group-level scores of pooled group-held-out predictions are biased **negative** when there is no real group
+  signal. This is pessimistic, not leakage: a held-out group's prediction leans on the other groups' mean, which
+  is lower when the held-out groups' own mean is higher. With a few dozen groups, the group-level Spearman of the
+  pooled OOF predictions is clearly below 0 under the null (a unit test checks the sign on synthetic data). So
+  compare with a baseline cross-fitted the same way, such as `GroupTransfer(person_model=None, composition=())`,
+  not with 0. The same holds for `evaluate(aggregate_by=...)`'s automatic baselines.
+
+`GroupTransfer(group_col=None, *, composition=None, group_features=None, person_model="auto", kind="auto",
+alphas=logspace(-1, 3, 20), clip=(0.02, 0.98), seed=0)`: a port of `iki_asama` in `kod/cv.py` **[prova-d2]**.
+- **A, group level.** Each training group's mean target is regressed on group features with `StandardScaler` +
+  `RidgeCV(alphas)`, one row per group. Binary targets use the logit of the rate, clipped to `clip`. Group
+  features are the group's **composition**: means of the `composition` columns over the group's rows (default:
+  all numeric person features), category shares for non-numeric columns (top 20), and the missing-value rate of
+  numeric columns that have gaps. They are computed from inputs only, so a new group has them too. Any
+  `group_features` columns (e.g. an LLM prior per country) are added. Missing values are filled with the
+  training-group means. Use `composition=()` for group features only.
+- **B, person deviation.** `y - observed group mean` is regressed on the person features (`group_col` excluded).
+  `"auto"` picks LightGBM, as in the port, when it is installed and ridge otherwise. You can also pass `"ridge"`,
+  `"lightgbm"`, `None` (group level only) or any regressor.
+- **Prediction** is `A + B`. For binary targets it is `expit(A) + B`, clipped to [0, 1]. That is fine for ranking
+  and AUC, but it is not a calibrated probability.
+- Groups come from `groups=` in `fit` / `predict`, or from the `group_col` column of `X`. `group_features=` passed
+  to `fit` / `predict` overrides the constructor one. Multiclass targets raise `ValueError`.
+- `group_features` must be indexed by the group labels. If fewer than half the groups match exactly but more match
+  as strings (int labels against a str-indexed prior, or the reverse), the string match is used and a
+  `UserWarning` says so. If most groups still have no row, a `UserWarning` says that the prior has little or no
+  effect, because unmatched groups get the training mean.
+  ```python
+  prior = llm_prior.set_index("country")          # index "1", "2", ... while df.country holds ints 1, 2, ...
+  M.GroupTransfer("country", group_features=prior)  # warns "matched ... as strings" and still uses the prior
+  ```
+- Differences from the research code: composition is computed from the rows passed to `fit` / `predict`, while
+  the port pooled train and test inputs. The values are the same when whole groups are passed. NaN fill uses
+  training-group means instead of all-group means, and the binary output is clipped.
+
+Measured **[prova-d2]** (43 training countries, 5-fold country-held-out CV, person-level Spearman on a 0-100 policy
+score; numbers from `NOTLAR.md`, not re-measured here):
+
+| arm | CV Spearman |
+|---|---|
+| person-only LightGBM (T3) | 0.197 |
+| LightGBM + composition columns (T4) | 0.234 |
+| two-stage, no LLM (T5) | 0.257 |
+| two-stage + LLM country prior (BIZ2) | 0.295 |
+| two-stage + extended LLM prior (BIZ3, 3rd config) | 0.311 |
+| oracle country level + T3 (ceiling) | 0.344-0.346 |
+
+In the D2 evidence cards (`SIMENGINE-EKSIK.md` #13), the submitted two-stage arm was `high confidence` against T5 on
+the policy score (+0.054 Spearman), but **inconclusive** on the binary share target against LightGBM + composition
+(+0.004 AUC; T4 AUC 0.671).
+
+**When it should help.** The answer's group level varies across groups, and that level is predictable from
+who lives in the group or from a group-level prior. It also needs enough training groups for a per-group ridge:
+D2 fit it on about 34 groups per fold, so keep group features few.
+
+**When it does not help.**
+- If the person features already explain the outcome and group levels barely differ, stage A only adds noise.
+- With fewer than about 10 training groups, stage A has too few rows for a per-group ridge (with fewer than 3
+  groups it falls back to the mean of group means).
+- An LLM group prior can leak a memorised published result. D2 ran a named- vs blind-prompt audit and found
+  no sign of this, but check it on every new dataset (`simengine.evidence` memorization audits).
+- The D2 numbers come from one dataset and one CV split and have no bootstrap CI. `tests/test_methods_transfer.py`
+  only checks that, on synthetic groups with a real composition effect, `GroupTransfer` beats a global mean and
+  a person-only ridge in group-held-out CV (and that the prior helps when it carries signal).
 
 ## Not ported / gaps
 

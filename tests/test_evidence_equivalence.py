@@ -52,6 +52,24 @@ def _strip(oz):
     return oz
 
 
+TRIVIAL = "yalnız basit tabanlar"
+
+
+def _base(oz):
+    """Drop the additive simengine extensions (declared-baseline block, ceiling kind, the "only trivial baselines"
+    audit, limit line and card flag) so the rest can be compared with the original kanit report."""
+    oz = json.loads(json.dumps(oz))
+    oz.pop("tabanlar", None)
+    oz.pop("tavan_turu", None)
+    oz["denetim"] = [d for d in oz.get("denetim") or [] if d.get("kontrol") != TRIVIAL]
+    oz["sinirlar"] = [x for x in oz.get("sinirlar") or [] if not x.lower().startswith(TRIVIAL)]
+    k = oz.get("kanit_kart")
+    if k:
+        k["etiketler"] = [x for x in k.get("etiketler") or [] if not x.startswith(TRIVIAL)]
+        k["yanilgi"] = [x for x in k.get("yanilgi") or [] if not x.lower().startswith(TRIVIAL)]
+    return oz
+
+
 def _continuous(seed=0, P=60, M=24):
     rng = np.random.default_rng(seed)
     kisi = np.repeat(np.arange(P), M)
@@ -110,7 +128,7 @@ class TestEquivalence(unittest.TestCase):
         if "multiplier" in kw_en:
             tr_kw["carpan"] = kw_en["multiplier"]
         o = kanit.degerlendir(df.copy(), "t", "v", **tr_kw)
-        e = ev.evaluate(_english(df), "t", dataset="v", B=200, B_aggregate=40, **kw_en)
+        e = _base(ev.evaluate(_english(df), "t", dataset="v", B=200, B_aggregate=40, **kw_en))
         self.assertEqual(_strip(o), _strip(e))
         # Turkish aliases and English columns reach the same internal frame
         pd.testing.assert_frame_equal(ev.to_internal(df), ev.to_internal(_english(df)))

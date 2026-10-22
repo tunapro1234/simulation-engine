@@ -119,7 +119,9 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
                not_=None if tb else "taban yok"),
          satir("ham", f"Ham: {ham['etiket']}" if ham else "Ham yöntem", *_u(ham), not_=None if ham else "ham kol yok"),
          satir("kalibre", f"Bizim: {biz['etiket']}" if biz else "Bizim yöntem", *_u(biz)),
-         satir("tavan", "İnsan tekrar tavanı", *_u(tav), not_=None if tav else "tavan yok (test-tekrar ölçülmemiş)"),
+         satir("tavan", "Model/oracle tavanı" if oz.get("tavan_turu") == "model" else "İnsan tekrar tavanı", *_u(tav),
+               not_=(("tür: model/oracle (insan test-retest değil)" if oz.get("tavan_turu") == "model" else None)
+                     if tav else "tavan yok (test-tekrar ölçülmemiş)")),
          satir("bosluk", "Kapanan boşluk (bizim − taban)/(tavan − taban)", *_u(bos), birim="%",
                not_=None if bos else "tavan yok: hesaplanamaz"),
          None]
@@ -136,6 +138,10 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     atl = [d.get("kontrol") for d in oz.get("denetim") or [] if d.get("durum") == "atlandi"
            and any(k in (d.get("kontrol") or "") for k in ("bölme", "grup", "zaman", "kontaminasyon", "ezber"))]
     et = list(etiketler or []) + (["kanıtlanmadı: sızıntı/ezber"] if atl else [])
+    if (oz.get("tabanlar") or {}).get("yalniz_basit"):
+        et.append("yalnız basit tabanlar (rastgele/marjinal)")
+    if r == "bekliyor" and not (muhur or oz.get("onkayit")):
+        g = "Gerçek sonuç henüz yok ve tahmin mühürlenmemiş: gerçek açılmadan önce seal() ile mühürleyin."
     return {"baslik": oz.get("baslik"), "alt_baslik": f"metrik: {birincil}", "metrik": birincil,
             "n": (oz.get("kart") or {}).get("n_kume"), "kaynak": oz.get("girdi_kaynagi") or oz.get("veri_adi"),
             "satirlar": S, "fark": fark, "rejimler": rejimler or [],

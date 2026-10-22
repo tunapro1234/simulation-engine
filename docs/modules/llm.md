@@ -9,11 +9,12 @@ The module has three backends that implement the `simengine.types.LLM` protocol
 | `ClaudeCode` | `claude_code.py` | `claude -p` subprocess. Runs on the subscription with no API bill. Meant for long-lived or low-volume agents. |
 | `FakeLLM` | `fake.py` | Deterministic and offline, for tests and dry runs. Unchanged. |
 | `DiskCache`, `cache_key` | `cache.py` | One JSON file per sha256(model + system + user + params). Writes are atomic, so threads and processes can share one cache. |
-| `CostLedger` | `ledger.py` | JSONL ledger with one line per real call, written under flock. `total()` reads incrementally. |
+| `CostLedger` | `ledger.py` | JSONL ledger with one line per real call, written under flock. `total()` reads incrementally. Optional shared TSV spend log (`tsv_path=`, `agent=`; `TSV_COLUMNS`). |
+| `looks_like_refusal` | `refusal.py` | Conservative regex detector for soft refusals in plain text (English and Turkish). |
 | `PRICES`, `cost_usd`, `usage_cost` | `pricing.py` | Price per model in $/MTok and the token-to-USD formula. |
 | `json_extract`, `complete_json` | `jsonx.py` | Robust JSON extraction from LLM text. `complete_json` re-asks once if parsing fails. |
 | `parallel_map` | `parallel.py` | Thread pool that keeps input order. A `StopError` cancels the pending items. |
-| errors | `errors.py` | `LLMError` > `StopError` > `AuthError`, `SpendLimitError`, `BudgetExceeded`; plus `RefusalError`. |
+| errors | `errors.py` | `LLMError` > `StopError` > `AuthError`, `SpendLimitError`, `BudgetExceeded`; plus `RefusalError`, `EmptyResponseError` (both `LLMError`) and the `ThinkingBudgetWarning` warning class. |
 
 Ported from (read-only research code, `uretim/<branch>/`):
 - `talp73/kod/llm/claude_api.py`: effort, cache_control, the price table, the cost formula, the budget gate, and the 401 / limit stop.
@@ -52,7 +53,18 @@ the cache are still served; a new call raises `AuthError`.
   `output_config={"format": ...}`, ...) pass through.
 - **Thinking.** Omitted by default, which means adaptive thinking on the 5.x models. `thinking="off"` maps to
   `{"type": "disabled"}` on Haiku and `{"type": "between_tools"}` on Sonnet 5.5. On Opus 5.5 and Fable it raises
-  `ValueError`, because thinking cannot be turned off there; lower the effort instead.
+  `ValueError`, because thinking cannot be turned off there; lower the effort instead. The default is kept as it was
+  in the research runs (they used it), but thinking tokens count toward `max_tokens`:
+  - the first real call of an instance with `max_tokens < 1024` and thinking not off (`"off"` or
+    `{"type": "disabled"}`) emits one `ThinkingBudgetWarning` (`warnings.warn`, once per instance; cache hits do not warn);
+  - a reply with **empty text and `stop_reason == "max_tokens"`** raises `EmptyResponseError` (an `LLMError`). It is
+    billed (ledger and TSV row), **not cached** and not retried. In the D2 rehearsal (`prova/d2/SIMENGINE-EKSIK.md` #4)
+    186 of 189 Haiku calls at `max_tokens=300` with default thinking came back like this and were cached as empty
+    answers before this fix. Fix it with `thinking="off"` (Haiku, Sonnet 5.5) or a larger `max_tokens`:
+
+  ```python
+  llm = Claude(model="claude-haiku-5-5", effort="low", thinking="off", max_tokens=400, cache_dir=".cache")
+  ```
 - **Cache key.** sha256 over model, system, user and every request parameter except `cache_control`, plus
   `sample` (an integer that gives independent draws of the same prompt). Only answers that pass `validate` are cached.
   Refusals and errors are never cached.
@@ -84,13 +96,85 @@ the cache are still served; a new call raises `AuthError`.
     (15 s, 30 s, ...) for 429/529 and `error_wait·attempt` (3 s, ...) for the rest.
   - Any other 4xx raises `LLMError` without a retry.
   - `stop_reason == "refusal"` raises `RefusalError`. It is not cached and not retried.
-- **Validation.** A `validate(text)` hook that raises `ValueError`, `KeyError` or `TypeError` triggers a retry, which
-  costs another call and is logged in the ledger.
+- **Validation and keeping replies out of the cache.** Two per-call hooks (both work in `map`, and on `ClaudeCode`):
+  - `validate(text)`: raising `ValueError`, `KeyError` or `TypeError` retries the call (each retry is billed and
+    logged); an invalid reply is **never cached**; after `max_attempts` it raises `LLMError`.
+  - `cache_if(text) -> bool`: `False` returns the reply as usual but does **not** write it to the disk cache and does
+    not retry; the response has `raw["not_cached"] = True`. An exception inside `cache_if` counts as `False`. Use it to
+    count soft refusals without freezing them in the cache, so a re-run (or a re-framed prompt) asks again:
+
+  ```python
+  from simengine.llm import looks_like_refusal
+  rs = llm.map(prompts, tag="survey:persona", cache_if=lambda t: not looks_like_refusal(t), return_exceptions=True)
+  refused = [r for r in rs if not isinstance(r, Exception) and r.raw.get("not_cached")]
+  ```
+- **Tags.** `tag=` on `complete()` and `map()` (default: the constructor's `tag`) goes into every ledger and TSV row,
+  so spend can be split by arm (`persona` / `no_persona` / `persona_swap`). `FakeLLM` accepts and ignores it.
 - **map and stops.** `map` uses a thread pool (`parallel`, default 4). A `StopError` cancels the items that have not
   started. Finished answers are already in the cache, so re-running the same code resumes where it stopped.
+  Other errors (`LLMError`, `RefusalError`, `EmptyResponseError`) raise from `map` by default; with
+  `return_exceptions=True` each one lands in its own result slot and the other items continue.
 - **Fallbacks.** `fallbacks=None` by default. Setting it (for example `"default"`) uses the server-side-fallback beta,
   which can let a different model answer. That breaks a measured model comparison, so it is opt-in. The model that
   actually answered is recorded as `served_model`.
+
+## Shared spend log (TSV)
+
+Besides its JSONL ledger (still the budget source), `CostLedger` can append to a shared, tab-separated spend log that
+several agents write to: one line per real (non-cached) call, no header, written under flock. The column layout is
+`simengine.llm.TSV_COLUMNS`:
+
+| time | agent | model | input_tokens | output_tokens | usd | tag |
+|---|---|---|---|---|---|---|
+| `2026-10-22T02:07:13+0000` | `team-a` | `anthropic/claude-haiku-5-5` | `1234` | `56` | `0.000123` (6 decimals) | `d2/country` |
+
+This is the layout the D2 rehearsal wrote with its own `CostLedger` subclass (`prova/d2/kod/ortak.py`). Bare Claude ids
+get the `anthropic/` prefix; `claude -p` rows keep `claude-p/<id>` and `usd = 0.000000` (subscription).
+`input_tokens` includes cache-write tokens, as in the JSONL ledger.
+
+```python
+from simengine.llm import Claude, CostLedger
+llm = Claude(model="claude-haiku-5-5", cache_dir=".cache", spend_log="spend.log", agent="team-a")   # default ledger
+led = CostLedger(".cache/ledger.jsonl", tsv_path="spend.log", agent="team-a", tag_prefix="d2/")     # explicit
+llm = Claude(model="claude-haiku-5-5", ledger=led)
+```
+
+- `tsv_path` / `spend_log` default to the env var `SIMENGINE_SPEND_LOG`; `agent` defaults to `SIMENGINE_AGENT`, then
+  `"simengine"`. `tsv_path=False` turns the TSV off even when the env var is set.
+- `tag_prefix` is prepended to the TSV tag column only (the rehearsal used `<run>/<tag>`).
+- Passing `spend_log=`/`agent=` together with a `ledger=CostLedger(...)` instance raises `ValueError`; configure that
+  instance instead.
+- A TSV write failure warns once (`RuntimeWarning`) and never fails the call; the row is still in the JSONL ledger.
+
+## Soft refusals: `looks_like_refusal(text)`
+
+Hard refusals (`stop_reason == "refusal"`) raise `RefusalError`. Soft ones come back as ordinary text with
+`stop_reason == "end_turn"`: in the D2 rehearsal 59 of 150 Haiku 5.5 survey batches answered "I can't produce this as
+a survey dataset... invent answers for people who don't exist", and 137 of 602 personas (23 %) stayed unanswered
+(`prova/d2/SIMENGINE-EKSIK.md` #6). `looks_like_refusal(text) -> bool` flags such replies. It is conservative (it
+prefers missing a refusal to flagging an answer):
+
+- only the first 400 characters are read, and a phrase must start in the first 200 (`REFUSAL_HEAD`, `REFUSAL_START`);
+- a reply starting with JSON (`{`, `[`, a ```` ```json ```` fence) is never a refusal;
+- quoted spans are removed first, so a quoted option such as `"I can't afford it"` does not count;
+- English needs first-person negation plus a task verb ("I can't produce this", "I cannot create responses",
+  "I'm not able to role-play", "I won't fabricate", "I'm not comfortable generating fake responses"); everyday
+  verbs (produce, provide, write, complete, fill out, ...) count only with a task object: a task noun (responses,
+  data, survey, request, ...), a demonstrative plus a task noun ("this survey"), or a bare demonstrative at the end
+  of the clause ("I can't produce this."). "pretend" needs a person object ("pretend to be these people"). Also
+  counted: "I'm going to decline to role-play ...", "I don't think it's appropriate for me to fabricate ...",
+  "Rather than fabricate data, ...", and an apology plus "I can't do that." at the end of the clause.
+  Not refusals: "I can't make up my mind", "I decline the offer" (a game move), "As an AI researcher, ...",
+  "I won't pretend I love it", "I will not complete this purchase", "I can't fill out these forms every week";
+- Turkish needs a refusal verb plus context: an AI / fiction / request word ("var olmayan", "bu isteği"), a
+  demonstrative plus a task noun right before the verb ("Bu yanıtları üretemem"), or a demonstrative pronoun right
+  before the verb with a fabrication verb or an apology ("Maalesef bunu yapamam"). "Maalesef bu fiyata alışveriş
+  yapamam", "Bu tür bir ürünü üretemem ama satın alırım" and "Bunu yapamam, çok pahalı" are not refusals.
+
+The patterns are hand-written from the rehearsal's refusal text and the cases in `tests/test_llm_gaps.py` and
+`tests/test_llm_refusal_review.py`; their precision and recall on real model output have not been measured. Because
+of the remaining false-positive risk, use it as `cache_if=` only on replies that should be structured (JSON); for
+free persona speech, false positives only skip caching (the reply is still returned).
 
 ## `ClaudeCode` behaviour
 
@@ -108,7 +192,8 @@ the cache are still served; a new call raises `AuthError`.
   that mentions a usage limit raises `SpendLimitError`; not-logged-in or invalid-key text raises `AuthError`; neither
   is retried. These marker strings are guesses: they have not been checked against real CLI failure output.
 - **Arguments.** `max_tokens` is accepted for protocol compatibility but is not passed on; the CLI has no such flag.
-  Other keyword arguments raise `TypeError`.
+  `tag`, `sample`, `validate` and `cache_if` work as for `Claude`; `spend_log=`/`agent=` as for `Claude`. Other keyword
+  arguments raise `TypeError`.
 
 ## When it works and when it does not (measured)
 
