@@ -245,27 +245,6 @@ adversarial check found that this biases *against* the hybrid **[deney 2.1]**.
   `simengine.evidence.section_markdown` renders. It shows accuracy at n0, the multiplier with its CI and
   censoring, n_calib and the calibration slope, so the traffic multiplier can sit next to the card.
 
-**Comparing priors, weak priors, censoring, the card.** These live in `simengine.methods.bayes_prior`:
-
-- `simulate_saving_calibrated(..., return_pairs=True)` also returns `hybrid_pairs` / `human_pairs` (per-pair
-  accuracy per n, means equal the aggregate) and `decisions_n0` (draws x reps x pairs, True = ship A).
-- `compare_priors({"tfidf": p1, "llm": p2}, ctr_a, ctr_b)` runs every prior on the same replays, tie coins,
-  calibration sets and bootstrap resamples. Each prior's numbers equal a separate `simulate_saving_calibrated`
-  call. `diffs` gives accuracy and multiplier minus the first prior, `vs_human` gives accuracy minus human-only,
-  both with paired 95% CIs. `cluster=<test id per pair>` resamples tests instead of pairs.
-- Weak-prior guard. A RuntimeWarning (also in `warnings`) fires when the free calibration slope k spans 0 over the
-  blocks x draws calibration sets (`k_calib`), or when prior-only accuracy is below 0.6. Calibrated on 20 tests,
-  such a prior can cost traffic. `mode="tiebreak"` is the safe choice there: the human decides and the prior only
-  breaks ties, so it cannot do worse than human-only in expectation as long as the prior is right on at least
-  half of the tied tests.
-- Censoring. When the hybrid beats the top of the human curve, `multiplier` is None, `multiplier_censored=True`
-  and `multiplier_lower_bound = max(ns) / n0` (16x with the defaults). Bootstrap replicates above the curve rank
-  above every finite one, and a CI endpoint in that tail is None (`ci_censored`). Earlier versions dropped those
-  replicates, which made the CI too low. `multiplier_at_floor` marks a value clamped at the bottom of the curve.
-- `saving_section(result)` turns either result into an evidence-card section that
-  `simengine.evidence.section_markdown` renders. It shows accuracy at n0, the multiplier with its CI and
-  censoring, n_calib and the calibration slope, so the traffic multiplier can sit next to the card.
-
 ## Hybrids (`hybrid.py`)
 
 These are the three ways an LLM prediction entered a data model during the prep nights, plus the generic
@@ -664,6 +643,8 @@ oof_med = oof_predict(GroupStat(by=["outcome", "year"], stat="median"), df, feat
   `alphas`). With `sample_weight`, the fill / centring / scaling and the ridge are all weighted. `None` for
   `cat` / `num` = the remaining columns of `X` by dtype (numeric -> `num`), `()` = none. Put numeric codes such as
   a year in `cat` to get one dummy per value. `alpha_`, `coef_` (by encoded column name) and `intercept_` after fit.
+  In all four classes an integral float and the same int are one category (2020.0 from a column with a NaN at fit
+  is 2020 at predict).
 - `TabularGBDT(cat=None, num=None, *, backend="auto", seed=0, **params)`: LightGBM with native categoricals when
   it is importable, else sklearn `HistGradientBoostingRegressor` with a `RuntimeWarning` (`backend_` says which ran;
   `backend="sklearn"` forces the fallback). Small-table defaults: 300 trees, lr 0.05, 15 leaves, 20 rows per leaf.
@@ -674,7 +655,8 @@ oof_med = oof_predict(GroupStat(by=["outcome", "year"], stat="median"), df, feat
   the next coarser prefix of `by` (`by[:-1]`, ...), then to the grand random-effects mean. `level(X)` returns the
   cell depth each prediction came from (0 = grand). `se_col` must be in `features=`. Rows with NaN se are dropped
   with a warning, and `se <= 0` raises. There is no `sample_weight`, because the weights are the precisions. The
-  pooling function itself is `dersimonian_laird(y, se) -> (mu, tau2, se_mu)`.
+  pooling function itself is `dersimonian_laird(y, se) -> (mu, tau2, se_mu)`. D5's B3 (one assumed `tau2 = 2` in
+  every outcome x year cell) is `RandomEffectsMean(by=["outcome", "year"], tau2=2.0)`.
 - `GroupStat(by, stat="median", *, weight=None, min_n=1)`: per-cell `"median"`, `"mean"` or `"wmean"`, with the
   same fallback. Weights come from `X[weight]`, or else from `sample_weight` (`oof_predict(weight=)`). When weights
   are present, `mean` / `wmean` are the weighted mean and `median` is the weighted median. `wmean` without weights
@@ -686,8 +668,9 @@ fallback, that weighted fits move toward the heavy rows (TabularRidge, both GBDT
 `make_pipeline` routed through `oof_predict`), and the `TypeError` for models without `sample_weight`.
 
 **When it does not help.** With only a handful of rows per cell, a per-cell DL `tau2` is noisy (it is 0 whenever
-`Q < k-1`). Raise `min_n` so that small cells use the coarser level. Median vs mean matters for MAE: in D5 the median scored
-1.547 and the weighted mean 1.524. Try both, and cross-fit them the same way.
+`Q < k-1`). Raise `min_n` so that small cells use the coarser level. Median or mean can matter for MAE: in D5 the median
+scored 1.547 and the weighted mean 1.524, but the paired CI of the difference included 0 (-0.023 [-0.073, +0.018]).
+Try both, cross-fit them the same way, and do not read a gap that size as a winner.
 
 ## Item cold start (`coldstart.py`)
 
