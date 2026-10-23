@@ -188,8 +188,9 @@ def _birey_dizileri(veri, sutunlar):
 
 def _birey(veri, sutunlar, n_listesi, R, B, rng, notlar):
     Y, Fs, madde, K = _birey_dizileri(veri, sutunlar)
-    sira = np.argsort(madde, kind="stable")
-    gruplar = [ix for ix in np.split(sira, np.cumsum(np.bincount(madde))[:-1]) if len(ix) >= 2] if len(madde) else []
+    var = np.flatnonzero(madde >= 0)                                      # factorize: eksik madde kimliği −1, dışarıda
+    sira = var[np.argsort(madde[var], kind="stable")]
+    gruplar = [ix for ix in np.split(sira, np.cumsum(np.bincount(madde[var]))[:-1]) if len(ix) >= 2] if len(var) else []
     M = len(gruplar)
     if M == 0:
         return None
@@ -279,7 +280,7 @@ def _yalniz_tek(y, f, B, rng, K=1, parca=20):
     oran = lambda s2, mse: np.minimum(s2 / np.maximum(mse, s2 / ORAN_TAVAN + 1e-300), ORAN_TAVAN)
     if y.ndim > 1:                                                        # yoğun (K = 1): özgün aritmetik
         def es(ix):
-            if len(ix) * N * y.shape[1] > PARCA:
+            if len(ix) > 1 and len(ix) * N * y.shape[1] > PARCA:               # tek tekrar bölünemez
                 adim = _adim(N * y.shape[1], len(ix))
                 return np.concatenate([es(ix[a:a + adim]) for a in range(0, len(ix), adim)])
             yy, ff = y[ix], f[ix]                                         # (b, N, K)

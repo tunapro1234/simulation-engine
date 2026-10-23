@@ -162,6 +162,41 @@ class PinnedOutputTest(unittest.TestCase):
             np.testing.assert_array_equal(a, b)
             self.assertEqual(rng.random(), np.random.default_rng(5).random(R * N + 1)[-1])
 
+    def test_missing_item_ids_skipped(self):
+        # factorize codes a missing item id as -1: those rows are left out (dense version did), no bincount crash
+        rng = np.random.default_rng(2)
+        M, N, K = 22, 60, 4
+        cls = np.array([f"c{i}" for i in range(K)])
+        t = rng.integers(0, K, M * N)
+        f = np.where(rng.random(M * N) < .5, t, rng.integers(0, K, M * N))
+        md = np.array([f"m{i % M}" for i in range(M * N)], dtype=object)
+        y = rng.normal(0, 1, M * N)
+        for gorev, gercek, tahmin in (("cok_sinif", cls[t], cls[f]), ("surekli", y, y + rng.normal(0, 1, M * N))):
+            with self.subTest(gorev=gorev):
+                d = pd.DataFrame({"madde": md, "gercek": gercek, "tahmin_a": tahmin})
+                eksik = d.copy()
+                eksik.loc[:29, "madde"] = None
+                o = ok.carpan(sema.hazirla(eksik, gorev=gorev), {"tahmin_a": "a"}, n_listesi=(10, 25), R=40, tohum=3,
+                              B=100)
+                self.assertTrue(o["yontemler"]["tahmin_a"]["ppi"])
+                # same report as dropping those rows up front
+                temiz = ok.carpan(sema.hazirla(d.iloc[30:].reset_index(drop=True), gorev=gorev), {"tahmin_a": "a"},
+                                  n_listesi=(10, 25), R=40, tohum=3, B=100)
+                self.assertEqual(o["yontemler"], temiz["yontemler"])
+
+    def test_dense_single_item_larger_than_chunk(self):
+        # one replicate of N x 1 above PARCA cannot be split further: computed whole, no RecursionError
+        rng = np.random.default_rng(4)
+        y = rng.normal(0, 1, (300, 1))
+        f = y + rng.normal(0, 1, (300, 1))
+        tam = ok._yalniz_tek(y, f, 50, np.random.default_rng(1))
+        eski, ok.PARCA = ok.PARCA, 100
+        try:
+            kucuk = ok._yalniz_tek(y, f, 50, np.random.default_rng(1))
+        finally:
+            ok.PARCA = eski
+        self.assertEqual(tam, kucuk)
+
 
 class LargeFrameGuardTest(unittest.TestCase):
     """Dense version (567c6b2) on these frames: peak 2.48 GB / 14.8 s (single item), 1.74 GB / 4.9 s (three items);
