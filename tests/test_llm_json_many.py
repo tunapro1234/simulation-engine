@@ -3,7 +3,7 @@ import threading
 import time
 import unittest
 
-from simengine.llm import AuthError, FakeLLM, complete_json_many
+from simengine.llm import AuthError, BudgetExceeded, FakeLLM, complete_json_many
 from simengine.types import LLMResponse
 
 
@@ -122,6 +122,37 @@ class CompleteJsonManyTest(unittest.TestCase):
         self.assertEqual(complete_json_many(FakeLLM(echo), []), [])
         with self.assertRaises(TypeError):
             complete_json_many(FakeLLM(echo), ["just a user prompt"])
+        llm = FakeLLM(echo)
+        with self.assertRaises(TypeError):                   # dict without "user": rejected before any call
+            complete_json_many(llm, [("s", "1"), {"system": "s"}])
+        with self.assertRaises(TypeError):                   # stats is the call's, not a request's
+            complete_json_many(llm, [{"system": "s", "user": "1", "stats": {}}])
+        self.assertEqual(llm.calls, [])
+
+    def test_per_request_attempts_override(self):
+        # attempts is a named parameter of complete_json_many; a dict request overriding it used to hit
+        # "got multiple values for keyword argument 'attempts'" and land silently as a TypeError in its slot.
+        llm = FakeLLM(echo)
+        st = {}
+        out = complete_json_many(llm, [{"system": "s", "user": "bad", "attempts": 1}, ("s", "bad2"), ("s", "3")],
+                                 parallel=1, attempts=3, stats=st)
+        self.assertIsInstance(out[0], ValueError)
+        self.assertIsInstance(out[1], ValueError)
+        self.assertNotIsInstance(out[0], TypeError)
+        self.assertEqual(out[2], {"i": 3})
+        self.assertEqual(st["calls"], 1 + 3 + 1)
+
+    def test_stats_kept_when_stop_error_raised(self):
+        def stop(system, user):
+            if user == "3":
+                raise BudgetExceeded("cap")
+            return echo(system, user)
+        st = {}
+        llm = FakeLLM(stop)
+        with self.assertRaises(BudgetExceeded):
+            complete_json_many(llm, [("s", str(i)) for i in range(6)], parallel=1, stats=st)
+        self.assertEqual(st["calls"], 4)                     # 0, 1, 2 answered, 3 raised; 4, 5 never started
+        self.assertEqual(st["requests"], 6)
 
 
 if __name__ == "__main__":

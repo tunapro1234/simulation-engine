@@ -224,6 +224,10 @@ DEFAULT_PARALLEL = 4           # complete_json_many on a backend without a `para
 
 def _request(req) -> tuple[str, str, dict]:
     if isinstance(req, dict):
+        if "user" not in req:
+            raise TypeError(f"complete_json_many: a dict request needs 'user', got keys {sorted(req)}")
+        if "stats" in req:          # per-request counts are collected internally and summed into stats=
+            raise TypeError("complete_json_many: 'stats' is not a per-request key; pass stats= to the call")
         extra = {k: v for k, v in req.items() if k not in ("system", "user")}
         return req.get("system", ""), req["user"], extra
     if isinstance(req, (tuple, list)) and len(req) == 2:
@@ -239,8 +243,9 @@ def complete_json_many(llm, requests, *, parallel: int | None = None, attempts: 
     `kw` (max_tokens, tag, truncation_retries, ...). A failed request (ValueError after `attempts`, a final
     EmptyResponseError, any ordinary exception) does not sink the batch: its slot holds the exception
     (return_exceptions=True) or None. A `StopError` (budget, 401, spend limit) cancels the pending requests and is
-    raised. `stats` gets the per-request complete_json counts summed (calls, truncated, truncation_retries,
-    parse_failures) plus `requests` and `failed`; each request counts into its own dict, so threads never share one."""
+    raised; `stats` still gets the calls made before it. `stats` gets the per-request complete_json counts summed (calls,
+    truncated, truncation_retries, parse_failures) plus `requests` and `failed`; each request counts into its own dict,
+    so threads never share one. A dict request may override `attempts`; it may not carry `stats`."""
     from .parallel import parallel_map
     reqs = [_request(r) for r in requests]
     if parallel is None:
@@ -249,14 +254,18 @@ def complete_json_many(llm, requests, *, parallel: int | None = None, attempts: 
 
     def one(i: int) -> Any:
         system, user, extra = reqs[i]
-        return complete_json(llm, system, user, attempts=attempts, stats=per[i], **{**kw, **extra})
+        call = {"attempts": attempts, **kw, **extra}      # a request may override attempts too
+        return complete_json(llm, system, user, stats=per[i], **call)
 
-    out = parallel_map(one, range(len(reqs)), parallel=parallel, return_exceptions=True)
-    failed = sum(isinstance(v, Exception) for v in out)
-    if stats is not None:
-        for d in per + [{"requests": len(reqs), "failed": failed}]:
-            for k, v in d.items():
-                stats[k] = stats.get(k, 0) + v
+    out: list[Any] | None = None
+    try:
+        out = parallel_map(one, range(len(reqs)), parallel=parallel, return_exceptions=True)
+    finally:                    # on a StopError the calls already made still count
+        if stats is not None:
+            failed = sum(isinstance(v, Exception) for v in out) if out is not None else 0
+            for d in per + [{"requests": len(reqs), "failed": failed}]:
+                for k, v in d.items():
+                    stats[k] = stats.get(k, 0) + v
     if not return_exceptions:
         out = [None if isinstance(v, Exception) else v for v in out]
     return out

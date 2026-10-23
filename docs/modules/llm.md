@@ -253,10 +253,11 @@ Runs `complete_json` once per request on `parallel` threads (`parallel_map`; def
 `Claude` / `ClaudeCode` unless set, and 4 on `FakeLLM`). Results come back in input order.
 
 - `requests`: `(system, user)` pairs or dicts `{"system": ..., "user": ..., **overrides}`; a dict's extra keys
-  (`max_tokens`, `tag`, `truncation_retries`, ...) override the shared `**kw` for that request only.
+  (`max_tokens`, `tag`, `truncation_retries`, `attempts`, ...) override the shared `**kw` for that request only. A
+  dict without `user`, or one carrying `stats`, raises `TypeError` before any call.
 - A failed request does not sink the batch: its slot holds the exception (`ValueError` after `attempts`, a final
   `EmptyResponseError`, ...) with `return_exceptions=True`, or `None` with `False`. A `StopError` (budget, 401, spend
-  limit) still cancels the requests not yet started and is raised.
+  limit) still cancels the requests not yet started and is raised; `stats` still gets the calls made before it.
 - `stats` gets every request's counts summed (`calls`, `truncated`, `truncation_retries`, `parse_failures`) plus
   `requests` and `failed`. Each request counts into its own dict, so no shared dict is written from two threads.
 
