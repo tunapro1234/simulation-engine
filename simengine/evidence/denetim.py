@@ -1,5 +1,6 @@
 """Otomatik denetimler: sızıntı, persona karıştırma, madde ortalaması, tavan aşımı, çöküş,
-sınıf dengesizliği, kontaminasyon (kesim tarihi), pozisyon takası, seçim yanlılığı, taban belirsizliği.
+sınıf dengesizliği, kontaminasyon (kesim tarihi), pozisyon takası, seçim yanlılığı, taban belirsizliği,
+madde başına sabit tahmin (sıra metrikleri tanımsız).
 
 Her denetim: {"kontrol", "durum": tamam|uyari|hata|atlandi, "ayrinti", "deger"}.
 """
@@ -84,9 +85,16 @@ def tavan_asimi(nokta, tekrar, yontemler, metrik):
                if asan else "hiçbir yöntem test-retest tavanını anlamlı aşmıyor"), len(asan))
 
 
-def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5, bernoulli_esik: float = 0.05):
+# birincil bu metriklerden biriyse en iyi nokta tahmini koşullu medyandır: zayıf sinyalde medyana büzmek doğru hareket
+MEDYAN_METRIK = ("mae", "bir_eksi_mae", "medae", "wmape")
+
+
+def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5, bernoulli_esik: float = 0.05,
+          birincil: str | None = None):
     """Homojenleşme / aşırı yayılım. İkili olasılık tahmininde sd 0/1 gerçeğinkiyle kıyaslanmaz: sd(p) / √(p̄(1−p̄))
-    yalnız neredeyse sabit tahmini (< bernoulli_esik) uyarır. Dağılımda entropi ve ayrışma oranları ayrıntıya eklenir."""
+    yalnız neredeyse sabit tahmini (< bernoulli_esik) uyarır. Dağılımda entropi ve ayrışma oranları ayrıntıya eklenir.
+    birincil MEDYAN_METRIK'ten biriyse düşük sd oranı uyarı değil bilgi notudur ("bilgi_notu": True); aşırı yayılım
+    yine uyarır."""
     y = yayilim.get(sutun)
     if y and y.get("sd_bernoulli") is not None:
         o = y["sd_bernoulli"]
@@ -109,9 +117,55 @@ def cokus(yayilim: dict, sutun: str, esik: float = 0.8, ust: float = 1.5, bernou
             ek += (f" · gruplar arası ayrışma oranı {_f(y['ayrisma_orani'], 2)} "
                    f"[{_f(y.get('ayrisma_orani_alt'), 2)}, {_f(y.get('ayrisma_orani_ust'), 2)}]")
     # iki yönlü: <esik homojenleşme (LLM'in bilinen hastalığı), >ust aşırı yayılım (gürültüyü kişiye özgü sinyal sanmak)
-    return _k("dağılım çöküşü (sd oranı)", "uyari" if o < esik or o > ust else "tamam",
-              f"{sutun}: sd oranı {_f(o, 2)} [{_f(y.get('sd_orani_alt'), 2)}, {_f(y.get('sd_orani_ust'), 2)}]; "
-              f"<{esik:.1f} homojenleşme, >{ust:.1f} aşırı yayılım" + ek, o)
+    ayr = (f"{sutun}: sd oranı {_f(o, 2)} [{_f(y.get('sd_orani_alt'), 2)}, {_f(y.get('sd_orani_ust'), 2)}]; "
+           f"<{esik:.1f} homojenleşme, >{ust:.1f} aşırı yayılım" + ek)
+    if o < esik and birincil in MEDYAN_METRIK:
+        r = _k("dağılım çöküşü (sd oranı)", "tamam",
+               ayr + f" · bilgi: birincil {birincil} koşullu medyanı ödüllendirir, medyana büzmek beklenen davranış; "
+                     f"homojenleşme uyarısı değil (info: shrinking toward the median is intended under {birincil})", o)
+        r["bilgi_notu"] = True
+        return r
+    return _k("dağılım çöküşü (sd oranı)", "uyari" if o < esik or o > ust else "tamam", ayr, o)
+
+
+SABIT_KONTROL = "sabit tahmin: sıra metrikleri tanımsız (constant prediction)"
+
+
+def sabit_tahmin(veri, sutunlar: list, etiket: dict | None = None) -> tuple[dict | None, dict]:
+    """Madde başına sabit tahmin (sd 0) ve tanımsız sıra/korelasyon metriği sayımı (sürekli / ikili görev).
+
+    Sabit tahminli maddede Spearman / Pearson / madde_ici_kor NaN olur ve madde ortalamadan sessizce düşer. Madde
+    yoksa bütün tablo tek madde sayılır; tek satırlı maddeler sayılmaz. Döner (denetim satırı | None, {sütun:
+    {"sabit", "nan", "n_madde"}}); satır yalnız en az bir maddede sabit tahmin varsa ("deger" = en büyük sayı)."""
+    d = veri.df
+    if veri.gorev not in ("surekli", "ikili"):
+        return None, {}
+    y = pd.to_numeric(d["gercek"], errors="coerce").to_numpy(float)
+    gruplar = [g for g in (d.groupby("madde").indices.values() if "madde" in d else [np.arange(len(d))]) if len(g) >= 2]
+    ozet = {}
+    for c in dict.fromkeys(sutunlar):
+        if c not in d:
+            continue
+        p = pd.to_numeric(d[c], errors="coerce").to_numpy(float)
+        sabit = nan = 0
+        for g in gruplar:
+            m = np.isfinite(p[g]) & np.isfinite(y[g])
+            pi, yi = p[g][m], y[g][m]
+            sab = len(pi) >= 2 and float(np.std(pi)) == 0.0
+            sabit += sab
+            nan += bool(len(pi) < 3 or sab or float(np.std(yi)) == 0.0)
+        ozet[c] = {"sabit": int(sabit), "nan": int(nan), "n_madde": len(gruplar)}
+    sab = {c: o for c, o in ozet.items() if o["sabit"]}
+    if not sab:
+        return None, ozet
+    etiket = etiket or {}
+    ayr = "; ".join(f"{etiket.get(c, c)}: {o['sabit']} madde sabit tahmin (sd 0), {o['nan']}/{o['n_madde']} maddede sıra/"
+                    f"korelasyon metriği tanımsız" for c, o in sab.items())
+    en = max(o["sabit"] for o in sab.values())
+    return _k(SABIT_KONTROL, "uyari",
+              ayr + f" · NaN maddeler madde ortalamasından (madde_ici_kor, madde başına Spearman) sessizce düşer "
+                    f"(constant prediction: rank metrics undefined ({en} items); NaN items drop out of per-item means)",
+              en), ozet
 
 
 # eşik 0,5'te etiketten okunan, sınıf payına duyarlı metrikler (kappa / dengeli doğruluk düzeltmeli)
