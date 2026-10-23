@@ -364,10 +364,14 @@ res = se.sim.segment_distribution(segs, questions, llm=llm)       # res["invalid
   persona table it is the respondent's profile line, or the id with `person_key="id"`. `question` is the question text.
 - **noise** in [0, 1] mixes in a second deterministic draw keyed on the framing line (or table session), `sample`
   and respondent, so framings and repeats differ; with 0 every framing gets the same vector.
-- **refuse / unparsed**: a rate in [0, 1] (hash per group x question) or `callable(group, question) -> bool`. A refused
-  segment prompt gets a soft refusal (`looks_like_refusal` is true; the reframed re-ask refuses too, so the cell ends
-  `refused`); unparsed gets prose. In a persona table one refusing respondent refuses the whole batch; an unparsed
-  respondent is left out of the JSON (status `unparsed`). Dry runs and tests only, not a measurement.
+- **refuse / unparsed**: a rate in [0, 1] (hash per segment x question; in a persona table per batch for refuse and
+  per respondent for unparsed, so `refuse=0.1` refuses about 10% of the batches instead of compounding over every
+  respondent x question) or `callable(group, question) -> bool`. A refused segment prompt gets a soft refusal
+  (`looks_like_refusal` is true; the reframed re-ask refuses too, so the cell ends `refused`); unparsed gets prose.
+  In a persona table a callable that is true for any respondent x question refuses the whole batch; an unparsed
+  respondent is left out of the JSON (status `unparsed`). With `segments=` a custom framing that has no "consider
+  ..." still maps to the key (the longest description found in the framing line). Respondent ids may contain
+  ", ", ": " or parentheses. Dry runs and tests only, not a measurement.
 
 ## When it works and when it does not (measured)
 

@@ -79,16 +79,31 @@ def _split_options(line: str) -> tuple[str, list[str]] | None:
     return None
 
 
+def _table_ids(joined: str, lines: list[str]) -> list[str] | None:
+    """Ids of a respondent table, walking the "pid: profile" lines against the ", "-joined id list, so ids that
+    contain ", ", ": " or parentheses survive. None when the lines do not spell out the list."""
+    ids, pos = [], 0
+    for ln in lines:
+        hit = next((ln[:j] for j in (k.start() for k in re.finditer(": ", ln))
+                    if joined.startswith(ln[:j], pos) and joined[pos + j:pos + j + 2] in ("", ", ")), None)
+        if hit is None:
+            return None
+        ids.append(hit)
+        pos += len(hit) + 2
+    return ids if ids and pos - 2 == len(joined) else None
+
+
 def parse_person_prompt(user: str) -> dict | None:
     """{"ids", "profiles" {id: line}, "questions" [{"question", "options"}], "session"} from a
     PERSON_PROB_TEMPLATE prompt, None for any other prompt."""
-    m = re.search(r"respondent IDs as keys \(([^)]*)\)", user)
+    m = re.search(r"respondent IDs as keys \((.*?)\)\. For each respondent", user, re.S) or \
+        re.search(r"respondent IDs as keys \(([^)]*)\)", user)
     sec = re.search(r"\nRespondents:\n(.*?)\n\nQuestions \(answer options are numbered\):\n(.*?)\n\nReturn ONLY",
                     user, re.S)
     if not (m and sec):
         return None
-    ids = [x.strip() for x in m.group(1).split(",") if x.strip()]
     lines = sec.group(1).splitlines()
+    ids = _table_ids(m.group(1), lines) or [x.strip() for x in m.group(1).split(",") if x.strip()]
     profiles = {}
     for pid in ids:
         hit = next((ln for ln in lines if ln.startswith(f"{pid}: ")), None)
@@ -128,11 +143,14 @@ class DistributionFake(FakeLLM):
     question, seed)`. An unusable value raises ValueError. noise in [0, 1] mixes in a second deterministic
     Dirichlet draw keyed on the framing line (or table session), the repeat's `sample` and the respondent, so
     framings and repeats differ; noise=0 gives every framing the same vector.
-    refuse / unparsed: a rate in [0, 1] (deterministic hash per group x question) or callable(group, question) ->
-    bool. A refused segment prompt gets `refusal_text` (a soft refusal; it refuses the re-ask too); an unparsed one
-    gets plain prose. In a persona table one refusing respondent refuses the whole batch, and an unparsed
-    respondent is left out of the JSON (status "unparsed"). refuse is checked before unparsed.
-    segments: {key: description} as given to segment_distribution, so value_fn and the knobs see the key.
+    refuse / unparsed: a rate in [0, 1] (deterministic hash per segment x question; in a persona table per batch
+    for refuse and per respondent for unparsed, so the rate is the share of batches / respondents) or
+    callable(group, question) -> bool. A refused segment prompt gets `refusal_text` (a soft refusal; it refuses
+    the re-ask too); an unparsed one gets plain prose. In a persona table a callable true for any respondent x
+    question refuses the whole batch, and an unparsed respondent is left out of the JSON (status "unparsed").
+    refuse is checked before unparsed.
+    segments: {key: description} as given to segment_distribution, so value_fn and the knobs see the key (also
+    under a custom framing: the longest description found in the framing line).
     person_key: "profile" (the respondent's line in the prompt, what an LLM sees) or "id"."""
 
     def __init__(self, value_fn: ValueFn | None = None, seed: int = 0, noise: float = 0.0, *,
@@ -158,6 +176,19 @@ class DistributionFake(FakeLLM):
             return bool(knob(group, question))
         return _unit(self.seed, what, group, question) < knob
 
+    def _table_hit(self, knob: Knob, what: str, groups: list[str], qs: list[dict]) -> bool:
+        if callable(knob):
+            return any(bool(knob(g, q["question"])) for g in groups for q in qs)
+        return self._hit(knob, what, "\x00".join(groups), "")
+
+    def _segment(self, group: str, head: str) -> str:
+        """The segments= key for a DIST prompt: exact description, else the longest description inside the
+        framing line (a custom framing without "consider ..."), else the group as parsed."""
+        if group in self.segment_key:
+            return self.segment_key[group]
+        inside = [d for d in self.segment_key if d and d in head]
+        return self.segment_key[max(inside, key=len)] if inside else group
+
     def shares(self, group: str, question: str, options: list[str], salt: Sequence[Any] = ()) -> list[float]:
         """The vector this fake answers for one (group, question): value_fn or synthetic_distribution, then
         noise keyed on `salt`."""
@@ -180,7 +211,7 @@ class DistributionFake(FakeLLM):
     def respond(self, system: str, user: str, sample: Any = 0) -> str:
         d = parse_distribution_prompt(user)
         if d is not None:
-            g = self.segment_key.get(d["group"], d["group"])
+            g = self._segment(d["group"], d["head"])
             if self._hit(self.refuse, "refuse", g, d["question"]):
                 return self.refusal_text
             if self._hit(self.unparsed, "unparsed", g, d["question"]):
@@ -191,11 +222,13 @@ class DistributionFake(FakeLLM):
         if t is not None:
             keys = {pid: pid if self.person_key == "id" else t["profiles"][pid] for pid in t["ids"]}
             qs = t["questions"]
-            if any(self._hit(self.refuse, "refuse", keys[pid], q["question"]) for pid in t["ids"] for q in qs):
+            # a rate is drawn once per batch (refuse) / respondent (unparsed), so refuse=0.1 refuses ~10% of the
+            # batches rather than compounding over every respondent x question cell; a callable sees each cell
+            if self._table_hit(self.refuse, "refuse", [keys[pid] for pid in t["ids"]], qs):
                 return self.refusal_text
             out = {}
             for pid in t["ids"]:
-                if any(self._hit(self.unparsed, "unparsed", keys[pid], q["question"]) for q in qs):
+                if self._table_hit(self.unparsed, "unparsed", [keys[pid]], qs):
                     continue
                 out[pid] = {"p": [_pct(self.shares(keys[pid], q["question"], q["options"],
                                                    (t["session"], pid, sample))) for q in qs]}

@@ -192,6 +192,42 @@ class TestPersonaDistribution(unittest.TestCase):
         self.assertAlmostEqual(r["refusal_rate"], 0.5)
         self.assertAlmostEqual(r["filled"]["B"]["q1"], 1.0)
 
+    def test_rate_knobs_are_per_batch_and_per_respondent(self):
+        # a rate used to be drawn per respondent x question and any hit refused the batch: refuse=0.05 with
+        # batch=12 and 3 questions refused 80% of 240 personas; now the rate is the share of batches / respondents
+        qs = [{"id": f"q{i}", "text": f"Question {i}?", "options": ["a", "b", "c"]} for i in range(3)]
+        ps = [{"id": f"u{i}", "text": f"person {i}", "segment": "A"} for i in range(480)]
+        r = persona_distribution(DistributionFake(refuse=0.1), ps, qs, batch=12)
+        self.assertLess(r["refusal_rate"], 0.3, r["refusal_rate"])            # 40 batches, expected 0.1
+        self.assertEqual(r["refused"], 12 * round(r["refusal_rate"] * 40))
+        u = persona_distribution(DistributionFake(unparsed=0.1), ps, qs, batch=12)
+        self.assertTrue(0.05 < u["unparsed"] / len(ps) < 0.15, u["unparsed"])
+        self.assertEqual(persona_distribution(DistributionFake(refuse=1.0), ps[:24], qs, batch=12)["refused"], 24)
+
+    def test_ids_with_commas_colons_and_parentheses(self):
+        ps = [{"id": "NY, urban", "text": "x", "segment": "A"}, {"id": "b(2)", "text": "y", "segment": "A"},
+              {"id": "c: 3", "text": "z", "segment": "A"}]
+        r = persona_distribution(DistributionFake(), ps, QS, batch=3)
+        self.assertEqual(r["status"], {p["id"]: "ok" for p in ps})
+        r = persona_distribution(DistributionFake(lambda g, q, o: [1, 0] if g == "NY, urban" else None,
+                                                  person_key="id"), ps, QS[1:2], batch=3)
+        np.testing.assert_allclose(r["person"]["NY, urban"]["q2"], [1, 0])
+
+
+class TestCustomFraming(unittest.TestCase):
+    def test_segments_key_under_a_framing_without_consider(self):
+        seen = set()
+
+        def vf(g, q, o):
+            seen.add(g)
+            return [1, 0] if g == "old" else [0, 1]
+
+        r = segment_distribution(DistributionFake(vf, segments=SEGS), SEGS, QS[1:2],
+                                 framings={"x": "Among {group}, a poll was run.", "y": "Consider {group}."})
+        self.assertEqual(seen, {"old", "young"})
+        np.testing.assert_allclose(r["dist"]["old"]["q2"], [1, 0])
+        np.testing.assert_allclose(r["dist"]["young"]["q2"], [0, 1])
+
 
 if __name__ == "__main__":
     unittest.main()
