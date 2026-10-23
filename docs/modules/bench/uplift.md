@@ -75,7 +75,8 @@ No hyper-parameter search: these are reference points, not tuned competitors.
 Hillstrom and X5 numbers below were re-run on 2026-10-23 after the X5 post-treatment fix and the uplift@k row count
 change (qini / auuc on Hillstrom unchanged to the digit, uplift@30 moved by at most 0.001; X5 GBDT rows dropped, see
 below). Criteo numbers are from 2026-10-22 runs (uplift@30 there counted ceil(0.3 n) rows, at most one row more than
-now, invisible at three decimals). Test split as above, B = 1000 unless stated; command, from the repository root
+now, invisible at three decimals), except the 3M-row conversion table, re-run on 2026-10-23 after the 758b1f8
+review. Test split as above, B = 1000 unless stated; command, from the repository root
 with the data under `$SIMENGINE_DATA`:
 
 ```python
@@ -166,9 +167,11 @@ an hour). Wall time 16 min (fit 285 s, score 666 s), peak RSS 7.3 GB, `nice -n 1
 | t_gbdt | 0.077 [0.062, 0.092] | 0.030 [0.024, 0.036] | 0.028 [0.024, 0.032] |
 | random | -0.005 [-0.015, 0.005] | -0.002 [-0.006, 0.002] | 0.010 [0.007, 0.012] |
 
-### criteo_uplift, outcome="conversion", n_rows=3,000,000 (n_test 600,000; test ATE +0.0011)
+### criteo_uplift, outcome="conversion", n_rows=3,000,000 (n_test 600,000; test ATE +0.0011) -- post-review (758b1f8)
 
-`bench.get("criteo_uplift", n_rows=3_000_000, outcome="conversion")`, B = 1000; wall time 8.8 min, peak RSS 3.0 GB.
+`bench.get("criteo_uplift", n_rows=3_000_000, outcome="conversion")`, B = 1000. Re-run on 2026-10-23 at 567c6b2,
+after the `methods.uplift` review (758b1f8): every cell identical to the digit to the 2026-10-22 pre-review run.
+Wall time 7.7 min (load 1 s, fit 45 s, score 417 s; was 8.8 min), peak RSS 3.0 GB, `nice -n 19`.
 
 | method | qini | auuc | uplift@30 |
 |---|---|---|---|

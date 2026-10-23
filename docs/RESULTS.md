@@ -286,7 +286,7 @@ under `$SIMENGINE_DATA` (task options per page):
 | `subpop_opinionqa` / `global_opinionqa` | ordinal WD ↓ / TVD ↓ | nearest_group 0.0506 [0.0480, 0.0531] / 0.1602 [0.1564, 0.1639] (setting B) | bench/opinion_dist.md |
 | `swissmetro` | loglik ↑ | gbdt −0.6752 [−0.7602, −0.5981] | bench/mode_choice.md |
 | `hillstrom_uplift` / `x5_uplift` | Qini ↑ | s_gbdt 0.049 [0.013, 0.083] (womens e-mail) / t_logistic 0.012 [0.006, 0.019] | bench/uplift.md |
-| `criteo_uplift` (pre-review run, B = 200) | Qini ↑ | s_gbdt 0.088 [0.082, 0.094] | bench/uplift.md |
+| `criteo_uplift` (pre-review run, B = 200; the 3M-row conversion config was re-measured post-review (758b1f8), identical to the digit, s_gbdt 0.192 [0.123, 0.263]) | Qini ↑ | s_gbdt 0.088 [0.082, 0.094] | bench/uplift.md |
 | `webshop_next_action` / `webshop_buy` | loglik ↑ / AUC ↑ | logistic −0.933 [−0.952, −0.915] / 0.808 [0.793, 0.823] | bench/web_behaviour.md |
 
 **Grid and spatial ABMs** (`simengine.abm`; pages under docs/modules/abm/).
