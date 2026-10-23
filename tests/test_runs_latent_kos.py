@@ -98,6 +98,26 @@ class TestRunnerSmoke(unittest.TestCase):
         self.assertEqual([r["arm"] for r in res], ["enc-an", "prm-tiny_qwen3_5-L1", "prb-tiny_qwen3_5-L2"])
         self.assertGreater(self.k._deadline("07:30"), __import__("datetime").datetime.now())
 
+    def test_precision_is_part_of_a_run(self):
+        com = ["--model", "tiny-qwen3_5", "--arm"]
+        rc, res = self.run_kos(*com, "rsd-angc", "prb-L2", "caa")
+        self.assertEqual([r["status"] for r in res], ["ok"] * 3)
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            rc = self.k.main(["--base", self.tmp.name, "--root", str(self.root), "--device", "cpu", "--precision",
+                              "bf16", "--kucuk", "8:4:4", "--threads", "4", *com, "rsd-angc-swap", "prb-L2",
+                              "caa-swap"])
+        res = {r["arm"]: r for r in map(json.loads, out.getvalue().splitlines())}
+        self.assertEqual(rc, 1)
+        self.assertIn("trained in fp32", res["rsd-tiny_qwen3_5-angc-swap"]["error"])  # no fp32 projector in bf16
+        self.assertIn("done in fp32", res["prb-tiny_qwen3_5-L2"]["error"])            # not a silent "done"
+        self.assertEqual(res["caa-tiny_qwen3_5-swap"]["status"], "ok")                # reselected in bf16
+        sec = Path(self.tmp.name) / "kucuk" / "talp73" / "secim"
+        self.assertEqual(json.loads((sec / "caa-tiny_qwen3_5_s0.chosen.json").read_text())["precision"], "bf16")
+        rc, res = self.run_kos("--precision", "fp8|nf4", *com, "prm-L1")              # resolved before loading
+        meta = json.loads((Path(self.tmp.name) / "kucuk" / "talp73" / "tahmin" /
+                           "prm-tiny_qwen3_5-L1_s0.meta.json").read_text())
+        self.assertEqual(meta["precision"], self.k._resolve_precision("fp8|nf4"))
+
     def test_error_is_logged_and_run_goes_on(self):
         rc, res = self.run_kos("--model", "tiny-nosuchfamily", "--arm", "prm-L1", "enc-an")
         self.assertEqual(rc, 1)

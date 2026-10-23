@@ -306,13 +306,19 @@ def _chosen_path(ctx, arm_name, task, seed) -> Path:
     return ctx.tdir(task, "secim") / f"{arm_name}_s{seed}.chosen.json"
 
 
-def _save_chosen(ctx, arm: Arm, seed, cfg, val):
-    _chosen_path(ctx, arm.base, arm.task, seed).write_text(json.dumps({"config": cfg, "val": val}, default=str))
+def _save_chosen(ctx, arm: Arm, seed, cfg, val, precision: str | None = None):
+    _chosen_path(ctx, arm.base, arm.task, seed).write_text(json.dumps({"config": cfg, "val": val,
+                                                                      "precision": precision}, default=str))
 
 
-def _load_chosen(ctx, arm: Arm, seed):
+def _load_chosen(ctx, arm: Arm, seed, precision: str | None = None):
+    """The saved selection of arm.base, or None when there is none or it was made in another precision (a
+    selection is only reused in the precision it was made in)."""
     p = _chosen_path(ctx, arm.base, arm.task, seed)
-    return json.loads(p.read_text()) if p.exists() else None
+    if not p.exists():
+        return None
+    ch = json.loads(p.read_text())
+    return ch if precision is None or ch.get("precision") == precision else None
 
 
 # ------------------------------------------------------------------------------------------------- G1 LLM-free
@@ -497,7 +503,7 @@ def run_prb_g1(ctx: Ctx, arm: Arm, seed: int):
         return lt.val_metrics_g1(make(c).fit(X, f[0], f[1], f[2]).predict(X, va[0], va[1]), v.val)
 
     best, val, n = _choose(ctx, arm, seed, configs, score)
-    _save_chosen(ctx, arm, seed, best, val)
+    _save_chosen(ctx, arm, seed, best, val, ld.precision)
     X = H[best["pool"]][best["layer"]]
     v.guard.check(v.train, "probe refit")
     h = make(best).fit(X, tr[0], tr[1], tr[2])
@@ -508,11 +514,12 @@ def run_prb_g1(ctx: Ctx, arm: Arm, seed: int):
 def run_stk_m(ctx: Ctx, arm: Arm, seed: int):
     v = view1(ctx, seed)
     ld = ctx.ld(arm.model)
-    ch = _load_chosen(ctx, parse_arm(f"prb-{model_tag(arm.model)}-L2"), seed)
+    ch = _load_chosen(ctx, parse_arm(f"prb-{model_tag(arm.model)}-L2"), seed, ld.precision)
     cfg = ch["config"] if ch else {"layer": ld.layer_index(0.5), "pool": "last"}
     H = _states_g1(ctx, ld, v, "L2", [cfg["layer"]], [cfg["pool"]])[cfg["pool"]][cfg["layer"]]
     return _stack(ctx, arm, seed, v, H, {"layer": cfg["layer"], "pool": cfg["pool"],
-                                         "layer_from": "prb-L2 selection" if ch else "default 0.5 (no prb-L2 run)"})
+                                         "layer_from": "prb-L2 selection" if ch else
+                                         f"default 0.5 (no prb-L2 run in {ld.precision})"})
 
 
 # ------------------------------------------------------------------------------------------------- G1 injection
@@ -593,10 +600,10 @@ def run_caa_g1(ctx: Ctx, arm: Arm, seed: int):
         return lt.yes_prob(ld, pre, [suf], cells=cc, inject=inj(c, V), batch_size=len(pre),
                            cell_batch=ctx.a.cell_batch)
 
-    ch = _load_chosen(ctx, arm, seed)
+    ch = _load_chosen(ctx, arm, seed, ld.precision)
     if ch is None:
         best, val, n = _choose(ctx, arm, seed, configs, lambda c: lt.val_metrics_g1(run(c, cv, vecs(c))[0], v.val))
-        _save_chosen(ctx, arm, seed, best, val)
+        _save_chosen(ctx, arm, seed, best, val, ld.precision)
     else:
         best, val, n = ch["config"], ch["val"], len(configs)
     V = vecs(best)
@@ -618,21 +625,23 @@ def _std_vectors(X, train_mask):
     return st.transform(X).astype(np.float32)
 
 
-def _sweep(ctx, arm: Arm, seed: int, configs, fn):
-    """Validation sweep with resume: each config's score is appended to <arm>_s<seed>.sweep.jsonl."""
+def _sweep(ctx, arm: Arm, seed: int, configs, fn, precision: str | None = None):
+    """Validation sweep with resume: each config's score is appended to <arm>_s<seed>.sweep.jsonl. Only lines of
+    the same precision are reused."""
     path = ctx.tdir(arm.task, "secim") / f"{arm.base}_s{seed}.sweep.jsonl"
     done = {}
     if path.exists():
         for line in path.read_text().splitlines():
             r = json.loads(line)
-            done[json.dumps(r["config"], sort_keys=True)] = r
+            if r.get("precision") == precision:
+                done[json.dumps(r["config"], sort_keys=True)] = r
     for c in configs:
         k = json.dumps(c, sort_keys=True)
         if k in done:
             continue
         t = time.time()
         score, hist = fn(c)
-        r = {"config": c, "val": score, "seconds": round(time.time() - t, 1), "hist": hist}
+        r = {"config": c, "val": score, "seconds": round(time.time() - t, 1), "hist": hist, "precision": precision}
         done[k] = r
         with path.open("a") as f:
             f.write(json.dumps(r, default=str) + "\n")
@@ -666,23 +675,26 @@ def _injector(ctx: Ctx, arm: Arm, seed: int, ld, U, pre, suf_fn, cells_fit, cell
 
     if proj_path.exists() and not (ctx.a.force and arm.variant is None):
         saved = torch.load(proj_path, map_location="cpu", weights_only=False)
+        if saved.get("precision") != ld.precision:     # a projector is applied in the precision it was trained in
+            raise ValueError(f"{proj_path.name} was trained in {saved.get('precision')}, this run is "
+                             f"{ld.precision}: rerun {arm.base} with --force in {ld.precision}, or use another --base")
         best, val, n, hist = saved["config"], saved["val"], saved["n_configs"], saved["hist"]
         proj = build(best)
         proj.load_state_dict(saved["state"])
         proj = proj.to(ld.device).eval()
     else:
-        ch0 = _load_chosen(ctx, arm, 0) if seed != 0 else None
+        ch0 = _load_chosen(ctx, arm, 0, ld.precision) if seed != 0 else None
         if ch0 is not None:
             best, n, src = ch0["config"], len(configs), "seed 0 selection"
         else:
             best, _, rows = _sweep(ctx, arm, seed, configs, lambda c: (lambda r: (
-                max(h["val"] for h in r[1]), r[1]))(train(c, 1.0)))
+                max(h["val"] for h in r[1]), r[1]))(train(c, 1.0)), ld.precision)
             n, src = len(configs), "validation sweep"
-            _save_chosen(ctx, arm, seed, best, {"sweep_val": max(r["val"] for r in rows)})
+            _save_chosen(ctx, arm, seed, best, {"sweep_val": max(r["val"] for r in rows)}, ld.precision)
         proj, hist = train(best, 1.0 if ctx.kucuk else EPOCHS[arm.kind])
         val = max(h["val"] for h in hist)
         torch.save({"config": best, "val": val, "n_configs": n, "hist": hist, "state": proj.state_dict(),
-                    "selected_by": src}, proj_path)
+                    "selected_by": src, "precision": ld.precision, "model": ld.code}, proj_path)
     return proj, best, val, n, hist, soft_id, layer_of(best)
 
 
@@ -1103,7 +1115,15 @@ def run_one(ctx: Ctx, arm: Arm, seed: int) -> dict:
         return {"arm": arm.name, "seed": seed, "status": "skip", "why": "G2 / G3 have one split (seed 0)"}
     out = ctx.tdir(arm.task) / f"{arm.name}_s{seed}.parquet"
     if out.exists() and out.with_suffix(".meta.json").exists() and not a.force:
-        return {"arm": arm.name, "seed": seed, "status": "skip", "why": "done", "path": str(out)}
+        done_in = json.loads(out.with_suffix(".meta.json").read_text()).get("precision")
+        if arm.model is None or done_in == a.precision:
+            return {"arm": arm.name, "seed": seed, "status": "skip", "why": "done", "path": str(out)}
+        rec = {"zaman": time.strftime("%Y-%m-%d %H:%M:%S"), "arm": arm.name, "task": arm.task, "seed": seed,
+               "status": "error", "precision": a.precision, "path": str(out),
+               "error": f"done in {done_in}, asked for {a.precision}: the file name has no precision; use another "
+                        f"--base for the second precision (prereg X5) or --force to replace it"}
+        ctx.log(rec)
+        return rec
     try:
         import torch
         torch.set_num_threads(a.threads)
@@ -1361,8 +1381,8 @@ def main(argv=None) -> int:
     if a.list:
         print(list_arms(ctx))
         return 0
+    a.precision = _resolve_precision(a.precision)          # 'fp8|nf4' -> one precision before any load
     if a.calibrate:
-        a.precision = _resolve_precision(a.precision)
         print(json.dumps(calibrate(ctx), default=str))
         return 0
     if a.plan:

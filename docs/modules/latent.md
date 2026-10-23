@@ -178,11 +178,13 @@ they were made in. Each prediction's `.meta.json` records the precision.
   On an older card it raises an error; there is no silent fallback.
 - `nf4` and `int8` use bitsandbytes (`pip install bitsandbytes` into the venv first). They are refused for the
   Gemma 4 MoE model, because its 3-D expert tensors are not quantised.
-- `--precision "fp8|nf4"` picks fp8 when the card supports it and nf4 otherwise.
+- `--precision "fp8|nf4"` picks fp8 when the card supports it and nf4 otherwise (resolved once, before any
+  model loads).
 - `--calibrate` checks that a backward pass works through the loaded precision. That backward pass is what the
   learned injectors (rsd, sft) need.
 - Prereg item X5 compares bf16 and FP8 on the same cells. That comparison is the measured answer to the
-  question; until it has run, there is none.
+  question; until it has run, there is none. File names carry no precision, so run the second precision with
+  another `--base`.
 
 ## Runner
 
@@ -203,7 +205,9 @@ $PY $K --score g1 --arm prb-q38-L2 --taban enc-angc gecmis --seed 0             
 - **Resume.** A run whose prediction and `.meta.json` already exist is skipped; `--force` reruns it. The rsd and
   sft sweeps write each config's validation score to `<task>/secim/<arm>_s<s>.sweep.jsonl` and continue from
   there after a crash. The trained projector is saved in `<task>/proj/`, and the `-swap` and `-zero` controls
-  reuse it. Seeds 1-2 reuse the config chosen on seed 0.
+  reuse it. Seeds 1-2 reuse the config chosen on seed 0. Selections, sweep lines and projectors are reused only
+  in the precision they were made in: a control in another precision stops with an error, and a finished run
+  asked for again in another precision is an error, not a silent skip.
 - **Log.** `kosular.jsonl` in the work folder gets one line per run: model, HF revision, precision, layer,
   coefficient, config, validation score, seconds, card, status. A crash is logged as `error` and the next run
   starts.
@@ -250,7 +254,7 @@ the seed-0 score beats the arm's matched encoder-only control or T3:
 - SAE readout (`sae-q35-L2`) and the QLoRA arm (`lora-*`) have no runner arm. The SAE file format of Qwen-Scope
   has not been checked against `load_sae`.
 - The exploratory X block (field patching, persona arithmetic, layer tracing) is not implemented. X5 (bf16 vs
-  FP8) is two plain runs.
+  FP8) is two plain runs with different `--base` folders.
 - caa steers the last prompt token only. Steering every prompt position would need the injection inside the
   cached prefix.
 - The fp8 and nf4 paths have not been run, because this machine has no GPU and no bitsandbytes.
