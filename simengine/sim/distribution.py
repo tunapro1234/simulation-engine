@@ -57,7 +57,9 @@ Estimate the percentage of these respondents who would choose each option (ignor
 Return ONLY a JSON object mapping option number to percentage, e.g. {example}"""
 # Dropped by include_unsure=True; with the default (None) the rendered prompt is unchanged (cache keys / hashes).
 UNSURE_NOTE = ' (ignore "not sure" answers)'
-_UNSURE_OPT = re.compile(r"not\s+sure|unsure|do(?:n['\u2019]?t| not)\s+know|\bneither\b|no\s+opinion|undecided", re.I)
+# "Neither ... nor ..." is a Likert midpoint, not a not-sure answer: a bare "Neither" warns, the midpoint does not.
+_UNSURE_OPT = re.compile(r"not\s+sure|unsure|do(?:n['\u2019]?t| not)\s+know|\bneither\b(?!.*\bnor\b)|no\s+opinion"
+                         r"|undecided", re.I)
 
 PERSON_PROB_TEMPLATE = """You are simulating {setting}.
 Below are {n} survey respondents. For EACH respondent and EACH question, estimate the probability (in percent) that this respondent gives each answer option. They answer independently.

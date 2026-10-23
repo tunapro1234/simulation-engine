@@ -64,6 +64,30 @@ class TestIncludeUnsure(unittest.TestCase):
             segment_distribution(SEGS, [Q], llm=FakeLLM(schema_responder(0)))
         self.assertFalse([x for x in w if "include_unsure" in str(x.message)])
 
+    def test_likert_midpoint_does_not_warn(self):
+        lik = {"id": "q4", "text": "The city is safe.", "options": ["Agree", "Neither agree nor disagree", "Disagree"]}
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            segment_distribution(SEGS, [lik], llm=FakeLLM(schema_responder(0)))
+        self.assertFalse([x for x in w if "include_unsure" in str(x.message)])
+        bare = {"id": "q5", "text": "Which party?", "options": ["Party A", "Party B", "Neither"]}
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            segment_distribution(SEGS, [bare], llm=FakeLLM(schema_responder(0)))
+        self.assertTrue([x for x in w if "q5: 'Neither'" in str(x.message)])
+
+    def test_robustness_forwards_flag(self):
+        from simengine.sim.robustness import robustness
+        for flag, has in ((None, True), (True, False)):
+            llm = FakeLLM(schema_responder(0))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                robustness(llm, {"a": "group a", "b": "group b"}, [QU], axes=("retest", "order"), signal="population",
+                           include_unsure=flag, n_boot=10)
+            prompts = [user for _, user in llm.calls]
+            self.assertTrue(prompts)
+            self.assertTrue(all(('(ignore "not sure" answers)' in p) == has for p in prompts), flag)
+
     def test_fake_parses_both_variants(self):
         for flag in (None, True):
             p = distribution_prompt(FRAMINGS_HIDDEN["h1"], "adults aged 18 to 34", QU, population="US adults",

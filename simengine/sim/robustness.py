@@ -98,13 +98,15 @@ def robustness(llm, segments, questions, *, axes: Sequence[str] = AXES,
                framings: Mapping[str, str] | None = None, population: str = "adults", source: str | None = None,
                when: str | None = None, retests: int = 1, signal: str | Mapping = "population",
                nominal: bool = False, threshold: float = THRESHOLD, max_tokens: int = 300, fallback: str = "uniform",
-               ask_kw: dict | None = None, n_boot: int = 1000, seed: int = 0) -> dict:
+               ask_kw: dict | None = None, n_boot: int = 1000, seed: int = 0,
+               include_unsure: bool | None = None) -> dict:
     """Retest / framing / option-order robustness of `segment_distribution`, scaled by the group signal.
 
     framings: {name: template}; the first is the base, the others are the framing conditions (default
     FRAMINGS_NAMED when `source` is given, else FRAMINGS_HIDDEN). nominal=True: TVD in place of W1 and no order
     shift (unordered options such as brands); the order axis still runs. ask_kw goes to every run (`ask_many`
     options and call keywords); a `sample` there is the base sample, retest i uses sample + i.
+    include_unsure goes to every run (segment_distribution, D6 #5), so the prompt measured is the one you run.
     Returns {"conditions": [...], "signal": {...}, "ratio", "worst", "verdict", "card", "cells": [...],
     "runs": {condition: segment_distribution result}, "calls", "invalid", "usage"}."""
     axes = tuple(axes)
@@ -124,7 +126,8 @@ def robustness(llm, segments, questions, *, axes: Sequence[str] = AXES,
     dist = tvd if nominal else w1_ordinal
     akw = dict(ask_kw or {})
     sample0 = int(akw.pop("sample", 0) or 0)
-    common = dict(population=population, source=source, when=when, max_tokens=max_tokens, fallback=fallback)
+    common = dict(population=population, source=source, when=when, max_tokens=max_tokens, fallback=fallback,
+                  include_unsure=include_unsure)
 
     def run(sg, qq, fv: str, sample: int) -> dict:
         kw = {**akw, "sample": sample} if sample else akw

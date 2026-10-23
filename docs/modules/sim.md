@@ -231,8 +231,9 @@ person_distribution_frame(p)  # pid x item: p, status, segment, one column per s
   the model to put ~0 there. `include_unsure=True` drops the parenthetical (`DIST_TEMPLATE` minus `UNSURE_NOTE`).
   The default `None` leaves the prompt byte-identical, so cache keys and prompt hashes do not change, and warns
   once per call, naming each option that looks like not sure / unsure / don't know / neither / no opinion /
-  undecided. `False` keeps the instruction and turns the warning off. `distribution_prompt(...,
-  include_unsure=)` takes the same flag, and `DistributionFake` parses both variants.
+  undecided (a bare "Neither"; the Likert midpoint "Neither agree nor disagree" does not warn). `False` keeps the
+  instruction and turns the warning off. `distribution_prompt(..., include_unsure=)` and `robustness(...,
+  include_unsure=)` take the same flag, and `DistributionFake` parses both variants.
 - **Filled cells.** An invalid answer replaced by a uniform vector (`fallback="uniform"`) is marked in `cells`
   (`filled=True`) and counted: `filled` {segment: {question: share of the cell's answers}} and `filled_share`.
   `distribution_frame` writes it as the numeric `filled_<method>` column (NaN for a result without it), so an
