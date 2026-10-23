@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 os.environ.setdefault("OMP_NUM_THREADS", "12")
@@ -112,6 +112,14 @@ def parse_arm(text: str, model: str | None = None) -> Arm:
     task = "g2" if u == "tw" else "g3" if u in ("tf", "tf0") else "g1"
     name = "-".join([kind, model_tag(m)] + ([u] if u else []) + ([variant] if variant else []))
     return Arm(name, kind, m, u, variant, task)
+
+
+def score_arm(text: str, model: str | None = None) -> Arm:
+    """parse_arm for --score: also takes the '<arm>-raw' files (uncalibrated P(yes)) that prm and caa write."""
+    if text.endswith("-raw"):
+        a = parse_arm(text[:-4], model)
+        return replace(a, name=a.name + "-raw")
+    return parse_arm(text, model)
 
 
 # ------------------------------------------------------------------------------------------------- context
@@ -1413,7 +1421,7 @@ def main(argv=None) -> int:
         return 0
     if a.plan:
         return run_plan(ctx, a.plan)
-    arms = [parse_arm(x, a.model) for x in a.arm]
+    arms = [score_arm(x, a.model) if a.score else parse_arm(x, a.model) for x in a.arm]
     if a.task and any(x.task != a.task for x in arms):
         raise SystemExit(f"--task {a.task}: {[x.name for x in arms if x.task != a.task]} belong to another task")
     if a.score:

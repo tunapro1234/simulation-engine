@@ -10,8 +10,10 @@ the same vector without an LLM. Pre-registration: `docs/prereg/latent-persona-20
 **Status: no number has been measured on real model weights yet.** The tests use tiny random models (Qwen3.5
 hybrid, Gemma 4 dense and MoE, Qwen3 dense and MoE, Qwen2, Llama, Mistral) and a byte tokenizer, so they need no
 download. The runner has been smoke-tested three ways. Every arm ran with tiny models on synthetic tables. The
-LLM-free arms ran on the prepared tables (`--kucuk`). `prm-q35s-L1` ran on CPU with Qwen3.5-2B and the prepared
-tables.
+LLM-free arms ran on the prepared tables (`--kucuk`). Every G1 arm (seed 0, controls included) ran end to end on
+CPU with Qwen3.5-2B in fp32 on the prepared tables with 40 fit / 10 validation / 50 test persons, and every
+prediction file was read by the talp73 evaluator (23 Oct, 62 minutes; times, memory and the GPU estimate are in
+`/data/talp/is/latent/DUMAN.md`; the scores of 50 persons mean nothing).
 torch and transformers are imported lazily: `import simengine.persona.latent` works without them.
 
 **Setup.** The package is not pip-installed. Run from the repo root, or set `PYTHONPATH` to it, and use the venv's
@@ -158,8 +160,8 @@ Notes for a new dataset:
 | `models` | registry `MODELS` (q38, q38f, g31, g26, q35, q3, q25, q35s), `load(code, precision, device=)`, layer and embedding lookup for the Qwen3.5/3.8 multimodal wrapper, Gemma 4, Qwen2/3, Llama and MoE; `tiny(family)` for tests; `check_backward` |
 | `hooks` | `add_to_residual` (positions `last`, `last4`, `all`, int, slice; a tensor or a callable), `capture`, `replace_embeddings` (soft tokens on every family; Gemma 4 cannot `generate(inputs_embeds)`), `residual_norm`, `embedding_norm` |
 | `prompts` | G1/G2/G3 templates, `split` at the cell sentinel (prefix cached, suffix per cell), `short_split` for the injection arms, `answer_token_ids` (first-token variants, shared ids dropped) |
-| `readout` | `yes_prob` / `option_probs`: each prefix is run once and its KV cache is reused for every cell (hybrid DeltaNet and sliding-window caches included); `Injection` adds a vector or soft tokens during the suffix pass; gradients flow for training |
-| `encoders` | E1 `SurveyOneHot`, `SurveyAutoencoder`; E2 `history_features`, `ImplicitALS`, `BagSVD`; E3 `text_embedding` (e5); E4 `llm_states`; E5 `trait_directions`, `trait_person_vector`; E6 `behaviour_directions`; E7 `load_sae`, `sae_codes` |
+| `readout` | `yes_prob` / `option_probs`: each prefix is run once and its KV cache is reused for every cell (hybrid DeltaNet and sliding-window caches included); only the last position's logits are computed; `Injection` adds a vector or soft tokens during the suffix pass; gradients flow for training |
+| `encoders` | E1 `SurveyOneHot`, `SurveyAutoencoder`; E2 `history_features`, `ImplicitALS`, `BagSVD`; E3 `text_embedding` (e5); E4 `llm_states` (a tuple of pools fills all of them from one forward pass); E5 `trait_directions`, `trait_person_vector`; E6 `behaviour_directions`; E7 `load_sae`, `sae_codes` |
 | `heads` | `EncoderHead` (logistic per category or MLP with a category embedding), `Probe` (PCA + logistic, or mass-mean + Platt), `platt`, `stack_lgbm` |
 | `steer` | directions (`mean_diff_direction`, `pca_direction`, `probe_direction`), `CAA`, `residual_projector`, `soft_token_projector`, `train_injector` / `predict_injector` (model frozen, BCE on the yes-logit), `derange` (swap control) |
 | `tasks` | `load_g1/g2/g3`, `TestGuard` (raises `LeakError` when a test row or a test person reaches a fit), `write_pred` (talp73 schema, optional seal) |
@@ -216,6 +218,9 @@ $PY $K --score g1 --arm prb-q38-L2 --taban enc-angc gecmis --seed 0             
   before they are scored.
 - **Calibrated and raw.** Prompt arms (prm, caa) also write `<arm>-raw`, the uncalibrated P(yes).
 - **Smoke mode.** `--kucuk [FIT:VAL:TEST]` writes under `kucuk/`, keeps two configs per grid and seals nothing.
+  `--score g1 --kucuk ...` scores the smoke files with the unchanged evaluator: it builds `kucuk/talp73/panel/`
+  (the panel with the smoke test persons as its sample) and cuts the `--taban` files to those persons.
+- **Raw files.** `--score` also takes `<arm>-raw` (for example `prm-q38-L2-raw`, `caa-q38-swap-raw`).
 - **Work folder.** `--base`, default `$LATENT_BASE` or the runner's built-in default.
 
 ## Competition day: one command (tek komutla)
@@ -245,6 +250,13 @@ Plans:
   last.
 - **24gb:** every 27-32B model in nf4. The q38 G1 arms are capped at 1,000 fit persons and 400 validation persons.
 
+**Time and memory (measured on the CPU smoke, scaled; `/data/talp/is/latent/DUMAN.md`).** At full size one rsd
+run (one person vector, 12-config sweep plus 3 epochs over 69,400 fit cells) is about 4 hours on an H100 at the
+prereg's assumed 2,500 tok/s, and sft-angc about 2 hours; K1+K2 is about 1.2 hours. The prereg budget assumed
+far less for K4, so the 80gb plan will not finish in one night. `--cap-fit 1000 --cap-val 400` cuts rsd to about
+1.3 hours. On 48 GB and 24 GB cards, lower `--cell-batch` (16 or 8) and `--train-batch` (16): one L2 cell's cache
+copy on Qwen3.8 is roughly 0.2 GB, so 64 cells at once is about 11-15 GB.
+
 Seeds 1-2 of the G1 LLM arms are not part of a plan. Under the prereg stop rule, run them by hand, and only when
 the seed-0 score beats the arm's matched encoder-only control or T3:
 `--model q38 --arm prb-L2 --seed 1 2`.
@@ -258,5 +270,6 @@ the seed-0 score beats the arm's matched encoder-only control or T3:
 - caa steers the last prompt token only. Steering every prompt position would need the injection inside the
   cached prefix.
 - The fp8 and nf4 paths have not been run, because this machine has no GPU and no bitsandbytes.
-- The Gemma 4 sliding window has been tested with short prompts. With left padding and prompts over 1,024 tokens
-  it is not tested.
+- The Gemma 4 sliding window is tested only on the tiny model, whose window is 4 tokens (left-padded batches,
+  cached vs uncached). Real L2 prompts are 945 tokens on average and up to 1,353 (p95 1,270), so on g31 they
+  cross a 1,024-token window; this has not run on real Gemma weights.

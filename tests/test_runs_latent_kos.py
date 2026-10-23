@@ -39,6 +39,10 @@ class TestArmParse(unittest.TestCase):
                 k.parse_arm(bad, "q38")
         with self.assertRaises(ValueError):
             k.parse_arm("prb-L2")                                  # no model
+        self.assertEqual(k.score_arm("caa-q38-swap-raw").name, "caa-q38-swap-raw")   # --score reads the raw files
+        self.assertEqual(k.score_arm("prm-L2-raw", "q35s").name, "prm-q35s-L2-raw")
+        with self.assertRaises(ValueError):
+            k.parse_arm("prm-L2-raw", "q38")                        # not a runnable arm
 
 
 @unittest.skipUnless(HAVE_TORCH, "torch not installed")
