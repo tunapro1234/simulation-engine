@@ -239,29 +239,38 @@ def text_embedding(texts: Sequence[str], *, model: str = "intfloat/multilingual-
     return X
 
 
-def llm_states(ld, prefixes: Sequence[str], layers: Sequence[int], *, pool: str = "last",
+def llm_states(ld, prefixes: Sequence[str], layers: Sequence[int], *, pool="last",
                spans: Sequence[tuple[int, int]] | None = None, batch_size: int = 8, cache_dir=None,
-               tag: str = "") -> dict[int, np.ndarray]:
+               tag: str = "") -> dict:
     """E4: the model's residual state after each layer in `layers` at the prefix's last token (pool "last") or
-    averaged over spans[i] (pool "mean"). Cached per (model, precision, tag, layer, pool, texts hash) as .npy."""
+    averaged over spans[i] (pool "mean"; without spans over all non-pad tokens): {layer: (N, d)}. A tuple of pools
+    runs one forward pass for all of them and returns {pool: {layer: (N, d)}}. Cached per (model, precision, tag,
+    layer, pool, texts hash) as .npy; spans enter the key of pool "mean" only."""
     from .readout import prefix_states
-    key = _cache_key(ld.code, ld.precision, list(prefixes), pool, spans)
-    out, todo = {}, []
+    pools = (pool,) if isinstance(pool, str) else tuple(pool)
     d = Path(cache_dir) / ld.code if cache_dir is not None else None
-    for l in layers:
-        p = d / f"{tag}_{l}_{pool}_{ld.precision}_{key}.npy" if d is not None else None
-        if p is not None and p.exists():
-            out[int(l)] = np.load(p)
+    path = {}
+    for p in pools:
+        key = _cache_key(ld.code, ld.precision, list(prefixes), p, spans if p == "mean" else None)
+        for l in layers:
+            path[(p, int(l))] = d / f"{tag}_{int(l)}_{p}_{ld.precision}_{key}.npy" if d is not None else None
+    out = {p: {} for p in pools}
+    todo = []
+    for (p, l), f in path.items():
+        if f is not None and f.exists():
+            out[p][l] = np.load(f)
         else:
-            todo.append(int(l))
+            todo.append((p, l))
     if todo:
-        res = prefix_states(ld, prefixes, layers=todo, pool=pool, spans=spans, batch_size=batch_size).hidden
-        for l, X in res.items():
-            out[l] = X
-            if d is not None:
+        tp = tuple(sorted({p for p, _ in todo}))
+        tl = sorted({l for _, l in todo})
+        res = prefix_states(ld, prefixes, layers=tl, pool=tp, spans=spans, batch_size=batch_size).hidden
+        for p, l in todo:
+            out[p][l] = res[p][l]
+            if path[(p, l)] is not None:
                 d.mkdir(parents=True, exist_ok=True)
-                np.save(d / f"{tag}_{l}_{pool}_{ld.precision}_{key}.npy", X)
-    return out
+                np.save(path[(p, l)], res[p][l])
+    return out[pool] if isinstance(pool, str) else out
 
 
 # ------------------------------------------------------------------------------------------------- E5 / E6 / E7

@@ -480,9 +480,8 @@ def _probe_configs(ld, levels_pool=("last", "mean")):
 
 def _states_g1(ctx, ld, v: V1, level: str, layers, pools):
     pre, spans = _person_prefixes(ld.tok, v, level)
-    return {pool: lt.llm_states(ld, pre, layers, pool=pool, spans=spans if pool == "mean" else None,
-                                batch_size=ctx.a.batch, cache_dir=ctx.states_dir(), tag=f"g1s{v.seed}_{level}")
-            for pool in pools}
+    return lt.llm_states(ld, pre, layers, pool=tuple(pools), spans=spans, batch_size=ctx.a.batch,
+                         cache_dir=ctx.states_dir(), tag=f"g1s{v.seed}_{level}")      # one pass for all pools
 
 
 def run_prb_g1(ctx: Ctx, arm: Arm, seed: int):

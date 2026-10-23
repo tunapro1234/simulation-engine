@@ -117,43 +117,55 @@ def expand_cache(cache, n: int):
     return select_cache(cache, torch.zeros(n, dtype=torch.long, device=dev))
 
 
-def prefix_forward(ld, seqs: Sequence[Sequence[int]], *, layers: Sequence[int] = (), pool: str = "last",
+def prefix_forward(ld, seqs: Sequence[Sequence[int]], *, layers: Sequence[int] = (), pool="last",
                    spans: Sequence[tuple[int, int]] | None = None, keep_cache: bool = True):
     """One left-padded forward over token sequences. Returns (cache | None, mask, {layer: (B, d) float32 tensor}).
-    spans[i] = (start, end) token range of row i's persona block for pool="mean"."""
+    spans[i] = (start, end) token range of row i's persona block for pool="mean" (without spans: all non-pad
+    tokens). pool may be a tuple of pools: one forward fills all of them and the states are {pool: {layer: ...}}."""
+    import contextlib
     import torch
     from transformers import DynamicCache
+    pools = (pool,) if isinstance(pool, str) else tuple(pool)
     ids, mask = _left_pad(seqs, _pad_id(ld.tok), ld.device)
     span = None
-    if pool == "mean" and spans is not None:
-        span = torch.zeros_like(mask, dtype=torch.bool)
-        T = ids.shape[1]
-        for i, (a, b) in enumerate(spans):
-            off = T - len(seqs[i])
-            span[i, off + a:off + b] = True
+    if "mean" in pools:
+        if spans is None:
+            span = mask.bool()
+        else:
+            span = torch.zeros_like(mask, dtype=torch.bool)
+            T = ids.shape[1]
+            for i, (a, b) in enumerate(spans):
+                off = T - len(seqs[i])
+                span[i, off + a:off + b] = True
     cache = DynamicCache(config=ld.model.config) if keep_cache else None
-    with torch.no_grad(), capture(ld.model, list(layers), pool=pool, span=span) as st:
+    with torch.no_grad(), contextlib.ExitStack() as es:
+        st = {p: es.enter_context(capture(ld.model, list(layers), pool=p, span=span)) for p in pools}
         ld.model(input_ids=ids, attention_mask=mask, past_key_values=cache, use_cache=keep_cache,
                  logits_to_keep=1)                     # logits unused: no (B, T, vocab) tensor
-    return cache, mask, dict(st)
+    st = {p: dict(v) for p, v in st.items()}
+    return cache, mask, (st[pool] if isinstance(pool, str) else st)
 
 
-def prefix_states(ld, prefixes: Sequence[str], *, layers: Sequence[int] = (), pool: str = "last",
+def prefix_states(ld, prefixes: Sequence[str], *, layers: Sequence[int] = (), pool="last",
                   spans: Sequence[tuple[int, int]] | None = None, batch_size: int = 8) -> PrefixOut:
-    """Residual states of each prefix at `layers` (no cache kept): hidden {layer: (N, d) float32 numpy}."""
+    """Residual states of each prefix at `layers` (no cache kept): hidden {layer: (N, d) float32 numpy}, or
+    {pool: {layer: ...}} when pool is a tuple (one pass for all pools)."""
+    pools = (pool,) if isinstance(pool, str) else tuple(pool)
     seqs = _ids(ld.tok, prefixes)
     order = np.argsort([len(s) for s in seqs], kind="stable")       # similar lengths per batch: less padding
-    parts: dict[int, list] = {int(l): [] for l in layers}
+    parts: dict = {(p, int(l)): [] for p in pools for l in layers}
     for b in range(0, len(order), batch_size):
         ix = order[b:b + batch_size]
-        _, _, st = prefix_forward(ld, [seqs[i] for i in ix], layers=layers, pool=pool, keep_cache=False,
+        _, _, st = prefix_forward(ld, [seqs[i] for i in ix], layers=layers, pool=pools, keep_cache=False,
                                   spans=None if spans is None else [spans[i] for i in ix])
-        for l in parts:
-            parts[l].append(st[l].cpu().numpy())
+        for p, l in parts:
+            parts[(p, l)].append(st[p][l].cpu().numpy())
     inv = np.empty_like(order)
     inv[order] = np.arange(len(order))
-    hidden = {l: np.concatenate(v, 0)[inv] for l, v in parts.items() if v}
-    return PrefixOut(None, None, hidden, np.array([len(s) for s in seqs]))
+    hidden = {p: {l: np.concatenate(parts[(p, l)], 0)[inv] for l in map(int, layers) if parts[(p, l)]}
+              for p in pools}
+    return PrefixOut(None, None, hidden[pool] if isinstance(pool, str) else hidden,
+                     np.array([len(s) for s in seqs]))
 
 
 def suffix_logits(ld, cache, mask, rows, suffix, *, inject: Injection | None = None, vec_idx=None):

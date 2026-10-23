@@ -122,6 +122,26 @@ class TestCachedReadout(unittest.TestCase):
         m = prefix_states(ld, PRE, layers=[1], pool="mean", spans=spans).hidden[1]
         self.assertEqual(m.shape, (3, ld.hidden_size))
 
+    def test_pools_in_one_pass_and_mean_skips_padding(self):
+        import tempfile
+        from simengine.persona.latent import llm_states, prefix_states
+        from simengine.persona.latent.hooks import _layer
+        ld = tiny("qwen3_5")
+        calls = []
+        h = _layer(ld.model, 0).register_forward_hook(lambda *a: calls.append(1))
+        try:
+            both = prefix_states(ld, PRE, layers=[1, 7], pool=("last", "mean"), batch_size=3).hidden
+        finally:
+            h.remove()
+        self.assertEqual(len(calls), 1)                                  # one forward for both pools
+        np.testing.assert_allclose(both["last"][7], prefix_states(ld, PRE, layers=[7]).hidden[7], atol=1e-5)
+        alone = np.stack([prefix_states(ld, [t], layers=[1], pool="mean").hidden[1][0] for t in PRE])
+        np.testing.assert_allclose(both["mean"][1], alone, atol=1e-5)   # left padding is not averaged in
+        with tempfile.TemporaryDirectory() as d:
+            a = llm_states(ld, PRE, [1, 7], pool=("last", "mean"), cache_dir=d, tag="t")
+            b = llm_states(ld, PRE, [7], pool="last", cache_dir=d, tag="t")      # read from the cache
+            np.testing.assert_array_equal(a["last"][7], b[7])
+
 
 @needs_torch
 class TestPrompts(unittest.TestCase):
