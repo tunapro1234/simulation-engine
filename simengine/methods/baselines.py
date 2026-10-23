@@ -207,7 +207,8 @@ class ConditionalMode:
 
     smooth: {numeric column: [(offset, weight), ...]}. A cell at value v also counts the rows at v + offset with
             ``weight`` (its own rows weigh 1). Several smoothed columns multiply. Applied on every level that holds
-            the column. ``wrap={col: period}`` makes offsets circular (48 half-hour slots, 7 weekdays).
+            the column. ``wrap={col: period}`` makes offsets circular (48 half-hour slots, 7 weekdays; keys are
+            taken mod period in fit and predict, so 1-based slots 1..48 work).
     backoff: key lists tried in order after ``keys`` when a query cell has no weight (> ``min_weight``); the
             global mode always ends the chain. ``levels_`` lists the chain, ``return_level`` the index used per row.
     decay:  row weight ``decay ** (ref - time)`` with ``ref`` the latest ``time_col`` value in fit (``now=``
@@ -239,10 +240,23 @@ class ConditionalMode:
         age = age.dt.total_seconds() / 86400 if pd.api.types.is_timedelta64_dtype(age) else age
         return w * self.decay ** np.asarray(age, float)
 
+    def _wrap(self, d: pd.DataFrame) -> pd.DataFrame:
+        """Smoothed / wrapped key columns as int64 (uint8 slots would overflow on -1) or float, wrapped columns taken
+        mod their period (so 1-based slots 1..48 meet 0 after a shift and queries at 48 find the same cell)."""
+        cols = [c for c in d.columns if c in self.smooth or c in self.wrap]
+        if not cols:
+            return d
+        d = d.copy()
+        for c in cols:
+            v = d[c].to_numpy()
+            v = v.astype(np.int64) if np.issubdtype(v.dtype, np.integer) else v.astype(float)
+            d[c] = v % self.wrap[c] if c in self.wrap else v
+        return d
+
     def _counts(self, base: pd.DataFrame, level: list) -> pd.DataFrame:
         """Weighted label counts per cell of ``level`` (smoothed), sorted best first within each cell."""
         y = self.target
-        c = base.groupby(level + [y], sort=False, observed=True)["_w"].sum().reset_index()
+        c = self._wrap(base.groupby(level + [y], sort=False, observed=True)["_w"].sum().reset_index())
         for col in [x for x in level if x in self.smooth]:
             parts = [c]
             for off, wt in self.smooth[col]:
@@ -297,6 +311,7 @@ class ConditionalMode:
         missing = [c for lv in self.levels_ for c in lv if c not in q.columns]
         if missing:
             raise KeyError(f"ConditionalMode.predict: missing column(s) {sorted(set(missing))}")
+        q = self._wrap(q)
         n, kk = len(q), 1 if k is None else int(k)
         level = np.full(n, -1)
         if k is None:                                  # top-1: vectorised merge per level
@@ -356,6 +371,8 @@ def stat_for_metric(metric: str) -> str:
 def _wstat(v: np.ndarray, w: np.ndarray | None, stat) -> float:
     """mean / median / quantile q of v; weighted quantiles are the weighted step quantile (midpoint on an exact
     tie of the cumulative weight, so equal weights give np.median)."""
+    if not len(v):
+        raise ValueError("no rows with a numeric target (and positive weight) to take the stat of")
     if stat == "mean":
         return float(np.average(v, weights=w))
     q = 0.5 if stat == "median" else float(stat)
@@ -365,7 +382,7 @@ def _wstat(v: np.ndarray, w: np.ndarray | None, stat) -> float:
     v, cw = v[o], np.cumsum(w[o])
     h = q * cw[-1]
     i = int(np.searchsorted(cw, h))
-    if i < len(v) - 1 and np.isclose(cw[i], h):
+    if i < len(v) - 1 and np.isclose(cw[i], h, rtol=1e-9, atol=0):      # relative: tiny weights stay exact
         return float((v[i] + v[i + 1]) / 2)
     return float(v[min(i, len(v) - 1)])
 
@@ -450,6 +467,8 @@ class CellMedian:
             raise ValueError("shrink=None picks shrink on validation data: pass fit(df, valid=...)")
         yv = pd.to_numeric(valid[self.y_col], errors="coerce").to_numpy(float)
         ok = ~np.isnan(yv)
+        if not ok.any():
+            raise ValueError(f"valid has no numeric {self.y_col!r}: cannot pick shrink")
         self.scores_ = {}
         for a in self.GRID:
             self.shrink_ = float(a)

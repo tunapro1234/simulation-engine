@@ -94,6 +94,20 @@ class TestConditionalMode(unittest.TestCase):
         lab, lvl = m.predict(q, return_level=True)
         self.assertEqual((lab.tolist(), lvl.tolist()), (["night"], [0]))
 
+    def test_small_int_slots_and_one_based_wrap(self):
+        # uint8 slots (a 1M-row table downcast to save memory) overflowed on the -1 shift; 1-based slots 1..48 with
+        # wrap=48 sent slot 1's left neighbour to cell 0 instead of 48
+        tr = pd.DataFrame({"slot": np.array([47, 47, 10], dtype="uint8"), "place": ["night", "night", "day"]})
+        sm = {"slot": [(-1, 0.5), (1, 0.5)]}
+        m = ConditionalMode(["slot"], target="place", smooth=sm, wrap={"slot": 48}).fit(tr)
+        lab, lvl = m.predict(pd.DataFrame({"slot": np.array([0, 46, 11], dtype="uint8")}), return_level=True)
+        self.assertEqual((lab.tolist(), lvl.tolist()), (["night", "night", "day"], [0, 0, 0]))
+        one = pd.DataFrame({"slot": [48, 48, 20], "place": ["night", "night", "day"]})
+        m = ConditionalMode(["slot"], target="place", smooth=sm, wrap={"slot": 48}).fit(one)
+        lab, lvl = m.predict(pd.DataFrame({"slot": [1, 47, 48]}), return_level=True)
+        self.assertEqual((lab.tolist(), lvl.tolist()), (["night", "night", "night"], [0, 0, 0]))
+        self.assertTrue(set(m.tables_[0]["slot"]) <= set(range(48)))
+
     def test_decay(self):
         tr = pd.DataFrame({"person": "a", "t": [0, 0, 0, 10, 10], "place": ["old"] * 3 + ["new"] * 2})
         q = pd.DataFrame({"person": ["a"]})
@@ -181,6 +195,18 @@ class TestMedianRungs(unittest.TestCase):
                                    [1.5, 54.0, g])
         mean = CellMedian(by="g", y_col="y", metric="mse").fit(df)
         np.testing.assert_allclose(mean.predict(pd.DataFrame({"g": ["a"]})), [11.0])
+
+    def test_tiny_weights_and_empty_input(self):
+        # the tie test used np.isclose's absolute 1e-8: weights of 1e-10 made every cumulative weight "tie"
+        self.assertEqual(MedianConstant().fit([1.0, 2.0, 3.0], weight=[1e-10] * 3).value_, 2.0)
+        self.assertEqual(MedianConstant().fit([1.0, 2.0, 3.0, 10.0], weight=[1e-10] * 4).value_, 2.5)
+        with self.assertRaises(ValueError):
+            MedianConstant().fit([np.nan, np.nan], weight=[1, 1])
+        with self.assertRaises(ValueError):
+            MedianConstant().fit([np.nan])
+        df = pd.DataFrame({"g": [1, 1, 2], "y": [1.0, 2.0, 3.0]})
+        with self.assertRaises(ValueError):                   # all-NaN valid used to pick shrink 0 from NaN scores
+            CellMedian(by="g", shrink=None).fit(df, valid=df.assign(y=np.nan))
 
     def test_cell_median_weighted(self):
         df = pd.DataFrame({"g": ["a"] * 3, "y": [1.0, 2.0, 10.0], "w": [1.0, 1.0, 5.0]})

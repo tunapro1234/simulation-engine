@@ -200,7 +200,7 @@ class NextActionRanker:
         return c
 
     def _check_generic(self, t: pd.DataFrame, train: bool):
-        need = [self.query_col] + self.features + ([self.y_col] if train else [])
+        need = [self.query_col] + self.features_ + ([self.y_col] if train else [])
         need += [c for c in (self.cand_col, self.prior_col if train else None) if c is not None]
         missing = [c for c in dict.fromkeys(need) if c not in t.columns]
         if missing:
@@ -218,24 +218,29 @@ class NextActionRanker:
         return t[keep]
 
     def _fit_generic(self, table: pd.DataFrame, numeric, categorical):
-        if self.features is None:
-            self.features = list(categorical) + list(numeric)
-        if not self.features:
+        feats = list(self.features) if self.features is not None else list(categorical) + list(numeric)
+        if not feats:
             raise ValueError("generic schema needs features=[...] (or numeric= / categorical= in fit)")
+        self.features_ = feats
         self._check_generic(table, train=True)
         lgb = require_lightgbm()
+        if table[self.query_col].isna().any():
+            raise ValueError(f"{self.query_col!r} has missing query ids: drop or fill them before fit")
         t = table[table[self.y_col].notna()]
-        cat = list(categorical) or [c for c in self.features if not pd.api.types.is_numeric_dtype(t[c])]
-        self.categorical = [c for c in self.features if c in cat]
-        self.numeric = [c for c in self.features if c not in cat]
-        self.features_ = list(self.features)
+        yv = pd.to_numeric(t[self.y_col], errors="coerce").to_numpy(float)
+        if np.isnan(yv).any() or (yv < 0).any() or (yv != np.round(yv)).any():
+            raise ValueError(f"lambdarank needs non-negative integer relevance in {self.y_col!r} (0/1 or graded "
+                             "0, 1, 2, ...); bin fractional scores first")
+        cat = list(categorical) or [c for c in feats if not pd.api.types.is_numeric_dtype(t[c])]
+        self.categorical = [c for c in feats if c in cat]
+        self.numeric = [c for c in feats if c not in cat]
         self.cats_ = {k: sorted(t[k].fillna("NA").astype(str).unique().tolist()) for k in self.categorical}
         self.models_, self.n_train_rows_ = [], 0
         for i in range(self.n_seeds):
             sd = self.seed + i
             ti = self._sample_generic(t, sd) if self.sample_negatives else t
             ti = self._cat(ti.sort_values(self.query_col, kind="mergesort"))
-            grp = ti.groupby(self.query_col, sort=True).size().to_numpy()
+            grp = ti.groupby(self.query_col, sort=True, observed=True).size().to_numpy()
             m = lgb.LGBMRanker(num_threads=n_threads(len(ti)), **{**self.params, "random_state": sd})
             self.models_.append(m.fit(ti[self.features_], ti[self.y_col].astype(int), group=grp))
             self.n_train_rows_ = max(self.n_train_rows_, len(ti))

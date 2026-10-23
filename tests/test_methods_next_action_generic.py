@@ -100,6 +100,26 @@ class TestGenericRanker(unittest.TestCase):
         _, s = r.score(te)
         self.assertTrue(np.isfinite(s).all())
 
+    def test_label_and_query_id_checks(self):
+        # fractional relevance was cast with astype(int) -> all zeros, a model trained on nothing without a word;
+        # NaN query ids ended in a LightGBM "sum of query counts" fatal
+        kw = dict(n_estimators=5, query_col="qid", features=["hist", "dist"])
+        for bad in (self.tr.hist, -self.tr.y):
+            with self.assertRaises(ValueError):
+                NextActionRanker(**kw).fit(self.tr.assign(y=bad))
+        with self.assertRaises(ValueError):
+            NextActionRanker(**kw).fit(self.tr.assign(qid=self.tr.qid.where(self.tr.index > 5)))
+        NextActionRanker(**kw).fit(self.tr.assign(y=self.tr.y.astype(float)))      # 0.0 / 1.0 floats are fine
+        cat = self.tr.assign(qid=pd.Categorical(self.tr.qid, categories=list(self.tr.qid.unique()) + ["unused"]))
+        self.assertTrue(np.isfinite(NextActionRanker(**kw).fit(cat).score(cat)[1]).all())
+
+    def test_refit_uses_new_fit_features(self):
+        r = NextActionRanker(n_estimators=5, query_col="qid")
+        r.fit(self.tr, numeric=["hist"])
+        r.fit(self.tr, numeric=["hist", "dist"])
+        self.assertEqual(r.features_, ["hist", "dist"])
+        self.assertIsNone(r.features)
+
 
 if __name__ == "__main__":
     unittest.main()
