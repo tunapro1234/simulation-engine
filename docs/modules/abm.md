@@ -13,9 +13,17 @@ This module holds the agent-based models and the baselines they have to beat:
 | `hawkes_mean_field`, `power_kernel`, `seismic_kernel`, `SeismicPredictor`, `shape_forecast` | self-exciting cascade predictors for share curves, plus the shape baseline | measured; Hawkes ties and SEISMIC loses to the shape baseline |
 | `AgentSociety`, `ShareCascadeWorld`, `ChoiceWorld`, `World` | turn-based LLM agent society: a deterministic world, agents acting through the LLM protocol, a log for every turn | measured; no better than a single LLM score or a calibrated constant curve |
 | `run_who_to_punish`, `run_repeated_pd`, `run_trust_interaction` | economic-game LLM societies (Ertan-Page-Putterman who-to-punish with voting, repeated prisoner's dilemma, trust game) returning structured per-answer rows | infrastructure; no measured result in this port |
+| `Grid`, `Agents`, `random_lattice`, `random_order_step`, `synchronous_step`, `morans_i`, `moran_permutation`, `dissimilarity`, `same_type_share`, `gini` | lattice core for grid ABMs: torus / bounded grid, agent arrays, schedulers, seeded RNGs, spatial metrics ([abm/grid_core.md](abm/grid_core.md)) | infrastructure; null levels and timings measured by this port |
+| `Schelling`, `tipping_curve`, `ZhangSwap`, `LLMMover`, `segregation_coefficient` | Schelling segregation (threshold rule), Zhang's swap game, LLM movers ([abm/schelling.md](abm/schelling.md)) | measured on synthetic lattices; reproduces the tipping shape and Gauvin's T_f, disagrees with Zhang's beta scale |
+| `Sugarscape`, `SugarscapeConfig`, `LLMPolicy`, `lorenz`, `gini_trajectory` | Sugarscape (Epstein-Axtell ch. II and IV): growback, movement, replacement, spice and trade, LLM movement ([abm/sugarscape.md](abm/sugarscape.md)) | measured; Gini 0.24 -> 0.47-0.48, no real LLM run |
+| `geobleu`, `dtw`, `user_scores`, `slot_mode`, `MarkovMobility`, `EPRMobility`, `mobility_baselines` | HuMob mobility metrics, no-model baselines and an EPR simulator on the YJMob100K grid ([abm/mobility.md](abm/mobility.md)) | measured; the per-user slot mode wins, EPR loses as a forecaster |
+| `CellGrid`, `exposures`, `greedy_placement`, `reach_frequency`, `top_visited`, `placement.holdout` | billboard placement: greedy / CELF max coverage under k or a budget, online bound, temporal holdout ([abm/placement.md](abm/placement.md)) | measured; greedy beats top-k visited by 7-20 points of test reach from k = 10 |
+| `SpatialSEIR`, `seir_ode`, `r0_index_case`, `r0_growth`, `GenerativeEpidemic` | spatial SIR / SEIR on a grid or on trajectories, its ODE control, R0 estimators, generative-agent isolation ([abm/epidemic.md](abm/epidemic.md)) | measured against the ODE; generative variant only with rule FakeLLMs |
 
-**Provenance.** Everything is ported from the TALP prep research branch `makro`. The algorithms and defaults
-are unchanged. Shorthand used below:
+**Provenance.** The components down to the economic-game societies are ported from the TALP prep research branch
+`makro` (the games from `edsl-test`, see their section). The algorithms and defaults are unchanged. The grid and
+spatial models (the last six rows) were written for this port from the cited papers and measured by it; see
+[Grid and spatial models](#grid-and-spatial-models) and their unit docs. Shorthand used for the ported part:
 - **[makro RAPOR]** = `uretim/makro/RAPOR.md`
 - **[abm RAPOR]** = `uretim/makro/abm/RAPOR.md`
 - **[M1 NOTLAR]** = `uretim/makro/abm/m1/NOTLAR.md`
@@ -24,7 +32,8 @@ are unchanged. Shorthand used below:
 - **[prova D7 SONUC]** = `uretim/prova/d7/SONUC-MAIN.md` (the same rehearsal scored on the held-out 1998-2002 truth) and its sealed test card `uretim/prova/d7/teslim/simengine-test-kart.md`
 - **[yayilim24 SONUC]** = `uretim/makro/abm/yayilim24/SONUC.md` (pre-registration `makro/onkayit/yayilim-24s.md`, commit 06224f7; run 21-22 Oct, added by the integrator after this module was written)
 
-Every number below comes from those files. This port did not re-measure anything.
+Every number in the ported sections comes from those files; this port did not re-measure them. The numbers in
+[Grid and spatial models](#grid-and-spatial-models) are this port's own runs.
 
 **Port equivalence** *(this port)*: `tests/test_abm_equivalence.py` imports the original code when
 `SIMENGINE_ABM_SOURCE` points at the `makro` branch. It checks that the adoption and market engines, the six curve
@@ -73,6 +82,19 @@ run.log, run.states, run.calls, run.invalid
 # --- who-to-punish society (4 players per group, 2 votes x 3 periods); feed run["groups"][g] to games.wtp_scorecard
 run = abm.run_who_to_punish(llm, personas=None, groups=1, seed=0)     # None = no-persona control
 run["groups"][0]["votes"], run["periods"], run["punishments"], run["invalid"]
+
+# --- grid and spatial models (all offline here; examples/abm_new_demo.py runs each one in about 2 s)
+g = abm.Grid((50, 50), torus=True)                                   # Moore, radius 1
+run = abm.Schelling(g, threshold=1 / 3).run(n_steps=100, seed=0)     # run.history: same_share, happy, moved, ...
+sug = abm.Sugarscape(abm.SugarscapeConfig(n_agents=250), seed=0).run(500)   # sug.stats.gini by step
+q = test[["uid", "d", "t"]]                                          # mobility frames: uid, d, t, x, y
+preds = abm.mobility_baselines(train, q)                             # slot_mode, markov_*, epr, global_slot_mode
+s = abm.user_scores(q.uid, q.d, q.t, abm.from_cell(preds["slot_mode"]), test[["x", "y"]].to_numpy())
+ex = abm.exposures(traj, abm.CellGrid.fit(traj, size=2), days=range(10))   # traj: user, day, slot, x, y
+p = abm.greedy_placement(ex.M, k=5)                                  # p.cells, p.value, p.bound
+par = abm.EpiParams.from_r0(2.5, infectious_days=5, latent_days=3)
+r = abm.SpatialSEIR(par, shape=(100, 100), n=10_000, radius=3).run(days=200, i0=10, reps=10, seed=1)
+abm.ode_agreement(r, abm.seir_ode(par, n=10_000, i0=10, days=200))
 ```
 
 ## Adoption ABM + ABC + analogy prior
@@ -403,3 +425,111 @@ rows 7-9) came from EDSL runs with gpt-oss-120b, scored by regex over `summary.t
 through this code. Tests (`tests/test_abm_society_games.py`) check only the mechanics, against hand calculations
 with scripted `FakeLLM` replies: payoffs, majority with ties failing, dismantling, retries, and that invalid
 answers are never counted as 0.
+
+## Grid and spatial models
+
+Six units written for this port, each with its own doc (API table, provenance checked against the source text,
+measured numbers, limitations). The sections below are the short version. All names in the table at the top are
+exported from `simengine.abm`. Names that would clash or read ambiguously at package level stay in the submodule:
+`abm.grid.run` (step loop), `abm.sugarscape.gini` (clips negatives; `abm.gini` is the grid one, which raises on
+them), `abm.placement.adoption` / `AdoptionRun` / `holdout` (`abm.adoption` is the adoption-ABM submodule),
+`abm.mobility.clean`, `abm.spatial_sir.rule_responder`, and the module constants. Every unit was reviewed after it
+was written; the reviews fixed bugs and re-ran the measurements, as noted in each doc.
+
+`examples/abm_new_demo.py` runs all six on synthetic data in about 2 s. Its printed values are smoke checks, not
+results.
+
+### Lattice core (`abm.grid`)
+
+Unit doc: [abm/grid_core.md](abm/grid_core.md).
+
+`Grid(shape, torus, neighbourhood, radius)` gives vectorised neighbour sums and counts over `(..., H, W)` stacks,
+flat neighbour tables and type counts. The lattice convention is an int array with `EMPTY` (-1) and types 0..K-1.
+`random_order_step` (asynchronous, fresh order per step), `synchronous_step` (from a read-only copy) and
+`grid.run` are the schedulers. Metrics: Moran's I with a permutation p-value, Duncan's dissimilarity on tiles, the
+like-neighbour share and Gini.
+
+- **Null levels** (random 45/45/10 lattice, 100 x 100 Moore torus, 20 seeds): like share 0.5002, Moran's I 0.0004
+  (E[I] = -0.0001), D 0.083 on 10 x 10 tiles and 0.166 on 5 x 5. Report D with its tile size and this null.
+- `moran_permutation` defaults to esda's legacy "directed" p-value, which runs small. Pass
+  `alternative="greater"` or `"two-sided"` for a test decided in advance.
+- Speed: 1000 x 1000 neighbour count 2.2-3.7 ms (load dependent), about 2-3.5x faster than
+  `scipy.ndimage.correlate` at radius 1.
+
+### Schelling, Zhang swap game, LLM movers (`abm.schelling`)
+
+Unit doc: [abm/schelling.md](abm/schelling.md).
+
+`Schelling(grid, threshold, rule, movers)` covers Schelling's 1971 rule (`rule="nearest"` on his 13 x 16 board),
+the Mesa / NetLogo random move and the Gauvin et al. 2009 variant (`movers="all", rule="satisfying"`).
+`ZhangSwap` is Zhang's 2004 all-integrationist swap game. `LLMMover` replaces or overrides the threshold with
+batched, de-duplicated LLM decisions parsed by `parse_decision`.
+
+- **Tipping curve** (50 x 50 torus, 10 seeds): like share 0.51 at threshold 0.1, 0.75 at 1/3, 0.87 at 0.5, 0.99 at
+  0.7, and back to 0.55 at 0.8 where nobody can be satisfied. NetLogo's "about 70%" at 30% wanted: we get 0.75.
+- **Gauvin et al.**: frozen-to-segregated jump between T = 1/3 and 3/8, matching their T_f = 3/8.
+- **Zhang**: segregation emerges although every agent prefers mixing, but the onset is between beta 5 and 6, not
+  near 2 as in his Fig. 8. The model as written is an Ising model whose literature critical point gives
+  beta_c = 5.07; stripes melt at beta 4. The paper does not say how its beta or payoffs were scaled.
+- **LLM path**: only checked with a rule-following FakeLLM (it reproduces the classic outcome; offering 3 random
+  vacancies alone keeps a 0.7-demand town mixed). No real-LLM numbers.
+
+### Sugarscape (`abm.sugarscape`)
+
+Unit doc: [abm/sugarscape.md](abm/sugarscape.md).
+
+Rules G, M, R, spice and T from Epstein & Axtell (1996), with movement and death checked against the NetLogo port.
+The default capacity map is parametric (91.6% of cells equal to the transcribed book map, which is CC BY-NC-SA and
+not shipped; `load_capacity` reads any map at runtime). `LLMPolicy` replaces rule M with one `llm.map` per step.
+
+- **Wealth distribution** (250 agents, 10 seeds): Gini 0.236 at t = 0, 0.51 at the first age cohort (t = 100),
+  0.475 on average over steps 200-500; skewness 0.03 -> 1.29. The transcribed map agrees within one seed sd.
+- **Carrying capacity** 230 agents of 400; selection lowers metabolism (2.47 -> 1.79) and raises vision.
+  Trade raises carrying capacity (132 -> 151) and inequality, and prices converge (log-price sd 0.59 -> 0.06).
+- The book's own numbers were not checked (not open access). Scripted FakeLLM policies show that random movement
+  barely changes the Gini plateau but more than doubles starvation, so an LLM-policy study should report survival too.
+
+### Mobility (`abm.mobility`)
+
+Unit doc: [abm/mobility.md](abm/mobility.md).
+
+HuMob GEO-BLEU and DTW reimplemented from the organisers' reference code (both the 2023 and 2025 variants; max
+difference on a tie-heavy probe 5.6e-17 / 2.3e-13), the per-user and global slot mode, a first-order Markov chain
+and an EPR simulator (Song et al. 2010). The bench task `yjmob` (`simengine.bench.tasks.yjmob`) wraps the split.
+
+- **2,000 YJMob100K users, days 0-59 -> 60-74** (humob23): slot mode 0.298 GEO-BLEU (0.316 on the HuMob test pool,
+  level with a top-3 transformer's published 0.316 but not like for like), Markov 0.21-0.23, EPR 0.14,
+  global slot mode 0.004.
+- EPR reproduces the S(n) growth exponent (0.74-0.84 vs the paper's 0.83) but is not a forecaster; use it as a
+  simulator. Its 16-cell return buffer is a documented deviation from the paper.
+
+### Placement (`abm.placement`)
+
+Unit doc: [abm/placement.md](abm/placement.md).
+
+Max coverage (optionally frequency-capped) under k cells or a cost budget: greedy and lazy greedy (CELF) with the
+Leskovec et al. 2007 guarantees and their online upper bound, the top-k-visited and random baselines, an
+exposure-to-adoption step with word of mouth, and `placement.holdout` (place on train days, score on test days,
+paired user-bootstrap CI).
+
+- **YJMob100K, first 4,000 users, test-day reach share at k = 50**: lazy greedy 0.739 vs top-50 visited 0.597 on
+  500 m cells (difference [+0.126, +0.157]); 0.923 vs 0.821 on 2 km cells. At k = 5 on 500 m cells it ties.
+- Greedy on EPR- or Markov-simulated trajectories places about as well as on the real history, also without the
+  test-day timing. One seed; no adoption ground truth, so the adoption step is illustrative only.
+
+### Spatial SEIR and generative-agent epidemic (`abm.spatial_sir`)
+
+Unit doc: [abm/epidemic.md](abm/epidemic.md).
+
+`SpatialSEIR` runs a batch of replicates on a grid (Moore window of any radius, or full mixing) with static homes or
+trajectories; `seir_ode` is the mean-field control; `r0_index_case`, `r0_growth` and `r0_final_size` estimate R0.
+`GenerativeEpidemic` follows Williams et al. 2023: each agent is asked daily whether to stay home.
+
+- **Well mixed vs ODE** (n = 10,000, 30 reps): attack rate and peak height within 0.004; the peak comes 1.7-2.7
+  days later, a lag that shrinks with smaller steps and more initial cases.
+- **Local contact** flattens and delays the epidemic long before it changes the final size (radius 3: attack 0.87,
+  peak a third of the ODE's, twice as late). The growth-rate R0 reads low at every finite radius (1.25 at radius 2
+  where the index case gives 2.24). At radius 1 an index-case R0 of 1.79 still gave no major outbreak.
+- **YJMob100K trajectories** (5,000 users): co-location within 1.5-2.5 km gives R0 1.6-2.1 and smaller, slower
+  epidemics; `beta` is not fitted to any disease.
+- **Generative variant**: only rule FakeLLMs (base attack 0.937 vs final size 0.940 for R0 = 3). No real-LLM run.
