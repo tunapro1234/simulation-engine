@@ -302,7 +302,13 @@ def _kiyas_kaydi(adlar: list[str], et_: str | None, metinler: list[str]) -> bool
                for t in metinler)
 
 
-_KOR_AD = r"(?:blind|kor|kör|adsiz|adsız)"
+_KOR_AD = ("blind", "kor", "kör", "adsiz", "adsız")
+_ADLI_AD = ("named", "adli", "adlı", "isimli")
+
+
+def _sozcukler(x) -> list[str]:
+    import re as _re
+    return [t for t in _re.split(r"[^0-9A-Za-zÇĞİÖŞÜçğıöşü]+", str(x).casefold()) if t]
 
 
 def _kiyas_ogeleri(kiyaslar) -> list[tuple]:
@@ -318,13 +324,19 @@ def _kiyas_ogeleri(kiyaslar) -> list[tuple]:
 
 
 def _kor_cifti(a: str | None, b: str | None, et_: str | None) -> bool:
-    """Adlı − kör eşleşik çift mi: b adı ya da etiket 'blind' / 'kör' / 'adsız' sözcüğü taşır (ör. llm − llm_blind,
-    "named − blind"). Böyle bir çift ezber (tanıma) denetimidir; a o zaman LLM kolu sayılır."""
-    import re as _re
+    """Adlı − kör eşleşik çift mi: b, a'nın kör ikizi (b adında 'blind' / 'kör' / 'adsız' sözcüğü, o sözcük ve
+    'named' / 'adlı' atılınca a ile aynı ad: llm − llm_blind, gpt_named − gpt_blind) ya da etiket hem adlı hem kör
+    sözcüğü taşıyor ("named − blind", "adlı − kör"). Böyle bir çift ezber (tanıma) denetimidir; a o zaman LLM kolu
+    sayılır. Yalnız b'nin kör olması yetmez: ours − llm_blind (bizim, kör LLM tabanına karşı) ezber denetimi değil."""
     if not a or not b or a == b:
         return False
-    sinir = r"(?:^|[^0-9A-Za-zÇĞİÖŞÜçğıöşü]){}(?:$|[^0-9A-Za-zÇĞİÖŞÜçğıöşü])".format(_KOR_AD)
-    return bool(_re.search(sinir, b, _re.I) or (et_ and _re.search(sinir, str(et_), _re.I)))
+    sa, sb = _sozcukler(a), _sozcukler(b)
+    if any(t in _KOR_AD for t in sb):
+        kok = [t for t in sb if t not in _KOR_AD + _ADLI_AD]
+        if kok and kok == [t for t in sa if t not in _ADLI_AD]:
+            return True
+    se = _sozcukler(et_) if et_ else []
+    return any(t in _KOR_AD for t in se) and any(t in _ADLI_AD for t in se)
 
 
 def _ezber_ciftten(satirlar: list[dict], llm_yok_beyan: bool = False) -> dict:
@@ -594,10 +606,12 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     hücreleri): merdivende etiketli, rozet ayar-A tabanlarına karşı. filled_<yöntem> sütunları kol başına dolgu
     denetimi olur. Madde içinde sabit tahminde karıştırma kontrolü atlanır. ezber_llm: bizim yöntem LLM
     kolu içeriyor mu; ezber uyarısında rozet gerekçesine ek düşer. None: bizim ham kol, adlı − kör çiftin adlı kolu ya
-    da kör kolun sahibiyse evet; başka bir LLM kolu (ham= ya da çift) varken hayır (yalnız ham LLM kolu bizime ek
-    düşürmez); hiç LLM kolu bilinmiyorsa ezber sonucu verildiyse evet. kiyaslar içinde b adı/etiketi 'blind' / 'kör' /
-    'adsız' taşıyan çift (llm − llm_blind) adlı − kör ezber denetimidir: ezber sonucu yokken ezber satırı ondan dolar.
-    'zaman' format="mixed" ile çözülür; çözülemeyen satır zaman denetimlerinin dışında kalır ve sayılır.
+    da kör kolun sahibiyse evet; değilse ezber sonucu verildiyse evet (ihtiyatlı: ours="stack", raw="llm" çoğu zaman
+    LLM'in üstüne kurulu); LLM kolu başkaysa denetimde ours_uses_llm=False'u söyleyen satır düşer. kiyaslar içinde b'nin
+    a'nın kör ikizi olduğu (llm − llm_blind) ya da etiketi hem adlı hem kör sözcüğü taşıyan ("named − blind") çift adlı
+    − kör ezber denetimidir: ezber sonucu yokken ezber satırı ondan dolar (ours − llm_blind çift sayılmaz).
+    'zaman' biçim biçim çözülür (karışık biçim, gün-önce, saat dilimi); çözülemeyen satır zaman denetimlerinin dışında
+    kalır ve sayılır.
     blok: blok bootstrap sütunu (ör. tahmin kökeni / hafta): küme yerine bu sütunun her değeri bir blok olarak
     yerine koymalı örneklenir (blok içindeki bütün satırlar/kümeler birlikte); sütun, merdiven, manşet ve eşleşik fark
     GA'ları. Tek değerliyse uygulanmaz (varsayılan kümeye dönülür, denetimde not).
@@ -1055,10 +1069,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     llm_kollari = list(dict.fromkeys(([ham] if ham else []) + [a_ for a_, _, _ in kor_ciftleri]
                                      + ([bizim] if kor is not None else [])))
     # bizim LLM kolu mu: açık beyan (ours_uses_llm) ya da bizim ham kol / adlı − kör çiftin adlı kolu / kör kolun
-    # sahibi; başka bir LLM kolu varken (yalnız raw=) bizim LLM sayılmaz. Hiç LLM kolu bilinmiyorsa eski varsayım:
-    # ezber sonucu verildiyse evet.
-    bizim_llm = (ezber_llm if ezber_llm is not None
-                 else (bizim in llm_kollari if llm_kollari else bool(ezber_json)))
+    # sahibi; değilse eski varsayım: ezber sonucu verildiyse evet. Ham kol varken bizim çoğu zaman onun kalibre /
+    # yığın sürümüdür (ours="stack", raw="llm"): ihtiyatlı varsayım korunur, satır ours_uses_llm=False'u söyler.
+    bizim_kendi_llm = bizim in llm_kollari
+    bizim_llm = ezber_llm if ezber_llm is not None else (bizim_kendi_llm or bool(ezber_json))
     llm_yok = ezber_llm is False and not ham and not kor_ciftleri
     ham_llm_notu = (f" · bizim kol LLM kullanmıyor (ours_uses_llm=False); denetim ham LLM kolu ({ham}) için "
                     f"(audit kept for the raw LLM arm)" if ezber_llm is False and ham else
@@ -1215,7 +1229,15 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     if ezber_d and ezber_d.get("durum") == "uyari":
         if bizim_llm:
             nedenler.append("ezber_denetimi")
-        elif ezber_llm is None and llm_kollari:   # uyarı LLM kolunun; bizim kol LLM sayılmadı (rozete ek düşmez)
+        if bizim_llm and ezber_llm is None and not bizim_kendi_llm and llm_kollari:
+            # varsayımla eklendi: LLM kolu başka (ham / çift); bizim LLM'siz bir modelse (lojistik, GBDT) tek adım
+            kl = ", ".join(llm_kollari)
+            den.append({"kontrol": "ezber uyarısı ve bizim kol (memorization warning and ours)", "durum": "tamam",
+                        "deger": None, "ayrinti": f"ezber uyarısı LLM kolunun ({kl}); bizim kol varsayımla LLM tabanlı "
+                        f"sayıldı, rozete ek düştü; bizim LLM kullanmıyorsa ours_uses_llm=False verin (the warning is "
+                        f"for the LLM arm {kl}; ours is counted as LLM-based by default and the badge carries the "
+                        "caveat; pass ours_uses_llm=False if ours does not use an LLM)"})
+        elif not bizim_llm and ezber_llm is None and llm_kollari:   # uyarı LLM kolunun (çift); rozete ek düşmez
             kl = ", ".join(llm_kollari)
             den.append({"kontrol": "ezber uyarısı ve bizim kol (memorization warning and ours)", "durum": "tamam",
                         "deger": None, "ayrinti": f"ezber uyarısı LLM kolunun ({kl}); bizim kol LLM kolu sayılmadı, rozete "

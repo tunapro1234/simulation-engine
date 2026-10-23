@@ -23,26 +23,45 @@ def _f(x, b=3):
     return "—" if x is None or not np.isfinite(x) else f"{x:.{b}f}".replace(".", ",")
 
 
+def _tarih_parca(s: pd.Series) -> pd.Series:
+    """Tek biçim turu: pandas biçimi ilk dolu satırdan çıkarır (hızlı yol). ISO değilse gün-önce de denenir, daha çok
+    satır çözen alınır (eşitlikte ay-önce, pandas varsayılanı); böylece "03/07/2023" ile "15/07/2023" aynı biçimle
+    okunur. ISO satırına gün-önce uygulanmaz ("2023-07-01" -> 7 Ocak olurdu). Saat dilimli değerler UTC'ye çekilir."""
+    import re
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")   # biçim çıkarım / dayfirst uyarıları
+        a = pd.to_datetime(s, errors="coerce", utc=True)
+        ilk = str(s.iloc[0]) if len(s) else ""
+        if a.notna().all() or re.match(r"\s*\d{4}", ilk):
+            return a
+        b = pd.to_datetime(s, errors="coerce", utc=True, dayfirst=True)
+    return b if b.notna().sum() > a.notna().sum() else a
+
+
 def zaman_coz(s: pd.Series) -> tuple[pd.Series, int]:
-    """'zaman' sütunu -> (datetime, çözülemeyen dolu satır sayısı). Biçim satır satır çözülür (format="mixed"):
-    karışık biçimli tarihler ("2024-03-05" ile "15/09/2024") ilk satırdan çıkarılan tek biçimle NaT'ye düşmez.
-    Çözülemeyen satır NaT kalır ve sayılır; hiçbir tarafa (önce/sonra, eğitim/test) yazılmaz.
+    """'zaman' sütunu -> (saat dilimsiz datetime, çözülemeyen dolu satır sayısı). Karışık biçimli tarihler ("2024-03-05"
+    ile "15/09/2024") biçim biçim çözülür: her turda kalan satırların ilk dolu değerinden biçim çıkarılır (hızlı,
+    vektörel; format="mixed" satır satır dateutil'di, 200 bin satırda ~15x yavaş ve aynı sütunda gün/ay sırasını satıra
+    göre değiştiriyordu). Saat dilimli değerler UTC'ye çekilip dilim düşer (kesim tarihi dilimsiz). Çözülemeyen satır
+    NaT kalır ve sayılır; hiçbir tarafa (önce/sonra, eğitim/test) yazılmaz.
 
         z, n_bos = zaman_coz(veri.df["zaman"])"""
-    if not pd.api.types.is_datetime64_any_dtype(s):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", FutureWarning)   # karışık saat dilimi: aşağıda UTC'ye çekilir
-            try:
-                z = pd.to_datetime(s, format="mixed")
-            except (ValueError, TypeError, OverflowError):
-                z = pd.to_datetime(s, format="mixed", errors="coerce")
-            if not pd.api.types.is_datetime64_any_dtype(z):   # karışık ofsetler object döner
-                z = pd.to_datetime(s, format="mixed", errors="coerce", utc=True)
-    else:
-        z = s
-    if getattr(z.dt, "tz", None) is not None:   # kesim tarihi saat dilimsiz: UTC'ye çevir, dilimi düşür
-        z = z.dt.tz_convert("UTC").dt.tz_localize(None)
-    return z, int((z.isna() & s.notna()).sum())
+    if pd.api.types.is_datetime64_any_dtype(s):
+        z = s if getattr(s.dt, "tz", None) is None else s.dt.tz_convert("UTC").dt.tz_localize(None)
+        return z, 0
+    z = np.full(len(s), np.datetime64("NaT", "ns"))
+    kalan = s.notna().to_numpy()
+    for _ in range(6):   # biçim başına bir tur; ilerleme yoksa dur
+        if not kalan.any():
+            break
+        parca = _tarih_parca(s[kalan])
+        ok = parca.notna().to_numpy()
+        if not ok.any():
+            break
+        ix = np.flatnonzero(kalan)[ok]
+        z[ix] = parca[ok].dt.tz_localize(None).to_numpy("datetime64[ns]")
+        kalan[ix] = False
+    return pd.Series(z, index=s.index, name=s.name), int(kalan.sum())
 
 
 def zaman_cozumu(veri):
@@ -251,7 +270,10 @@ def kontaminasyon(veri, sutun_dizileri, metrik, kesim: str | None):
         return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi", ayr)
     z, _ = zaman_coz(veri.df["zaman"])
     var = z.notna().to_numpy()       # tarihi çözülemeyen satır ne öncesi ne sonrası
-    once = (z < pd.Timestamp(kesim)).to_numpy() & var
+    kt = pd.Timestamp(kesim)
+    if kt.tz is not None:            # "2025-03-01T00:00Z" gibi dilimli kesim: z ile aynı (UTC, dilimsiz) ölçek
+        kt = kt.tz_convert("UTC").tz_localize(None)
+    once = (z < kt).to_numpy() & var
     sonra = var & ~once
     if once.sum() < 30 or sonra.sum() < 30:
         return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi",

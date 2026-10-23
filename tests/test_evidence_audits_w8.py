@@ -44,15 +44,28 @@ def _arms(n=400, seed=0):
 class MemorizationFlagLlmArmTest(unittest.TestCase):
     """D13 #11e: ours was logistic + LightGBM, the LLM was only the raw= arm; the caveat stuck to ours."""
 
-    def test_raw_llm_arm_alone_does_not_caveat_ours(self):
+    def test_raw_llm_arm_alone_keeps_caveat_with_hint(self):
+        # ours="stack", raw="llm" (the documented flow) is usually built on the LLM: the conservative default keeps
+        # the caveat, and the audit row names the one-step opt-out
         r = _ev(_arms(), raw="llm", unlabeled_baselines=["base"], memorization=WARN)
+        self.assertIn(kart.EZBER_EKI, r["kanit_kart"]["rozet_gerekce"])
+        d = _den(r)["ezber uyarısı ve bizim kol (memorization warning and ours)"]
+        self.assertIn("ours_uses_llm=False", d["ayrinti"])
+        self.assertIn("ours_uses_llm=False", ev.card(r, lang="en"))
+
+    def test_raw_llm_arm_with_ours_false_drops_caveat(self):
+        r = _ev(_arms(), raw="llm", unlabeled_baselines=["base"], memorization=WARN, ours_uses_llm=False)
         self.assertIsNone(r.get("ezber_uyarisi"))
         self.assertNotIn(kart.EZBER_EKI, r["kanit_kart"]["rozet_gerekce"])
         self.assertIsNone(ev.summary(r)["badge_caveat"])
         self.assertEqual(_den(r)[EZBER]["durum"], "uyari")      # the audit itself still reports the warning
+
+    def test_pair_warning_alone_does_not_caveat_other_ours(self):
+        r = _ev(_arms(), unlabeled_baselines=["base"], compare=[("llm", "llm_blind")])
+        self.assertEqual(_den(r)[EZBER]["durum"], "uyari")
+        self.assertIsNone(r.get("ezber_uyarisi"))
         d = _den(r)["ezber uyarısı ve bizim kol (memorization warning and ours)"]
         self.assertIn("ours_uses_llm=True", d["ayrinti"])
-        self.assertIn("ours_uses_llm=True", ev.card(r, lang="en"))
 
     def test_declared_or_raw_ours_keeps_caveat(self):
         r = _ev(_arms(), raw="llm", unlabeled_baselines=["base"], memorization=WARN, ours_uses_llm=True)
@@ -99,6 +112,21 @@ class NamedBlindPairTest(unittest.TestCase):
         r = _ev(_arms(), raw="llm", unlabeled_baselines=["base"], ours_uses_llm=False)
         for lang in ("tr", "mixed", "en"):
             self.assertNotIn("no LLM arm", ev.card(r, lang=lang))
+
+    def test_ours_against_blind_llm_is_not_a_pair(self):
+        # ours (tabular) beating a blind LLM baseline is a plain comparison, not a recognition check
+        for cmp in ([("ours", "llm_blind")], [("ours", "base", "ours vs base (blind graders)")]):
+            r = _ev(_arms(), unlabeled_baselines=["base"], compare=cmp)
+            self.assertNotEqual(_den(r)[EZBER]["durum"], "uyari", cmp)
+            self.assertIsNone(r.get("ezber_uyarisi"), cmp)
+
+    def test_twin_names_and_explicit_label_are_pairs(self):
+        df = _arms().rename(columns={"pred_llm": "pred_gpt_named", "pred_llm_blind": "pred_gpt_blind"})
+        r = _ev(df, unlabeled_baselines=["base"], ours_uses_llm=False, compare=[("gpt_named", "gpt_blind")])
+        self.assertEqual(_den(r)[EZBER]["durum"], "uyari")
+        df = _arms().rename(columns={"pred_llm_blind": "pred_noctx"})
+        r = _ev(df, unlabeled_baselines=["base"], ours_uses_llm=False, compare=[("llm", "noctx", "named − blind")])
+        self.assertEqual(_den(r)[EZBER]["durum"], "uyari")
 
     def test_plain_pair_is_not_a_blind_pair(self):
         r = _ev(_arms(), unlabeled_baselines=["base"], ours_uses_llm=False, compare=[("ours", "base")])
@@ -167,6 +195,31 @@ class MixedDatesTest(unittest.TestCase):
         d = _den(_ev(df, unlabeled_baselines=["base"]))["zaman sızıntısı (eğitim testten sonra mı)"]
         self.assertEqual(d["durum"], "uyari")
         self.assertIn("2023-09-20", d["ayrinti"])
+
+
+class ZamanCozTest(unittest.TestCase):
+    """Per-format parsing: one day/month order per format, ISO never read day-first, offsets to UTC."""
+
+    def test_day_first_column_read_consistently(self):
+        from simengine.evidence.denetim import zaman_coz
+        z, n = zaman_coz(pd.Series(["2023-07-01", "03/07/2023", "15/07/2023", "01/08/2023", None]))
+        self.assertEqual(n, 0)
+        self.assertEqual([str(x.date()) for x in z[:4]], ["2023-07-01", "2023-07-03", "2023-07-15", "2023-08-01"])
+        self.assertTrue(pd.isna(z.iloc[4]))
+
+    def test_iso_not_day_first_and_offsets(self):
+        from simengine.evidence.denetim import zaman_coz
+        z, n = zaman_coz(pd.Series(["2023-07-01", "2023-07-05", "05/09/2023"]))
+        self.assertEqual(str(z.iloc[0].date()), "2023-07-01")
+        z, n = zaman_coz(pd.Series(["2024-01-01T00:00:00+03:00", "2024-01-01T00:00:00Z", "2024-01-02", "x"]))
+        self.assertEqual([str(x) for x in z[:3]], ["2023-12-31 21:00:00", "2024-01-01 00:00:00", "2024-01-02 00:00:00"])
+        self.assertEqual(n, 1)
+        z, n = zaman_coz(pd.Series(pd.to_datetime(["2024-01-01 03:00"]).tz_localize("Europe/Istanbul")))
+        self.assertEqual(str(z.iloc[0]), "2024-01-01 00:00:00")
+
+    def test_tz_aware_cutoff(self):
+        r = _ev(_mixed_dates(), unlabeled_baselines=["base"], cutoff="2024-01-01T00:00:00Z", primary="mae")
+        self.assertEqual(_den(r)[KONT]["durum"], "tamam", _den(r)[KONT]["ayrinti"])
 
 
 class ConstantBaselineTest(unittest.TestCase):
