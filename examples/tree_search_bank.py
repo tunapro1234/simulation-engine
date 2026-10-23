@@ -13,7 +13,9 @@ summary.tsv under --out; nothing is written into the repo.
 
 --synthetic (also used when no --data-root is given and $SIMENGINE_DATA has no bank-marketing file) writes a
 3,000-row table in the same layout (same columns, call order, a base rate that rises over time) to a temporary
-directory and loads it through the same task loader. It checks the wiring only; its numbers mean nothing.
+directory and loads it through the same task loader. It checks the wiring only; its numbers mean nothing. A
+synthetic run defaults to --out runs/tree_search_bank-synthetic, leaves a SYNTHETIC marker there and adds a `data`
+column to summary.tsv; real and synthetic runs refuse to share an --out (the searches resume from state in --out).
 """
 from __future__ import annotations
 
@@ -80,6 +82,20 @@ def load_data(data_root, synthetic: bool):
         return BankMarketing(split="test").load(str(write_synthetic_bank(Path(tmp)))), True
 
 
+def check_out(out: Path, synthetic: bool) -> None:
+    """Keep real and synthetic runs apart: the searches resume from the state.json files under --out (with
+    check_runner=False), so a real run started in a synthetic run's --out, or the reverse, would reuse its evals."""
+    marker = out / "SYNTHETIC"
+    used = out.is_dir() and any(out.iterdir())
+    if not synthetic and marker.exists():
+        raise SystemExit(f"{out} holds a synthetic smoke run (SYNTHETIC marker); pass a new --out")
+    if synthetic and used and not marker.exists():
+        raise SystemExit(f"{out} holds a run on real data; pass a new --out for the synthetic smoke run")
+    if synthetic:
+        out.mkdir(parents=True, exist_ok=True)
+        marker.write_text("synthetic bank-layout table: wiring check, not real numbers\n", encoding="utf-8")
+
+
 def make_runner(data):
     from sklearn.ensemble import HistGradientBoostingClassifier
     tr, te = data.train, data.test
@@ -119,7 +135,7 @@ def main():
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--budget", type=int, default=20)
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
-    ap.add_argument("--out", default="runs/tree_search_bank")
+    ap.add_argument("--out", default=None, help="default runs/tree_search_bank (-synthetic for a smoke run)")
     ap.add_argument("--synthetic", action="store_true",
                     help="offline smoke run on a synthetic table in the same layout")
     a = ap.parse_args()
@@ -127,7 +143,8 @@ def main():
     if synthetic:
         print(f"SMOKE RUN on synthetic data ({len(data.train)} train+dev / {len(data.test)} test rows): wiring check, "
               "not the docs numbers", flush=True)
-    out = Path(a.out)
+    out = Path(a.out or ("runs/tree_search_bank-synthetic" if synthetic else "runs/tree_search_bank"))
+    check_out(out, synthetic)
     runner = make_runner(data)
     sp = Space(SPACE, defaults=DEFAULTS)
     rows = []
@@ -169,6 +186,8 @@ def main():
                      "seconds": round(time.time() - t0, 1)})
         print(rows[-1], flush=True)
     df = pd.DataFrame(rows)
+    if synthetic:
+        df.insert(0, "data", "synthetic")
     out.mkdir(parents=True, exist_ok=True)
     df.to_csv(out / "summary.tsv", sep="\t", index=False, float_format="%.5f")
     print(df.groupby("method")[["winner_dev", "winner_test", "default_test", "test_diff"]].agg(["mean", "min", "max"])

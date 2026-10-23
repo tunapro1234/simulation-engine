@@ -154,7 +154,9 @@ python examples/tree_search_bank.py --synthetic --budget 4 --seeds 0 --out <scra
 ```
 
 Without a data root (or with `--synthetic`) the script writes a 3,000-row table in the bank layout to a temporary
-directory and runs the same loader and searches on it; those numbers check the wiring only.
+directory and runs the same loader and searches on it; those numbers check the wiring only. Such a run
+defaults to `--out runs/tree_search_bank-synthetic`, marks its `--out` with a `SYNTHETIC` file and a `data` column in
+`summary.tsv`, and real and synthetic runs refuse to share one `--out` (the searches resume from the state there).
 
 | search | seed 0 dev / test | seed 1 dev / test | seed 2 dev / test | test − default (mean of 3) |
 |---|---|---|---|---|
