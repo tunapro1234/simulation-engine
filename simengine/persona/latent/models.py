@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 MODELS: dict[str, dict] = {
@@ -159,6 +160,16 @@ def quant_config(precision: str, family: str = "", *, moe: bool = False):
                               bnb_4bit_use_double_quant=True)
 
 
+def _snapshot(hf_id: str, revision: str | None, cache_dir: str | None) -> str | None:
+    """Commit hash of the cached snapshot (transformers 5 no longer sets config._commit_hash)."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        p = try_to_load_from_cache(hf_id, "config.json", revision=revision, cache_dir=cache_dir)
+    except Exception:                                                # noqa: BLE001 - meta only
+        return None
+    return Path(p).parent.name if isinstance(p, str) else None
+
+
 def load(code: str, precision: str = "bf16", *, device: str = "cuda", text_only: bool = True,
          revision: str | None = None, cache_dir: str | None = None) -> Loaded:
     """Load a registry model (or any HF id) frozen in eval mode.
@@ -199,7 +210,7 @@ def load(code: str, precision: str = "bf16", *, device: str = "cuda", text_only:
     tok.padding_side = "left"
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
-    rev = getattr(model.config, "_commit_hash", None) or revision or ""
+    rev = getattr(model.config, "_commit_hash", None) or _snapshot(hf_id, revision, cache_dir) or revision or ""
     return _wrap(_freeze(model), tok, code, hf_id, rev, precision)
 
 

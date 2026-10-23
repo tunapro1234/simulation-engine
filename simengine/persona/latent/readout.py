@@ -133,7 +133,8 @@ def prefix_forward(ld, seqs: Sequence[Sequence[int]], *, layers: Sequence[int] =
             span[i, off + a:off + b] = True
     cache = DynamicCache(config=ld.model.config) if keep_cache else None
     with torch.no_grad(), capture(ld.model, list(layers), pool=pool, span=span) as st:
-        ld.model(input_ids=ids, attention_mask=mask, past_key_values=cache, use_cache=keep_cache)
+        ld.model(input_ids=ids, attention_mask=mask, past_key_values=cache, use_cache=keep_cache,
+                 logits_to_keep=1)                     # logits unused: no (B, T, vocab) tensor
     return cache, mask, dict(st)
 
 
@@ -173,7 +174,7 @@ def suffix_logits(ld, cache, mask, rows, suffix, *, inject: Injection | None = N
         else:
             raise ValueError("Injection.kind must be 'residual' or 'soft'")
     with ctx:
-        out = ld.model(input_ids=suffix, attention_mask=am, past_key_values=c, use_cache=True)
+        out = ld.model(input_ids=suffix, attention_mask=am, past_key_values=c, use_cache=True, logits_to_keep=1)
     return out.logits[:, -1].float()
 
 

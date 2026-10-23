@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -117,6 +118,27 @@ class TestRunnerSmoke(unittest.TestCase):
         meta = json.loads((Path(self.tmp.name) / "kucuk" / "talp73" / "tahmin" /
                            "prm-tiny_qwen3_5-L1_s0.meta.json").read_text())
         self.assertEqual(meta["precision"], self.k._resolve_precision("fp8|nf4"))
+
+    def test_kucuk_panel_scores_smoke_persons(self):
+        src, taban = Path(self.tmp.name) / "panel", Path(self.tmp.name) / "taban"
+        src.mkdir()
+        taban.mkdir()
+        allp = [f"u{i:03d}" for i in range(50)]
+        pd.DataFrame({"uid": allp}).to_parquet(src / "orneklem_s0.parquet")
+        pd.DataFrame({"kategori": ["A"]}).to_parquet(src / "kategoriler.parquet")
+        pd.DataFrame({"uid": allp, "kategori": "A", "p": 0.5}).to_parquet(taban / "gecmis_s0.parquet")
+        ctx = self.k.Ctx(self.k.build_parser().parse_args(["--base", self.tmp.name, "--root", str(self.root),
+                                                           "--kucuk", "8:4:4"]))
+        tdir = ctx.tdir("g1")
+        os.symlink(taban / "gecmis_s0.parquet", tdir / "gecmis_s0.parquet")   # a full-sample link is replaced
+        panel = self.k.kucuk_panel(ctx, [0], tdir, src, taban)
+        test = sorted(self.k.view1(ctx, 0).test.uid.unique())
+        self.assertEqual(len(test), 4)
+        self.assertEqual(sorted(pd.read_parquet(panel / "orneklem_s0.parquet").uid), test)
+        self.assertTrue((panel / "kategoriler.parquet").is_symlink())
+        self.assertFalse((tdir / "gecmis_s0.parquet").is_symlink())
+        self.assertEqual(sorted(pd.read_parquet(tdir / "gecmis_s0.parquet").uid), test)
+        self.assertEqual(len(pd.read_parquet(src / "orneklem_s0.parquet")), 50)   # source panel untouched
 
     def test_error_is_logged_and_run_goes_on(self):
         rc, res = self.run_kos("--model", "tiny-nosuchfamily", "--arm", "prm-L1", "enc-an")

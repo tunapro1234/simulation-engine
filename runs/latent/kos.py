@@ -45,6 +45,7 @@ BASE = Path(os.environ.get("LATENT_BASE", "/data/talp/is/latent"))
 TALP73 = Path("/srv/lighthouse/hackathon-coz/projeler/talp-simulation-hackathon-2026/uretim/talp73")
 DEGERLENDIR = TALP73 / "kod" / "degerlendir.py"
 TABAN_KAYNAK = Path("/data/talp/is/talp73/tahmin")
+PANEL = Path(os.environ.get("TALP73_PANEL", "/data/talp/is/talp73/panel"))
 TASK_DIR = {"g1": "talp73", "g2": "twin", "g3": "twin_fiyat"}
 N_TEST_G1 = 8000
 
@@ -1288,14 +1289,40 @@ def calibrate(ctx: Ctx) -> dict:
     return out
 
 
+def kucuk_panel(ctx: Ctx, seeds, tdir: Path, src_panel: Path = PANEL, src_taban: Path = TABAN_KAYNAK) -> Path:
+    """--kucuk G1 scoring: degerlendir.py accepts only its full sample (400 persons), so smoke predictions are scored
+    against a panel copy whose sample is the smoke test persons (every other file a symlink) and baselines cut to
+    those persons. Returns the panel folder (TALP73_PANEL)."""
+    dst = ctx.work / "talp73" / "panel"
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in Path(src_panel).iterdir():
+        d = dst / f.name
+        if not f.name.startswith("orneklem_s") and not d.exists():
+            os.symlink(f, d)
+    for s in seeds:
+        uids = sorted(view1(ctx, s).test.uid.unique().tolist())
+        pd.DataFrame({"uid": uids}).to_parquet(dst / f"orneklem_s{s}.parquet", index=False)
+        for b in ctx.a.taban:
+            src, d = Path(src_taban) / f"{b}_s{s}.parquet", tdir / f"{b}_s{s}.parquet"
+            if src.exists():
+                if d.is_symlink():
+                    d.unlink()
+                t = pd.read_parquet(src)
+                t[t.uid.isin(set(uids))].reset_index(drop=True).to_parquet(d, index=False)
+    return dst
+
+
 def score(ctx: Ctx, task: str, arms, seeds) -> list:
     res = []
     if task == "g1":
         tdir = ctx.tdir("g1")
-        lt.link_baselines(TABAN_KAYNAK, tdir, seeds=seeds)
+        panel = kucuk_panel(ctx, seeds, tdir) if ctx.kucuk else None
+        if not ctx.kucuk:
+            lt.link_baselines(TABAN_KAYNAK, tdir, seeds=seeds)
         preds = [tdir / f"{a.name}_s{s}.parquet" for a in arms for s in seeds
                  if (tdir / f"{a.name}_s{s}.parquet").exists()]
-        r = lt.score_g1(DEGERLENDIR, preds, bases=ctx.a.taban, sonuc_dir=ctx.tdir("g1", "sonuc"), B=ctx.a.B)
+        r = lt.score_g1(DEGERLENDIR, preds, bases=ctx.a.taban, sonuc_dir=ctx.tdir("g1", "sonuc"), B=ctx.a.B,
+                        panel_dir=panel)
         return [{"pred": str(p), **(x if isinstance(x, dict) else {})} for p, x in zip(preds, r)]
     if task == "g2":
         v = view2(ctx)

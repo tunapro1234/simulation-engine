@@ -71,5 +71,20 @@ class TestTinyModels(unittest.TestCase):
         self.assertEqual(tok.decode(tok("héllo Yes", add_special_tokens=False)["input_ids"]), "héllo Yes")
 
 
+class TestRevision(unittest.TestCase):
+    def test_snapshot_hash_from_cache(self):
+        import tempfile
+        from pathlib import Path
+        from simengine.persona.latent import models
+        with tempfile.TemporaryDirectory() as d:
+            rep = Path(d) / "models--org--m"
+            (rep / "snapshots" / "abc123").mkdir(parents=True)
+            (rep / "snapshots" / "abc123" / "config.json").write_text("{}")
+            (rep / "refs").mkdir()
+            (rep / "refs" / "main").write_text("abc123")
+            self.assertEqual(models._snapshot("org/m", None, d), "abc123")
+            self.assertIsNone(models._snapshot("org/other", None, d))
+
+
 if __name__ == "__main__":
     unittest.main()

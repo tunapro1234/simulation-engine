@@ -44,6 +44,21 @@ class TestCachedReadout(unittest.TestCase):
         p, _ = yes_prob(ld, PRE, SUF, cells=cells)
         np.testing.assert_allclose(p, full[cells[:, 0], cells[:, 1]], atol=1e-6)
 
+    def test_lm_head_sees_last_position_only(self):
+        from simengine.persona.latent import yes_prob
+        for fam in ("qwen3_5", "gemma4"):
+            with self.subTest(fam):
+                ld = tiny(fam)
+                lens = []
+                h = ld.model.get_output_embeddings().register_forward_hook(
+                    lambda m, i, o: lens.append(i[0].shape[-2]))
+                try:
+                    yes_prob(ld, PRE, SUF, batch_size=2)
+                finally:
+                    h.remove()
+                self.assertTrue(lens)
+                self.assertEqual(set(lens), {1})        # no (batch, seq, vocab) logits for the prefix or suffix
+
     def test_select_cache_leaves_source_intact(self):
         import torch
         from simengine.persona.latent import readout
