@@ -9,6 +9,10 @@
     ev.evaluate_distribution_persons(people, ["age"], items, arms)          # person-cluster distribution bootstrap
     ev.ab_pairs_frame(pairs, ["p_llm"], group="test_id")                    # A/B pair table -> evaluate(task="ab")
     ev.ab_memorization(llm, pairs, named_context, neutral_context)          # A/B memorization probe -> memorization=
+    ev.split_summary(reports, pairs=[("t1", "o1")])                         # spread over repeated splits -> card/limits
+    ev.counts_frame(people, {"m": "p_vec"}, by=["area"], probs=True, classes=cls)   # per-person -> cell counts (WMAPE)
+    ev.long_frame(sealed_wide, truth_wide, "id", scale="sd_train", train=train)     # wide multi-target -> long (zMAE)
+    ev.segment_bias(frame, "region", ["ours", "base"])                      # n-weighted segment error + paired CI
 
 Report schema: docs/modules/evidence.md (keys keep the original Turkish names; `summary(report)` gives an
 English flat view). Internals are verbatim ports; the English API lives in `api.py`.
@@ -22,6 +26,7 @@ from .api import (MULTIPLIER_MAX_ROWS, audit_prompts, chain_paths, correlation_a
                   shuffle_control, split_audit, summary, to_internal, tvd, verify, verify_chain, wasserstein_ordinal,
                   worth_humans, worth_theory_curve)
 from .ab import ab_memorization, ab_memorization_items, ab_pairs_frame
+from .frames import SplitSummary, counts_frame, long_frame, segment_bias, split_summary
 from .extras import (coefficient_recovery, completion_from_frame, completion_row, published_findings,
                      section_html, section_markdown, stylized_facts_score, variance_ratio)
 from .persons import DIST_METRICS, evaluate_distribution_persons
@@ -41,5 +46,6 @@ __all__ = [
     "coefficient_recovery", "section_markdown", "section_html",
     "why_match", "why_summary", "tfidf_encoder", "TfidfEncoder", "evaluate_distribution_persons", "DIST_METRICS",
     "ab_pairs_frame", "ab_memorization_items", "ab_memorization",
+    "split_summary", "SplitSummary", "counts_frame", "long_frame", "segment_bias",
     "TASK_TO_INTERNAL", "TASK_TO_ENGLISH", "METRIC_TO_INTERNAL", "METRIC_TO_ENGLISH", "BADGE_TO_ENGLISH", "VERSION", "MULTIPLIER_MAX_ROWS",
 ]
