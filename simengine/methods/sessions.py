@@ -18,6 +18,10 @@ numeric one pass numbers in the column's unit, or set ``time_unit="ms"`` (or "s"
                                                                              "item": ["item0", "item1"]},
                                                          kind_col="event", kinds=("view", "addtocart", "transaction")))
     p = rescale_to_rates(p_dev, dev["segment"], train.groupby("segment")["y"].mean())   # label-free
+    # dev["split"] = "test" (train: "train"), read by evaluate; evaluate wants `truth`: y_col="truth" or rename y
+    lab = cutoff_windows(ev, cuts, "21D", label={"buy": "transaction", "cart": "addtocart"}, ...)  # 2 labels
+    test = cutoff_windows(sessionize(pd.concat([log, test_prefix_events]), ...), [test_start], "21D", label=None, ...)
+    test = prefix_features(test, item_col="item")            # window popularity of the prefix items, hour, weekday
 
 Trap (D13 #8): 21-day windows every 7 days overlap, so the same session lands in training rows and in an
 early-stopping ``eval_set`` cut from the same windows. ``eval_gap=`` returns a (train, eval) pair whose time ranges
@@ -113,13 +117,25 @@ def sessionize(events: pd.DataFrame, user_col: str, time_col: str, gap: Any = "3
 
 
 # ----------------------------------------------------------------------------- cutoff windows
+def _label_values(lab, rest: pd.DataFrame, sids: np.ndarray, kind_col: str | None):
+    """One label column for ``sids``: a kind (1 if the rest has one) or a callable on each session's rest."""
+    if isinstance(lab, str):
+        hit = rest.loc[rest[kind_col] == lab, "session_id"].unique()
+        return np.isin(sids, hit).astype(np.int64)
+    got = {s: lab(g) for s, g in rest.groupby("session_id", sort=False)}
+    empty = lab(rest.iloc[0:0]) if len(got) < len(sids) else None
+    return [got.get(s, empty) for s in sids]
+
+
 def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
-                   label: str | Callable[[pd.DataFrame], Any], select: str = "first_session_after",
+                   label: str | Callable[[pd.DataFrame], Any] | Mapping[str, Any] | None,
+                   select: str = "first_session_after",
                    prefix_len: int = 2, prefix_kinds: Sequence | None = None, max_end_offset: Any = None,
                    eval_gap: Any = None, truncate: bool = True,
                    features: Callable[[pd.DataFrame, pd.DataFrame, Any], pd.DataFrame] | None = None,
                    user_col: str = "user", time_col: str = "time", kind_col: str | None = None,
-                   item_col: str | None = None, time_unit: str | None = None):
+                   item_col: str | None = None, time_unit: str | None = None, y_col: str = "y",
+                   split_col: str | None = "split"):
     """Rows that mimic a test period, one per (cutoff, unit), from sessionized ``events`` (``sessionize`` first).
 
     For each cutoff T the window is [T, T + horizon). ``select="first_session_after"``: each user's first session
@@ -132,14 +148,22 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
 
     Columns: cutoff, ``user_col``, session_id, session_start, ``<time_col>k`` / ``<kind_col>k`` / ``<item_col>k``
     for prefix event k, prefix_span (last - first prefix time, seconds), prefix_items (distinct items), n_rest
-    (events after the prefix), label_end (last event time seen) and y. ``label`` is a kind ("transaction": y = 1 if
-    the rest of the session has one) or a callable on the rest (events with seq >= prefix_len, possibly empty).
+    (events after the prefix), label_end (last event time seen) and the label ``y_col`` (default "y"). ``label`` is
+    a kind ("transaction": y = 1 if the rest of the session has one) or a callable on the rest (events with
+    seq >= prefix_len, possibly empty). ``evaluate`` reads the outcome from a column named ``truth``: pass
+    ``y_col="truth"`` (or rename y -> truth) before scoring, else the card has no truth (D13-W8 #1).
+    ``label={"buy": "transaction", "cart": "addtocart"}``: one label column per entry (a kind or a callable) in one
+    pass (``y_col`` unused). ``label=None``: unlabeled feature rows, e.g. test prefixes whose future is not in the
+    log (no label column, no censoring warning): add the prefix events to the log, sessionize, then
+    ``cutoff_windows(ev, [test_start], horizon, label=None, ...)``.
     ``features(history, rows, T)`` adds columns; ``history`` holds only events with time < T.
 
     ``eval_gap`` (a duration, "0D" = adjacent): returns ``(train, eval)``. eval = rows of the latest cutoff Te;
     train = rows of cutoffs with T + horizon + eval_gap <= Te, so no training row sees an event at or after Te
     (overlapping windows otherwise put the same sessions in an early-stopping eval set, D13 #8).
-    ``train.attrs["dropped_cutoffs"]`` lists the cutoffs left out.
+    ``train.attrs["dropped_cutoffs"]`` lists the cutoffs left out. Both frames carry ``split_col`` ("split":
+    "train" / "test"; None leaves it out): ``evaluate`` reads a ``split`` column as the train / test split, and
+    "test" is one of its test names ("eval" is not: those rows would count as training).
     """
     miss = {"session_id", "session_start", "seq"} - set(events.columns)
     if miss:
@@ -149,7 +173,22 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
         raise ValueError(f"select={select!r}: one of {SELECT}")
     if prefix_len < 1:
         raise ValueError("prefix_len must be >= 1")
-    if kind_col is None and (isinstance(label, str) or prefix_kinds is not None):
+    if label is None:
+        labels: dict = {}
+    elif isinstance(label, Mapping):
+        if y_col != "y":
+            raise ValueError("y_col= names a single label; a dict label names its own columns")
+        if not label:
+            raise ValueError("label={}: give at least one {column: kind or callable}, or label=None")
+        labels = dict(label)
+    else:
+        labels = {y_col: label}
+    for name, lab in labels.items():
+        if not isinstance(name, str):
+            raise TypeError(f"label column name {name!r}: a string")
+        if not (isinstance(lab, str) or callable(lab)):
+            raise TypeError(f"label {name!r}: a kind (str) or a callable on the rest of the session, got {lab!r}")
+    if kind_col is None and (any(isinstance(v, str) for v in labels.values()) or prefix_kinds is not None):
         raise ValueError("a kind label or prefix_kinds needs kind_col=")
     times = events[time_col]
     h = _dur(horizon, times, time_unit, "horizon")
@@ -170,12 +209,12 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
     # a window running past the log's last event censors its labels (late sessions lose their rest, y biased low)
     tmax = times.max()
     late = [T for T in cuts if T + h - tmax > h / 10]
-    if late:
+    if late and labels:                                    # unlabeled rows (label=None) need no future
         warnings.warn(f"cutoff_windows: {len(late)} window(s) end more than a tenth of the horizon after the last "
                       f"event ({tmax}), e.g. cutoff {late[0]}: their labels are censored; use earlier cutoffs",
                       stacklevel=2)
 
-    heads =events.loc[events["seq"] == 0, ["session_id", user_col, "session_start"]]
+    heads = events.loc[events["seq"] == 0, ["session_id", user_col, "session_start"]]
     heads = heads.sort_values(["session_start", "session_id"], kind="mergesort")
     L = prefix_len
     frames = []
@@ -209,15 +248,11 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
             rows["prefix_items"] = pre.groupby("session_id")[item_col].nunique().reindex(sids).to_numpy()
         rows["n_rest"] = rest.groupby("session_id").size().reindex(sids, fill_value=0).to_numpy()
         rows["label_end"] = sub.groupby("session_id")[time_col].max().reindex(sids).to_numpy()
-        if isinstance(label, str):
-            hit = rest.loc[rest[kind_col] == label, "session_id"].unique()
-            rows["y"] = np.isin(sids, hit).astype(np.int64)
-        else:
-            got = {s: label(g) for s, g in rest.groupby("session_id", sort=False)}
-            empty = None
-            if len(got) < len(sids):
-                empty = label(rest.iloc[0:0])
-            rows["y"] = [got.get(s, empty) for s in sids]
+        clash = [n for n in labels if n in rows.columns]
+        if clash:
+            raise ValueError(f"label column(s) {clash} would overwrite a cutoff_windows column; rename them")
+        for name, lab in labels.items():
+            rows[name] = _label_values(lab, rest, sids, kind_col)
         if features is not None:
             hist = events[events[time_col] < T]
             assert not len(hist) or hist[time_col].max() < T, "history reaches the cutoff"
@@ -235,8 +270,53 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
     ev = out[out["cutoff"] == te].reset_index(drop=True)
     assert not set(train["session_id"]) & set(ev["session_id"]), "a session is in train and eval"
     assert not len(train) or train["label_end"].max() < te, "a training row sees the eval window"
+    if split_col is not None:
+        if split_col in out.columns:
+            raise ValueError(f"split_col={split_col!r} is already a column; pass another name or None")
+        train[split_col], ev[split_col] = "train", "test"
     train.attrs["dropped_cutoffs"] = [c for c in all_cuts if c not in set(cuts)]
     return train, ev
+
+
+# ----------------------------------------------------------------------------- prefix features
+def prefix_features(rows: pd.DataFrame, *, item_col: str | None = None, time_col: str = "time",
+                    cutoff_col: str = "cutoff", time_unit: str | None = None) -> pd.DataFrame:
+    """Prefix-only features for ``cutoff_windows`` rows (D13 team columns pen_pop, saat, haftagun, ayni, pen_gun).
+
+    Returns a copy of ``rows`` with ``prefix_pop_<item_col>k`` (occurrences of the item over every prefix position
+    of the same cutoff's rows / their number, so it can pass 1; label-free and built from the prefixes alone, so a
+    test set's own prefixes give the same column), ``prefix_same_item`` (all prefix items equal), ``prefix_hour`` (hour of the
+    first prefix event, fractional), ``prefix_weekday`` (0 = Monday) and ``prefix_days_after_cutoff``. A numeric
+    time column needs ``time_unit=`` and is read as epoch time (UTC). Popularity is within each ``cutoff_col``
+    value: score train and test rows built from the same kind of selection, or the shares differ by construction.
+
+        rows = prefix_features(cutoff_windows(ev, cuts, "21D", label="transaction", item_col="item", ...),
+                               item_col="item")
+    """
+    L = 0
+    while f"{time_col}{L}" in rows.columns:
+        L += 1
+    if not L:
+        raise KeyError(f"prefix_features: no {time_col}0 column; pass cutoff_windows rows (and its time_col=)")
+    _check_cols(rows, [cutoff_col] + ([f"{item_col}{k}" for k in range(L)] if item_col is not None else []),
+                "prefix_features")
+    t0, cut = rows[f"{time_col}0"], rows[cutoff_col]
+    if not _is_dt(t0):
+        if time_unit is None:
+            raise ValueError("prefix_features: numeric time column; set time_unit= ('ms', 's') for hour / weekday")
+        t0, cut = pd.to_datetime(t0, unit=time_unit), pd.to_datetime(cut, unit=time_unit)
+    out = rows.copy()
+    if item_col is not None:
+        cols = [f"{item_col}{k}" for k in range(L)]
+        long = pd.DataFrame({"c": np.tile(cut.to_numpy(), L), "i": rows[cols].to_numpy().T.ravel()})
+        share = long.groupby(["c", "i"], sort=False).size().div(cut.value_counts(), level="c")
+        for col in cols:
+            out[f"prefix_pop_{col}"] = share.reindex(pd.MultiIndex.from_arrays([cut, rows[col]])).to_numpy()
+        out["prefix_same_item"] = rows[cols].nunique(axis=1).eq(1).astype(np.int64).to_numpy()
+    out["prefix_hour"] = (t0.dt.hour + t0.dt.minute / 60 + t0.dt.second / 3600).to_numpy()
+    out["prefix_weekday"] = t0.dt.weekday.astype(np.int64).to_numpy()
+    out["prefix_days_after_cutoff"] = ((t0 - cut) / pd.Timedelta("1D")).to_numpy()
+    return out
 
 
 # ----------------------------------------------------------------------------- history features
@@ -450,4 +530,5 @@ def rescale_to_rates(p, segment=None, target=None, *, method: str = "scale", def
     return pd.Series(a, index=p.index, name=p.name) if isinstance(p, pd.Series) else a
 
 
-__all__ = ["sessionize", "cutoff_windows", "history_features", "rescale_to_rates", "DEFAULT_ORDER"]
+__all__ = ["sessionize", "cutoff_windows", "prefix_features", "history_features", "rescale_to_rates",
+           "DEFAULT_ORDER"]
