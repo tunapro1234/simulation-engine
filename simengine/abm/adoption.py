@@ -36,6 +36,14 @@ cutoff.
 
 Leakage: a fit only sees `history` (all series, t <= cutoff). m is never fixed; it comes from the prior.
 
+Options (defaults leave the output unchanged):
+
+    AdoptionABC(scale=2.0)                    # y per 100 people up to 200: the bank's m <= 1 means 2 x 100
+    AdoptionABCAnalogy(scale={s: c / 100 for s, c in prior["ceiling"].items()})   # LLM ceiling (abm.ceiling)
+    AdoptionABCAnalogy(group_col="kind")      # analogy donors only from the target's own kind
+    sc = abm.scenario(model, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor = best forecast + ABM delta
+    sc.attrs["origin_fit_error"]              # the ABM baseline's miss at the last observed year (data units)
+
 Measured (makro/abm/m1/NOTLAR.md and makro/RAPOR.md M1): OWID internet TEST, 7 seeds, MAE pp:
 AdoptionABCAnalogy 8.48 +/- 0.16, BassABCAnalogy 9.73 +/- 0.12 (paired diff -1.25 +/- 0.21 per seed;
 seed-averaged series bootstrap -1.32, 95% CI [-1.83, -0.82]), linear trend 10.72, Gompertz 11.61, Bass NLS 14.86, naive 18.39. US household technologies (dev): AdoptionABC
@@ -81,6 +89,36 @@ def _past_window(series, cutoff, threshold, last_rel):
     return IneligibleSeries(series, cutoff, threshold,
                             f"series {series!r} at cutoff {cutoff}: needs the curve {last_rel:g} years after its "
                             f"{100 * threshold:g}% crossing, the bank covers {R_MAX:g}; cannot align")
+
+
+def _check_scale(scale):
+    """None, a positive number, or {series: positive number}."""
+    if scale is None:
+        return None
+    if isinstance(scale, dict):
+        out = {k: float(v) for k, v in scale.items()}
+        if not all(np.isfinite(v) and v > 0 for v in out.values()):
+            raise ValueError("scale values must be positive numbers (data units per percent point / 1)")
+        return out
+    scale = float(scale)
+    if not (np.isfinite(scale) and scale > 0):
+        raise ValueError(f"scale must be a positive number (2.0 = series up to 200), got {scale!r}")
+    return scale
+
+
+def _anchor_at(anchor, ts) -> np.ndarray:
+    """Anchor forecast values at times ts (NaN where missing). Frame with t and y_pred (or y), dict or Series."""
+    if isinstance(anchor, pd.DataFrame):
+        col = "y_pred" if "y_pred" in anchor.columns else "y"
+        if "t" not in anchor.columns or col not in anchor.columns:
+            raise ValueError("anchor frame needs columns t and y_pred (or y)")
+        anchor = anchor.groupby("t")[col].mean()
+    elif isinstance(anchor, dict):
+        anchor = pd.Series(anchor, dtype=float)
+    elif not isinstance(anchor, pd.Series):
+        raise TypeError("anchor: a frame with t, y_pred; a {t: value} dict; or a Series indexed by t")
+    a = pd.Series(anchor.to_numpy(float), index=np.asarray(anchor.index, float))
+    return a.reindex(np.asarray(ts, float)).to_numpy(float)
 
 
 def _norm(df: pd.DataFrame) -> pd.DataFrame:
@@ -246,7 +284,7 @@ class AdoptionABC:
     simulator = "abm"
 
     def __init__(self, n_sim=2000, n_agents=2000, accept=0.01, recent_weight=1.0, seed=0, cache_dir=None,
-                 threshold=0.01):
+                 threshold=0.01, scale=None):
         if not 0 < threshold < 1:
             raise ValueError(f"threshold is a fraction of the population (0.01 = 1%), got {threshold!r}")
         if threshold > 0.05:                              # 0.1 here is 10%, not 0.1% (adoption_t0 takes percent)
@@ -254,7 +292,24 @@ class AdoptionABC:
                           f"for 0.1% pass 0.001", stacklevel=2)
         self.n_sim, self.n_agents, self.accept, self.recent_weight = n_sim, n_agents, accept, recent_weight
         self.seed, self.cache_dir, self.threshold = seed, cache_dir, threshold
+        self.scale = _check_scale(scale)
         self._last = None
+
+    def _scale_of(self, series) -> float:
+        """Data units per internal percent point for `series` (1.0 = the bank's 0-100 scale)."""
+        if self.scale is None:
+            return 1.0
+        if isinstance(self.scale, dict):
+            return float(self.scale.get(series, 1.0))
+        return self.scale
+
+    def _scaled(self, history):
+        """history with y divided by each series' scale (unchanged object when there is no scale)."""
+        history = _norm(history)
+        if self.scale is None or self.scale == 1.0:
+            return history
+        f = history["series"].map(self._scale_of).astype(float)
+        return history.assign(y=history["y"] / f)
 
     @property
     def level(self) -> float:
@@ -269,7 +324,7 @@ class AdoptionABC:
         """True if fit will not raise IneligibleSeries: the series reached the alignment level by the cutoff, and the
         cutoff is within the bank window (R_MAX years after that crossing). predict also raises past the window."""
         try:
-            self._target(history, series, cutoff)
+            self._target(self._scaled(history), series, cutoff)
         except IneligibleSeries:
             return False
         return True
@@ -289,11 +344,13 @@ class AdoptionABC:
         w = np.asarray(w, float)
         self._last = dict(series=series, cutoff=cutoff, t0=t0, b=np.asarray(b_idx), delta=np.asarray(d_val),
                           w=w / w.sum(), rel=rel, y=y, theta=B["theta"][b_idx], seed=self.seed)
+        if self.scale is not None:
+            self._last["scale"] = self._scale_of(series)          # rel / y stay in internal units
         return self._last
 
     def fit(self, history, series, cutoff):
         B = self.bank()
-        _, t0, rel, y, deltas = self._target(history, series, cutoff)
+        _, t0, rel, y, deltas = self._target(self._scaled(history), series, cutoff)
         D = abc_distance(B["C"], rel, y, deltas, _recent_weights(rel, self.recent_weight))
         k = min(max(int(self.accept * D.size), 20), D.size - 1)
         flat = np.argpartition(D.ravel(), k)[:k]
@@ -310,14 +367,24 @@ class AdoptionABC:
         idx = _grid_idx(target_rel[None, :] + model["delta"][:, None])          # (K, H)
         V = B["C"][model["b"][:, None], idx]
         q = _wquantile(V, model["w"], [0.1, 0.5, 0.9])
+        sc = model.get("scale", 1.0)
+        if sc != 1.0:
+            q = q * sc
         return pd.DataFrame(dict(series=model["series"], cutoff=model["cutoff"], horizon=h,
                                  t=model["cutoff"] + h, y_pred=q[1], lo80=q[0], hi80=q[2]))
 
     # -- counterfactual: re-simulate accepted thetas with an intervention (common random numbers)
-    def scenario(self, model=None, intervention=None, n_draws=200):
+    def scenario(self, model=None, intervention=None, n_draws=200, *, delta=False, anchor=None):
         """intervention: {"imitation": 1.2} (q x1.2), {"market": 1.1} (m x1.1, capped at 1), {"innovation": 1.5}
         (p x1.5), or set {"threshold"|"expand"|"global"|"het": value}. Returns scenario, t, y_pred, lo80, hi80
-        for the baseline and the intervention. Model-implied, not a measured causal effect."""
+        for the baseline and the intervention. Model-implied, not a measured causal effect.
+
+        The ABM's own level can sit far from the data (G10: its baseline missed the origin year), so read the
+        intervention as a change. delta=True adds delta, delta_lo80, delta_hi80: the paired (same draw, same random
+        numbers) intervention - baseline difference, median and 10%/90% quantiles; 0 on the baseline rows.
+        anchor = your best forecast (a frame with t and y_pred or y, a {t: value} dict or a Series indexed by t)
+        implies delta and adds y_anchor = anchor + delta (NaN where the anchor has no t). Either way
+        frame.attrs["origin_fit_error"] = baseline median - observed y at the last observed year (data units)."""
         m = model or self._last
         if m is None:
             raise ValueError("call fit first")
@@ -342,7 +409,8 @@ class AdoptionABC:
         _, y2, _ = engine.adoption_sim(th2, SIM_T, n_agents=self.n_agents, seed=99, raw=True)
         z0 = np.r_[0.0, z]
         ts = np.arange(m["t0"] - 3, m["cutoff"] + 11)
-        rows = []
+        sc = m.get("scale", 1.0)
+        rows, draws = [], []
         for label, Y in (("baseline", y1), (str(intervention), y2)):
             vals = []
             for i in range(k):
@@ -351,9 +419,27 @@ class AdoptionABC:
                 tau1 = z0[kk] if yb[kk] >= self.level else z0[-1]
                 st = tau1 + (ts - m["t0"]) + m["delta"][sel[i]]
                 vals.append(np.interp(st, z0, np.r_[0.0, Y[i]], left=0.0))
-            q = np.quantile(np.array(vals), [0.1, 0.5, 0.9], axis=0)
+            vals = np.array(vals)
+            if sc != 1.0:
+                vals = vals * sc
+            draws.append(vals)
+            q = np.quantile(vals, [0.1, 0.5, 0.9], axis=0)
             rows.append(pd.DataFrame(dict(scenario=label, t=ts, y_pred=q[1], lo80=q[0], hi80=q[2])))
-        return pd.concat(rows, ignore_index=True)
+        if not delta and anchor is None:
+            return pd.concat(rows, ignore_index=True)
+        d = np.quantile(draws[1] - draws[0], [0.1, 0.5, 0.9], axis=0)
+        zero = np.zeros(len(ts))
+        for r, (lo, mid, hi) in zip(rows, ((zero, zero, zero), (d[0], d[1], d[2]))):
+            r["delta"], r["delta_lo80"], r["delta_hi80"] = mid, lo, hi
+        if anchor is not None:
+            a = _anchor_at(anchor, ts)
+            for r in rows:
+                r["y_anchor"] = a + r["delta"].to_numpy()
+        out = pd.concat(rows, ignore_index=True)
+        last = int(np.argmax(m["rel"]))
+        out.attrs["origin_fit_error"] = float(np.interp(m["t0"] + m["rel"][last], ts, rows[0]["y_pred"])
+                                              - m["y"][last] * sc)
+        return out
 
     def personas(self, model=None):
         """Innovator / early imitator / late imitator / non-adopter shares 10 years after the cutoff (weighted mean
@@ -398,10 +484,20 @@ class AdoptionABCAnalogy(AdoptionABC):
     across unrelated technologies it hurts (US households dev 10.07 vs plain ABC 8.54)."""
     name = "abm_abc_analogy"
 
-    def __init__(self, min_points=6, analogy_accept=0.01, **kw):
+    def __init__(self, min_points=6, analogy_accept=0.01, group_col=None, **kw):
         super().__init__(**kw)
-        self.min_points, self.analogy_accept = min_points, analogy_accept
+        self.min_points, self.analogy_accept, self.group_col = min_points, analogy_accept, group_col
         self._priors: dict = {}
+
+    def _donors(self, history, series, per):
+        """The other series' prior vectors; with group_col only those of the target's own group (one kind)."""
+        if self.group_col is None:
+            return [v for s2, v in per.items() if s2 != series]
+        if self.group_col not in history.columns:
+            raise ValueError(f"group_col={self.group_col!r} is not a column of history")
+        grp = history.groupby("series")[self.group_col].first()
+        g = grp.get(series)
+        return [v for s2, v in per.items() if s2 != series and pd.notna(g) and grp.get(s2) == g]
 
     def _build_prior(self, history, cutoff):
         B = self.bank()
@@ -434,9 +530,9 @@ class AdoptionABCAnalogy(AdoptionABC):
 
     def fit(self, history, series, cutoff):
         B = self.bank()
-        history, t0, rel, y, deltas = self._target(history, series, cutoff)
+        history, t0, rel, y, deltas = self._target(self._scaled(history), series, cutoff)
         per = self._build_prior(history, cutoff)
-        others = [v for s2, v in per.items() if s2 != series]
+        others = self._donors(history, series, per)
         D = abc_distance(B["C"], rel, y, deltas, _recent_weights(rel, self.recent_weight))
         prior = np.ones(len(B["theta"]), np.float32) if len(others) < 3 else np.sum(others, axis=0)
         cand = np.flatnonzero(prior > 0)

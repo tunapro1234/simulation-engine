@@ -6,6 +6,7 @@ This module holds the agent-based models and the baselines they have to beat:
 |---|---|---|
 | `AdoptionABC`, `AdoptionABCAnalogy` | adoption-curve ABM on a small-world network, calibrated with rejection ABC, plus an optional analogy prior from other series | measured; best method on OWID internet |
 | `BassABC`, `BassABCAnalogy` | the same ABC with a closed-form Bass simulator (structure control) | measured |
+| `llm_ceiling_prior`, `ceiling_upper` | LLM saturation-level prior per series (blind / named / perturbed prompts) with placebo controls and a recognition check | infrastructure; FakeLLM tests only |
 | `CurveBaseline`, `BassAnalogy`, `naive`, `linear_trend`, `damped_trend`, `logistic`, `gompertz`, `bass`, `curves.constant_growth` | adoption-curve baselines | measured (constant growth: rehearsal only) |
 | `OpinionPanel`, `opinion_baselines`, `BoundedConfidenceABM` | opinion drift between two survey waves: persistence, mean shift and transition baselines vs a Deffuant-Weisbuch ABM | measured; the ABM loses |
 | `ElasticityShrinkage`, `shuffle_elasticities`, `elicit_elasticities`, `PreEventMean` | price-elasticity prior (category, LLM or mix), ridge-shrunk toward the event's own history; LLM-swap placebo | measured; the gain comes from shrinkage |
@@ -30,6 +31,7 @@ spatial models (the last six rows) were written for this port from the cited pap
 - **[RECETE]** = `uretim/makro/RECETE.md`
 - **[prova D7 NOTLAR]** = `uretim/prova/d7/NOTLAR.md` (rehearsal D7, fixed-origin adoption forecast; added with the calendar-origin backtest)
 - **[prova D7 SONUC]** = `uretim/prova/d7/SONUC-MAIN.md` (the same rehearsal scored on the held-out 1998-2002 truth) and its sealed test card `uretim/prova/d7/teslim/simengine-test-kart.md`
+- **[G10 rehearsal]** = recipe rehearsal G10 (country x technology adoption, fixed calendar origins 2010 and 2015; ladder scoring log), added with the ceiling prior
 - **[yayilim24 SONUC]** = `uretim/makro/abm/yayilim24/SONUC.md` (pre-registration `makro/onkayit/yayilim-24s.md`, commit 06224f7; run 21-22 Oct, added by the integrator after this module was written)
 
 Every number in the ported sections comes from those files; this port did not re-measure them. The numbers in
@@ -130,7 +132,8 @@ later than year 28 and stores each curve on a 0.25-year grid aligned at its 1% c
   linear 2.20) **[M1 NOTLAR]**. The gain is at long horizons (h=10: 13.65 vs linear 20.28).
 - **Mixed technologies.** On US household technologies (19 dev series) plain ABC gets 8.54 +/- 0.07 vs linear
   8.70, which is not significant. The analogy prior **hurts** there (10.07), because unrelated technologies share
-  no curve shape **[M1 NOTLAR]**. Use the analogy only for series of one kind, such as countries x one technology.
+  no curve shape **[M1 NOTLAR]**. Use the analogy only for series of one kind, such as countries x one technology,
+  or pass `group_col=` so a mixed panel takes donors of the target's kind only (not measured).
 - **Bands.** Plain ABC bands are too narrow (80% coverage 0.54 internet, 0.64 US). The analogy variant is
   calibrated (0.77-0.80) **[M1 NOTLAR]**.
 - **Cost.** A cold bank takes 53-85 s at default size on a loaded 4-core server; warm fits take seconds
@@ -164,6 +167,57 @@ say so next to the numbers, or use "nan" with a fallback to keep every series.
 `adoption.fit_many(method, history, cutoff, on_ineligible="skip")` does the same for one cutoff ("skip" or
 "raise") and returns `models`, `ineligible`, `n_ineligible`. `fit_many`, `IneligibleSeries` and
 `FitMany` live in `simengine.abm.adoption` (not re-exported from `simengine.abm` yet).
+
+## Adoption: LLM ceiling prior, scale, donor groups, scenario anchor
+
+*(this port; the API below is tested with FakeLLM and synthetic series only, no real-model measurement)*
+
+```python
+prior = abm.llm_ceiling_prior(llm, hist, groups="kind", perturb=0.15, parallel=8, seed=0)  # hist: t <= origin
+prior[["ceiling", "ceiling_blind", "ceiling_perturbed", "ceiling_shuffled", "ceiling_group_median"]]
+print(prior.attrs["leak_check"]["message"])
+upper = abm.ceiling_upper(prior)                    # {series: ceiling}, floored at the observed max
+abm.AdoptionABCAnalogy(scale={s: c / 100 for s, c in upper.items()}, group_col="kind")
+DirectForecaster("hgb", horizons=4, target="logit", upper=upper)   # per-series ceilings
+sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor = best + ABM delta
+```
+
+- **`llm_ceiling_prior(llm, series_hist, *, blind=True, named=True, perturb=0.15, groups=None, parallel=8,
+  seed=0)`.** One JSON answer per series and prompt, in parallel (`parallel_map`, `jsonx.complete_json`). The
+  blind prompt shows only the history (years relative to the last one, values, unit); the named prompt adds the
+  series name; the perturbed prompt multiplies the history by u ~ U(1 - p, 1 + p) and divides the answer back.
+  `ceiling` is the named answer (blind when `named=False`). Unparseable answers are NaN and counted in
+  `leak_check["n_failed"]`.
+- **Placebo controls, no extra calls.** `ceiling_shuffled` permutes the named ceilings within `groups` (no series
+  keeps its own), `ceiling_group_median` gives every series its group's median. Run the downstream method with all
+  three; a gain that survives the shuffle is not series knowledge (the elasticity prior's gain was matched by its
+  LLM-swap placebo, see below).
+- **Leak check** (`attrs["leak_check"]`): the named - blind gap (median relative), the Spearman of perturbed vs
+  blind and the scale elasticity (slope of log(raw perturbed / blind) on log u: 1 = the answer follows the numbers,
+  0 = it ignores them). Elasticity under 0.5 or Spearman under 0.8 (>= 5 series) sets `recognition=True` and the
+  message says the blind prompt looks like recognition. With `future=` (post-origin truth, dev only) it adds the
+  Spearman of each ceiling's headroom with the observed post-origin change, and says so when the named one is
+  more than 0.2 above the blind one. Thresholds are this port's choice, not calibrated on a real model.
+- **Upper.** `ceiling_upper(prior)` returns {series: value}: NaN falls back to the group median, then the observed
+  maximum, and every value is at least the observed maximum. Pass the dict to `DirectForecaster(upper=)` (dict or
+  panel column, see methods.md); `CurveBaseline(upper=)` takes one float, so loop per series there.
+- **`scale=`** on every ABC method (a number or {series: number}): y is divided by it inside the fit and
+  predictions, bands and scenarios are multiplied back, so series above 100 (subscriptions per 100 people) need
+  no manual divide or clip. The bank's m <= 1 becomes a ceiling of 100 x scale, and `threshold` aligns at
+  `threshold` x 100 x scale data units. Without it the ABM's forecast cannot pass 100 (test: series saturating at
+  150-190). `scale=None` / `1.0` gives the old output byte for byte.
+- **`group_col=`** on `AdoptionABCAnalogy` / `BassABCAnalogy`: analogy donors only from series with the target's
+  value in that column (one kind), fewer than 3 donors falls back to the flat prior as before. This is the fix for
+  the mixed-technologies failure above; `BassAnalogy` (curves) does not take it yet.
+- **`scenario(..., delta=False, anchor=None)`.** `delta=True` adds the paired intervention - baseline difference
+  (`delta`, `delta_lo80`, `delta_hi80`; 0 on baseline rows). `anchor=` (a frame with t and y_pred, a {t: value}
+  dict or a Series) implies it and adds `y_anchor = anchor + delta`, so the intervention is read as a change on
+  your best forecast, not on the ABM's own level. `attrs["origin_fit_error"]` is the baseline's miss at the last
+  observed year; report it next to any scenario.
+- **The M1 result did not reproduce at a calendar origin.** M1 measured ABM - Bass control = -1.25 MAE at relative
+  cutoffs (t0 + k). In rehearsal G10 at fixed calendar origins the analogy ABM was worse than its Bass control:
+  +0.28 at 2010 (11.01 vs 10.73) and +1.54 at 2015 (13.32 vs 11.78) **[G10 rehearsal]**. Do not cite -1.25 for a
+  calendar-origin task; backtest at the task's own origin.
 
 ## Adoption baselines
 

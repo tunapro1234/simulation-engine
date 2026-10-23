@@ -1,4 +1,5 @@
-"""Agent-based models: adoption ABM + ABC + analogy prior (with Bass controls and curve baselines), opinion drift
+"""Agent-based models: adoption ABM + ABC + analogy prior (with Bass controls and curve baselines; an LLM ceiling
+prior with placebo controls and a leak check in ``ceiling``), opinion drift
 (bounded confidence vs persistence / mean shift), elasticity prior with shrinkage, repeat-purchase market ABM,
 self-exciting cascade predictors (Hawkes / SEISMIC; measured: they do not beat the shape baseline), a turn-based
 LLM agent society (measured: no better than a single LLM score) and economic-game societies (who-to-punish,
@@ -22,6 +23,7 @@ from .curves import (CURVES, BassAnalogy, CurveBaseline, bass, bass_curve, dampe
                      logistic, naive)
 from .adoption import (AdoptionABC, AdoptionABCAnalogy, BassABC, BassABCAnalogy, abc_distance, adoption_backtest,
                        adoption_t0, simulation_bank)
+from .ceiling import ceiling_prompt, ceiling_upper, llm_ceiling_prior
 from .opinion import (BoundedConfidenceABM, OpinionPanel, distribution, mean_position, opinion_baselines,
                       score_opinion, shift_distribution, to_eval_frame, tvd, w1)
 from .elasticity import (ElasticityShrinkage, PreEventMean, category_elasticity, elasticity_prompt,
@@ -55,6 +57,7 @@ __all__ = [
     # adoption
     "AdoptionABC", "AdoptionABCAnalogy", "BassABC", "BassABCAnalogy", "simulation_bank", "abc_distance",
     "adoption_t0", "adoption_backtest",
+    "llm_ceiling_prior", "ceiling_upper", "ceiling_prompt",
     "CurveBaseline", "BassAnalogy", "CURVES", "naive", "linear_trend", "damped_trend", "logistic", "gompertz",
     "bass", "bass_curve",
     # opinion
