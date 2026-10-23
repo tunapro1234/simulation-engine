@@ -244,7 +244,8 @@ def bm25_rank(query: str, evs: Sequence[dict], k1: float = 1.5, b: float = 0.75)
     for d in docs:
         tf = Counter(d)
         s = 0.0
-        for w in q & set(tf):
+        # sorted: a set's order follows PYTHONHASHSEED and the float sum with it, so ranks differed per process
+        for w in sorted(q & set(tf)):
             idf = math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5))
             s += idf * tf[w] * (k1 + 1) / (tf[w] + k1 * (1 - b + b * len(d) / avg))
         scores.append(s)
