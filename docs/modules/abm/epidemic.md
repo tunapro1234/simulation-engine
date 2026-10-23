@@ -91,7 +91,11 @@ with generative agents" (arXiv:2307.04986). The paper's methods section was chec
 - Daily loop: ask everyone, then each infectious agent who went out meets `contact_rate` distinct agents among
   those also out, then health states update. A run stops after two consecutive days with nobody infected. The
   question asks whether the agent should stay at home for the entire day, with "Reasoning: ... / Response: Yes|No";
-  a non-conforming reply counts as going out.
+  a non-conforming reply counts as going out. An echo of the unfilled template ("Response: [Yes or No]") is
+  non-conforming. The paper sent the whole prompt as one system message; here the question and reply format are
+  the user turn, because chat APIs need one.
+- News on day 0: the paper sets its new-case counter to the number of initially infected agents, and so does this
+  port, so the first newspaper reports `i0 / n` (3% with the defaults).
 - Additions that are not in the paper: `message=` (a line injected into every agent's memories, so the effect of a
   public message can be simulated), `contact="grid"`, `max_calls`, `retries`, and the prompt hash in the log.
   The paper's text does not give the number of initially infected agents (its code lists `initial_infected` as a
@@ -123,9 +127,25 @@ the RMSE of the replicate-mean `I/n` curve against the ODE's `I/n` over the 200 
 | SIR 2 | 4 | 0.7968 | 0.7972 | 0.7968 | 0.1537 / 0.1539 | 28.7 / 27 | 0.0058 | 1.3 |
 
 Attack rate and peak height agree with the ODE to within 0.004. The ABM peak comes 1.7-2.7 days later than the ODE
-peak; four sub-steps per day shrink the lag but do not remove it. We did not isolate the cause. Two candidates are
-the synchronous update (a new case cannot transmit in the step it was infected) and the fact that the mean of the
-per-replicate peak days is not the peak day of the mean curve.
+peak. A follow-up run (review, same n, 200 days, 30 replicates, `seed=1`) varied the seeds and the step size; the
+table gives the mean per-replicate peak day minus the ODE peak day (the ODE is read at whole days, so differences
+under about 0.5 day are within resolution):
+
+| model | i0 | 1 step/day | 4 steps/day | 16 steps/day |
+|---|---|---|---|---|
+| SEIR 2.5 | 10 | 2.67 | 1.87 | 0.90 |
+| SEIR 2.5 | 100 | 1.37 | 0.50 | 0.27 |
+| SEIR 2.5 | 1000 | 0.70 | 0.37 | 0.30 |
+| SIR 2 | 10 | 2.67 | 1.70 | 1.30 |
+| SIR 2 | 100 | 0.67 | -0.13 | -0.17 |
+| SIR 2 | 1000 | 0.33 | 0.20 | -0.03 |
+
+The lag has two parts. One shrinks with the step size: the synchronous discrete-time update, worth about one day
+at one step per day. The other shrinks with the number of seeds: with 10 seeds about one day remains at 16 steps
+per day, with 100 or more it is within resolution. Our reading of the second part, not tested further, is the
+random early phase: each replicate's curve is shifted in time by its chance start, and the average shift is a
+delay. Peak day of the replicate-mean curve vs the mean of per-replicate peak days differed by at most one day in
+these runs, so the choice of summary is not the cause.
 
 Index-case R0 (`r0_index_case`, 1000 replicates, 4 steps per day): SEIR 2.566 (95% CI 2.383-2.749) against the
 nominal 2.5; SIR 2.006 (1.858-2.154) against 2.0. Both CIs contain the nominal value.
@@ -166,7 +186,7 @@ What the table shows:
 
 - Local contact flattens and delays the epidemic long before it changes the final size. At radius 3 the attack
   rate is within 3 points of the ODE, but the peak is a third of the ODE's height and comes twice as late.
-- The growth-rate R0 is always the lowest of the three, and the index-case and final-size values are close from
+- The growth-rate R0 is the lowest of the three at every finite radius, and the index-case and final-size values are close from
   radius 3 on. The index case measures the first generation in a fully susceptible neighbourhood. The growth rate
   sees a travelling wave whose speed is limited by local depletion, so an analyst fitting the early curve of a
   radius-2 epidemic would report R0 = 1.25 when the first-generation value is 2.24 (final size: 1.99). The gap
@@ -221,7 +241,10 @@ The `base` row is the mean-field check for this variant. With nobody isolating, 
 final-size value for R0 = 3, `final_size(3) = 0.940`. The other rows only show that isolation decisions reach the
 transmission step in the expected direction. Days 1-2 of infection are infectious and symptom-free, so isolating
 on symptoms alone leaves part of the transmission in place. Isolating on fever only (days 4-5) still infects 85%
-of the town. The size of these effects with a real LLM is the paper's question and has not been measured here.
+of the town. In the `full` row one case is 1% of 100 agents, so the rule sends the whole town home on every day
+the newspaper reports a case on day 4 of infection, including day 0 (the first newspaper reports `i0 / n` = 3%, see
+Model details); that row shows the news channel working, not a realistic response. The size of these effects with a real LLM is the paper's question and has not
+been measured here. A review rerun of sections 1 and 4 and the growth-rate table reproduced every printed digit.
 
 ## Provenance
 
