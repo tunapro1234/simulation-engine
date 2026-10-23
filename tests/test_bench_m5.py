@@ -253,6 +253,22 @@ class TestMetrics(_Fixture):
         b = self.task.score(self.frame, "ses", B=200, seed=1)
         self.assertEqual((a["lo"], a["hi"]), (b["lo"], b["hi"]))
 
+    def test_incomplete_prediction_is_nan(self):
+        p = self.frame["pred_snaive"].to_numpy().copy()
+        p[0] = np.nan                                                  # one row of one series missing
+        f = self.task.frame(self.data, {"gap": p, "inf": np.where(np.arange(len(p)) == 5, np.inf, p)})
+        for m in ("gap", "inf"):
+            for metric in ("wrmsse", "wmape"):
+                s = self.task.score(f, m, metric, B=20)
+                self.assertTrue(np.isnan(s["value"]) and np.isnan(s["lo"]) and np.isnan(s["hi"]), (m, metric))
+            self.assertTrue(np.isnan(m5.wrmsse(f, m)))
+            self.assertTrue(m5.wrmsse_by_level(f, m)["wrmsse"].isna().all())
+
+    def test_run_baselines_option(self):
+        task = m5.M5(baselines="snaive", history=60)
+        f = task.run(methods={"zero": lambda d: np.zeros(len(d.test))}, data=task.load(self.root))
+        self.assertEqual(sorted(c for c in f.columns if c.startswith("pred_")), ["pred_snaive", "pred_zero"])
+
     def test_score_all(self):
         tab = self.task.score_all(self.frame, B=50)
         self.assertEqual(set(tab["metric"]), {"wrmsse", "wmape"})
