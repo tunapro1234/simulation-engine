@@ -2,7 +2,7 @@
 most people. An independent-cascade (IC) model is fitted on past cascades, the LLM predicts P(share | a friend shared
 it) per (segment, message), the evidence card decides if the LLM adds anything. Guide: docs/recipes/spread.md.
 
-    python3 examples/recipes/spread.py                    # offline: FakeLLM + synthetic 15x15 grid, ~25 s
+    python3 examples/recipes/spread.py                    # offline: FakeLLM + synthetic 15x15 grid, ~30 s
     python3 examples/recipes/spread.py --data data/cascades.csv --message "..." --out runs/spread
     python3 examples/recipes/spread.py --live --max-usd 1 [--key-file <path>]   # Claude Haiku, $ANTHROPIC_API_KEY
 
@@ -150,29 +150,40 @@ ex = df[(df.split == "train") & (df.seed == 0) & (df.k > 0)]
 ll = lambda p, d: np.sum(d.shared * np.log(1 - (1 - p) ** d.k + 1e-12) + (1 - d.shared) * d.k * np.log(1 - p))
 p_glob = (grid := np.linspace(.005, .6, 120))[np.argmax([ll(p, ex) for p in grid])]
 p_seg = {str(s): float(grid[np.argmax([ll(p, ex[ex.segment == s]) for p in grid])]) for s in personas}
-zl = L(np.array([P_LLM[s, m] for s, m in zip(ex.segment, ex.message)]))
-zs, mu = L(ex.segment.map(p_seg).to_numpy()), zl.mean()            # c = b = 0 is the segment baseline itself
-c, b = max(((c, b) for c in np.linspace(-2, 2, 41) for b in np.linspace(0, 2, 21)),
-           key=lambda cb: ll(S(zs + cb[0] + cb[1] * (zl - mu)), ex))
-print(f"fitted: p_global {p_glob:.3f}, p_segment {({s: round(v, 3) for s, v in p_seg.items()})}, LLM slope {b:.2f}")
-P_SEG = np.array([p_seg[s] for s in seg_of])
-METHODS = {"ic_global": lambda m: np.full(N, p_glob), "ic_segment": lambda m: P_SEG,
-           "llm_nopersona": lambda m: np.full(N, P_LLM[None, m]),
+zs, P_SEG = L(ex.segment.map(p_seg).to_numpy()), np.array([p_seg[s] for s in seg_of])
+
+
+def shifted(score, name):                                           # score(segment, message) -> LLM P(share)
+    """S(logit segment p + c + b (logit score - train mean)), c, b by likelihood; c = b = 0 IS ic_segment."""
+    z = L(np.array([score(s, m) for s, m in zip(ex.segment, ex.message)]))
+    c, b = max(((c, b) for c in np.linspace(-2, 2, 41) for b in np.linspace(0, 2, 21)),
+               key=lambda cb: ll(S(zs + cb[0] + cb[1] * (z - z.mean())), ex))
+    print(f"fitted {name}: shift {c:+.2f}, LLM slope {b:.2f}")
+    return lambda m: S(L(P_SEG) + c + b * (L(np.array([score(s, m) for s in seg_of])) - z.mean()))
+
+
+print(f"fitted: p_global {p_glob:.3f}, p_segment {({s: round(v, 3) for s, v in p_seg.items()})}")
+METHODS = {"ic_global": lambda m: np.full(N, p_glob), "ic_segment": lambda m: P_SEG,      # LLM-free baselines
+           "llm_nopersona": lambda m: np.full(N, P_LLM[None, m]),                         # raw LLM scores
            "llm": lambda m: np.array([P_LLM[s, m] for s in seg_of]),
-           "llm_calibrated": lambda m: S(L(P_SEG) + c + b * (L(METHODS["llm"](m)) - mu))}
+           "llm_nopersona_calibrated": shifted(lambda s, m: P_LLM[None, m], "no-persona"),  # persona control
+           "llm_calibrated": shifted(lambda s, m: P_LLM[s, m], "ours")}
 
 # 6. Predict who shares in every cascade from its seeds (Monte Carlo IC), then seal the test rows BEFORE scoring.
-for c_id, g in df.groupby("cascade_id"):
+for c_id, g in df.groupby("cascade_id"):        # same seed per cascade for every method; R=500 (at 200 MC noise alone
+    sd, rs = g.i[g.seed == 1], zlib.crc32(str(c_id).encode())                       # moved baseline AUCs by 0.03-0.06)
     for name, f in METHODS.items():
-        df.loc[g.index, "pred_" + name] = (simulate(f(g.message.iloc[0]), g.i[g.seed == 1]) >= 0).mean(0)[g.i]
+        hop = simulate(f(g.message.iloc[0]), sd, np.random.default_rng(rs), 500)
+        df.loc[g.index, "pred_" + name] = (hop >= 0).mean(0)[g.i]
 frame = df[df.seed == 0].rename(columns={"shared": "truth", "cascade_id": "group"})
 frame = frame[["truth", "group", "segment", "split"] + ["pred_" + m for m in METHODS]]
 se.seal(frame[frame.split == "test"].drop(columns="truth"), "spread; ours: llm_calibrated", registry=out / ".onkayit")
 
-# 7. Evidence card: IC baselines, no-persona control + automatic persona shuffle, cascade-bootstrap CIs, audits.
+# 7. Evidence card: IC baselines, calibrated no-persona control, shuffle control, cascade-bootstrap CIs, audits.
 sz = frame[frame.split == "test"].groupby("group").sum(numeric_only=True)
+sz["pred_train_mean"] = frame[frame.split == "train"].groupby("group").truth.sum().mean()   # constant, LLM-free
 print(f"\ntest cascade size (non-seed sharers, observed mean {sz.truth.mean():.1f}): predicted mean | abs error")
-print("\n".join(f"  {m[5:]:15} {v.mean():6.1f} | {(v - sz.truth).abs().mean():.1f}" for m, v in sz.iloc[:, 1:].items()))
+print("\n".join(f"  {m[5:]:24} {v.mean():6.1f} | {(v - sz.truth).abs().mean():.1f}" for m, v in sz.iloc[:, 1:].items()))
 report = se.evidence.evaluate(frame, "spread: who shares", "llm_calibrated", "llm", primary="auc", B=a.B,
                               baselines_oof=["ic_global", "ic_segment"], prereg=out / ".onkayit", multiplier=False)
 s = se.evidence.summary(report)
@@ -192,7 +203,7 @@ for _ in range(a.k):                                                # greedy on 
     G.append(max((j for j in np.argsort(-deg)[:30] if j not in G), key=lambda j: reach(p_ours, G + [j], 100).mean()))
 true_p = None if a.data else np.array([truth_p(q, a.message) for q in seg_of])
 ci = lambda v: f"{v.mean():6.1f} +- {1.96 * v.std() / R ** .5:4.1f}"
-print(f"\nseeding k={a.k} for {a.message!r}: people reached, mean +- 95% CI half-width over {R} runs")
+print(f"\nseeding k={a.k} for {a.message!r}: people reached, mean +- Monte Carlo 95% CI over {R} runs (sim noise only)")
 for name, sd in plan.items():
     x, tr = reach(p_ours, sd), f"   true world {ci(reach(true_p, sd))}" if true_p is not None else ""
     print(f"  {name:15} model {ci(x)}  minus random {ci(x - reach(p_ours, plan['random']))}{tr}")

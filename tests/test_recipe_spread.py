@@ -1,7 +1,8 @@
 """examples/recipes/spread.py end to end in a subprocess: the offline run (FakeLLM + synthetic grid) finishes with
-rc=0, prints the cascade-size table, the ladder with the shuffle and no-persona controls and the seeding table, and
-writes the card; a --data CSV runs without the synthetic true world; missing columns and --live without a budget or
-key stop with a message; --max-usd 0 stops before any network call and never prints the key."""
+rc=0, prints the cascade-size table (with the train-mean constant), the ladder with the shuffle, raw and calibrated
+no-persona controls and the seeding table, and writes the card; a --data CSV runs without the synthetic true world;
+missing columns and --live without a budget or key stop with a message; --max-usd 0 stops before any network call
+and never prints the key."""
 import os
 import subprocess
 import sys
@@ -52,7 +53,8 @@ class TestSpreadRecipe(unittest.TestCase):
             p = run("--out", d, "--B", "100")
             self.assertEqual(p.returncode, 0, p.stderr[-2000:])
             for s in ("LLM calls: 305; failed 0, unparsed 0", "test cascade size", "llm_calibrated",
-                      "kontrol_karistir_llm_calibrated", "tahmin_llm_nopersona", "tahmin_ic_segment", "badge:",
+                      "kontrol_karistir_llm_calibrated", "tahmin_llm_nopersona", "tahmin_llm_nopersona_calibrated",
+                      "tahmin_ic_segment", "train_mean", "badge:",
                       "seeding k=5", "greedy_model", "true world"):
                 self.assertIn(s, p.stdout)
             self.assertIn("Sealed predictions", (Path(d) / "card.md").read_text())
