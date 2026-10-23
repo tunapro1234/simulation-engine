@@ -25,6 +25,10 @@ pip install -e .[all]          # anthropic, lightgbm, statsmodels
 simengine demo                 # offline check: FakeLLM, about 4 s, writes runs/demo/card.md + dashboard.html
 ```
 
+If the brief matches one of the recipes in step 1, run that script offline now too
+(`PYTHONPATH=. python examples/recipes/<name>.py --out runs/<name>`, 2-30 s): it checks the whole path from data to
+card on this machine before you spend anything.
+
 No install (dependencies already in the environment): run from the repo root with
 `PYTHONPATH=. python -m simengine demo`; every `simengine ...` command below also works as `python -m simengine ...`.
 `python -I` (isolated mode) ignores `PYTHONPATH`, so that form fails with `No module named 'simengine'`: with `-I`
@@ -80,6 +84,23 @@ Decide which of these the brief is really asking for, because the measured answe
 | "forecast weekly demand for many series, horizon H" (stores x items, price/calendar known ahead) | `forecast` | `methods.forecast` baselines (`persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`), then `DirectForecaster("lightgbm", horizons=H, exog=[price, calendar])`; compare all of them with `backtest(..., origins=[...])` over several origins. Score: `evaluate(task="forecast", primary="wmape")` (bias is reported next to it), a second report with `aggregate_by=<store_dept_week>, aggregate="sum"` for the hierarchy totals; `point_for_metric(pred, metric="wmape")` only for L1 metrics | D4 rehearsal (M5, one run, the team's own code written before these helpers existed), test series WMAPE: last-4 mean 0.379, SES 0.371, LightGBM + price + calendar with the Poisson median 0.347 [0.334, 0.360]; vs SES −0.024 [−0.030, −0.019]. The LLM event prior added nothing (named = blind) and was dropped |
 | "how will adoption / a cascade evolve?" | `continuous` | curves + `abm.AdoptionABCAnalogy` with the Bass control | ABM 8.48 vs Bass control 9.73 MAE |
 | "tell us why / give us voices" | qualitative | `sim.survey` / `sim.ab_test` panel with controls | use quotes, not the panel's numbers |
+
+**Recipes: start from a script when the brief fits.** Each one below runs steps 2-5 of this playbook end to end
+(baselines on training data, LLM arm and controls, seal, evidence card) in about 220 lines. It runs offline by
+default; on the day pass `--data <csv>` with the columns in its docstring, edit the step-0 settings, and add
+`--live --max-usd <cap>` for Claude. The guide next to each script lists the columns, the pitfalls and what the
+jury should see.
+
+| the brief asks | script | guide |
+|---|---|---|
+| "which of these ads / messages works best for this audience, and by how much over the current one?" | [`recipes/ad_ab.py`](recipes/ad_ab.py) | [ad_ab](../docs/recipes/ad_ab.md) |
+| "how many will have adopted in N periods, and what does more marketing buy?" | [`recipes/adoption.py`](recipes/adoption.py) | [adoption](../docs/recipes/adoption.md) |
+| "how will this new item rate / sell?" (no history for it) | [`recipes/cold_start.py`](recipes/cold_start.py) | [cold_start](../docs/recipes/cold_start.md) |
+| "what will people pay, and how price-sensitive are they?" (conjoint / choice data) | [`recipes/pricing.py`](recipes/pricing.py) | [pricing](../docs/recipes/pricing.md) |
+| "will this customer buy in this category next month?" | [`recipes/purchase_pred.py`](recipes/purchase_pred.py) | [purchase_pred](../docs/recipes/purchase_pred.md) |
+| "how would each segment answer these questions, and what is the overall share?" | [`recipes/segment_survey.py`](recipes/segment_survey.py) | [segment_survey](../docs/recipes/segment_survey.md) |
+| "which page variant converts better, and where do visitors drop off?" | [`recipes/site_visitors.py`](recipes/site_visitors.py) | [site_visitors](../docs/recipes/site_visitors.md) |
+| "how far will this message spread, and whom should we seed?" | [`recipes/spread.py`](recipes/spread.py) | [spread](../docs/recipes/spread.md) |
 
 **Rehearsed scenarios.** Each brief type below had a timed 2-hour open rehearsal (22 Oct, not blind, simengine
 v0.1.0, one run unless stated; numbers come from each rehearsal's own card). The calls use today's names. A name
@@ -208,7 +229,9 @@ Skip discussion rounds and agent societies for accuracy: neither moved the resul
 
 The brief gives a control (the current ad, page or headline) and N−1 new creatives and asks which beat it and by
 how much. Run every variant on one panel, compare each creative with the control within persona, then treat each
-creative-vs-control pair as its own two-arm test when real traffic arrives.
+creative-vs-control pair as its own two-arm test when real traffic arrives. With past campaign data, start from
+[`recipes/ad_ab.py`](recipes/ad_ab.py) instead: it adds the LLM-free baselines, the calibration on past campaigns
+and the evidence card around the same per-creative lift.
 
 ```python
 import numpy as np
@@ -366,6 +389,8 @@ The frame has one row per scored unit: `truth`, one `pred_<arm>` per arm and a `
 still gets `split="test"`; without the column the card's split check is skipped ("girdide 'bolum' yok"). With
 `train` rows (truth and the same `pred_` columns) next to the `test` rows, metrics use the test rows only, the
 automatic ladder fits on the train rows, and the card checks group overlap (with `group`) and time order (with `time`).
+Each recipe in step 1 builds this frame, seals it and writes the card in its last steps; copy from there when your
+shape is close.
 
 ```python
 frame = pd.DataFrame({"truth": te.y, "pred_stack": p_stack, "pred_llm": p_llm, "pred_persistence": te.last,
