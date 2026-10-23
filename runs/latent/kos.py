@@ -59,8 +59,10 @@ VARIANTS = {"swap": ("caa", "rsd", "sft"), "zero": ("caa", "rsd", "sft")}
 # grids of the prereg (Extra); --kucuk keeps the first two configs of each
 PRB_FRACS = (0.25, 0.4, 0.5, 0.6, 0.75, 0.9)
 CAA_FRACS, CAA_C = (0.3, 0.45, 0.55, 0.65), (0.02, 0.05, 0.1, 0.2, 0.4)
-RSD = {"frac": (0.4, 0.55, 0.7), "positions": ("last", "last4"), "lr": (1e-4, 3e-4)}
-SFT = {"k": (1, 4), "lr": (3e-4, 1e-3)}
+# 23 Eki 16:1x (keşif, prereg sapması; SAPMALAR.md): 96 GB kartta bir rsd ayarı ~18 dk sürdü. q38 sweep'inde "last4" dört
+# ayarın dördünde "last"in altında kaldı -> positions yalnız "last"; sft yalnız k=1.
+RSD = {"frac": (0.4, 0.55, 0.7), "positions": ("last",), "lr": (1e-4, 3e-4)}
+SFT = {"k": (1,), "lr": (3e-4, 1e-3)}
 EPOCHS = {"rsd": 3.0, "sft": 2.0}
 
 
