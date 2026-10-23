@@ -260,7 +260,7 @@ def cmd_evaluate(a) -> int:
                          unlabeled_baselines=_csv_list(a.unlabeled_baselines), calibrate=_csv_list(a.calibrate),
                          baselines_oof=_csv_list(a.baselines_oof), ceiling_col=a.ceiling_col,
                          ceiling_label=a.ceiling_label, aggregate_by=a.aggregate_by,
-                         prereg=a.prereg, multiplier=not a.no_multiplier, memorization=a.memorization,
+                         prereg=a.prereg, multiplier=False if a.no_multiplier else None, memorization=a.memorization,
                          offset_col=a.offset_col, noise_ceiling=a.noise_ceiling, blind_col=a.blind_col,
                          compare=compare, ours_uses_llm=False if a.ours_no_llm else None, block_col=a.block_col,
                          point_pairs=point_pairs, split=a.split, **extra)
@@ -556,7 +556,9 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200,
                    help="bootstrap resamples for the slower aggregate blocks, e.g. the multiplier (default 200)")
     e.add_argument("--seed", type=int, default=0, help="random seed for bootstrap and subsampling (default 0)")
-    e.add_argument("--no-multiplier", action="store_true", help="skip the PPI++ multiplier block (faster)")
+    e.add_argument("--no-multiplier", action="store_true",
+                   help="skip the PPI++ multiplier block (faster; default: auto, off on binary tasks without a human "
+                        "panel)")
     e.add_argument("--multiplier-max-rows", dest="multiplier_max_rows", type=int,
                    help="single-item frames above this many rows compute the multiplier on a fixed-seed subsample "
                         "(default 2000; 0 = whole table, slow)")
