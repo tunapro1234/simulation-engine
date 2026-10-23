@@ -377,7 +377,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              block_col: str | None = None, point_pairs: Sequence | None = None,
              prereg_doc: str | os.PathLike | Sequence | None = None, split: str | None = None,
              balance_col: str | None = None, dominance_share: float = DOMINANT_BLOCK_SHARE,
-             rate_error_by: str | Sequence[str] | None = None, cluster: str | None = None) -> dict:
+             rate_error_by: str | Sequence[str] | None = None, cluster: str | None = None,
+             min_effect: float | None = None) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -401,6 +402,9 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         folds. With aggregate_by= it must be constant within each group; with block_col= it is the cluster side of
         the two-way bootstrap. NaN in the column raises ValueError. Named on the card ("clusters: N (cluster=`x`)"),
         `summary()["cluster"]`, `summary()["n_clusters"]`.
+    min_effect: smallest ours − strongest baseline difference (metric units, metric direction) for the "high" badge,
+        replacing kart.ANLAMLI_FARK = 0.02 (D12 #11: a z-MAE gain of 0.009 was called "small" against a fixed 0.02).
+        Printed on the card meta line ("min_effect=x"), in the badge reason and `report["min_effect"]`. None: 0.02.
     memorization: result dict of `memorization_audit` or a path to its JSON.
     prereg: seal records, a registry directory (its chain is attached to the report and its small text files are
         searched for the ours name), a text file (e.g. "ONKAYIT.md"), or a list/tuple mixing them
@@ -519,6 +523,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         raise ValueError("noise_ceiling works on group means; use aggregate='mean' with it, not 'unit_mean'")
     if ci not in CI_METHODS:
         raise ValueError(f"ci must be one of {CI_METHODS}, not {ci!r}")
+    if min_effect is not None:
+        if isinstance(min_effect, bool) or not np.isfinite(float(min_effect)) or float(min_effect) < 0:
+            raise ValueError(f"min_effect must be a finite number >= 0 (metric units), not {min_effect!r}")
+        min_effect = float(min_effect)
     forecast = task in FORECAST_TASKS
     if forecast:
         multiplier = False
@@ -647,6 +655,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     if kume is not None:
         d = d.copy(deep=False)
         d.attrs = {**d.attrs, "kume_sutun": kume}     # sema.hazirla reads it: the bootstrap cluster column
+    esik_token = _kart.EN_KUCUK_ETKI.set(min_effect)   # kart.kart reads it inside degerlendir
     try:
         rep = degerlendir(
             d, title, dataset, gorev=_task(task), yontemler=methods_i, bizim=_method(ours),
@@ -660,8 +669,11 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             kiyaslar=kiyas, ezber_llm=ours_uses_llm, tahmin_gorevi=forecast, ga_yontemi=ci,
             n_yapilandirma=n_configs, onkayit_metin=prereg_texts, blok=blok)
     finally:
+        _kart.EN_KUCUK_ETKI.reset(esik_token)
         if tmp:
             os.unlink(tmp)
+    if min_effect is not None:
+        rep["min_effect"] = min_effect
     if toplama:
         rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
     if kume is not None:
@@ -1466,8 +1478,11 @@ _PHRASES_EN = [
      r"the lower bound of ours' worth-N-humans multiplier (\1×) does not exceed the baseline's (\2×)"),
     (r"Tabana göre fark (\S+), GA \[(\S+); (\S+)\] sıfırın üstünde\.",
      r"Difference to the baseline \1, CI [\2, \3] above zero."),
-    (r"Fark anlamlı ama küçük \((\S+), GA \[(\S+); (\S+)\]\); en güçlü basit taban neredeyse aynı yerde\.",
-     r"Significant but small difference (\1, CI [\2, \3]); the strongest simple baseline is almost level."),
+    (r"Fark anlamlı ama küçük \((\S+), GA \[(\S+); (\S+)\]\); en güçlü basit taban neredeyse aynı yerde"
+     r"(?: \(en küçük etki eşiği (\S+)\))?\.",
+     lambda m: f"Significant but small difference ({m.group(1)}, CI [{m.group(2)}, {m.group(3)}]); the strongest simple "
+               "baseline is almost level" + (f" (minimum effect {m.group(4)})" if m.group(4) else "") + "."),
+    (r" En küçük etki eşiği \(min_effect\) (\S+)\.", r" Minimum effect (min_effect) \1."),
     (r"Tabana göre fark (\S+), GA \[(\S+); (\S+)\] sıfırı içeriyor\.",
      r"Difference to the baseline \1, CI [\2, \3] includes zero."),
     (r"En güçlü basit tabana göre eşleşik farkın güven aralığı ölçülmedi\.",
@@ -1921,6 +1936,7 @@ def summary(report: dict) -> dict:
         "cluster": INTERNAL_TO_COLUMN.get(report.get("tutma_birimi"), report.get("tutma_birimi")),
         "n_clusters": (report.get("kart") or {}).get("n_kume"),
         "cluster_override": report.get("kume_sutunu") is not None,
+        "min_effect": report.get("min_effect", (report.get("kanit_kart") or {}).get("min_effect")),
         "offset": report.get("ofset"),
         "noise_ceiling": report.get("gurultu_tavani"),
         "se_ceiling": _se_ceiling_en(report.get("se_tavani")),
@@ -2104,16 +2120,18 @@ def _raw_diff_note(f: dict, metric: str | None) -> str:
             "sign rule of the registered comparisons)")
 
 
-def _small_gain_reason(f: dict | None, reason: str) -> str:
-    """English badge reason when the paired difference is significant but below ANLAMLI_FARK (was empty in D12)."""
-    if not f or any(f.get(x) is None for x in ("fark", "alt", "ust")) or not (f["alt"] > 0 and f["fark"] < _kart.ANLAMLI_FARK):
+def _small_gain_reason(f: dict | None, reason: str, min_effect: float | None = None) -> str:
+    """English badge reason when the paired difference is significant but below the threshold (min_effect, else
+    ANLAMLI_FARK; was empty in D12)."""
+    esik = _kart.ANLAMLI_FARK if min_effect is None else min_effect
+    if not f or any(f.get(x) is None for x in ("fark", "alt", "ust")) or not (f["alt"] > 0 and f["fark"] < esik):
         return reason
     if reason.strip() and not reason.startswith("Significant but small"):
         return reason
     base = reason.strip() or (f"Significant but small difference ({f['fark']:+.3f}, CI [{f['alt']:+.3f}, "
                               f"{f['ust']:+.3f}]); the strongest simple baseline is almost level.")
-    return (f"{base} 'High' needs a difference of at least {_kart.ANLAMLI_FARK:g} (ANLAMLI_FARK, metric direction) "
-            "with the CI above 0.")
+    src = "ANLAMLI_FARK" if min_effect is None else f"min_effect={esik:g}"
+    return f"{base} 'High' needs a difference of at least {esik:g} ({src}, metric direction) with the CI above 0."
 
 
 def _se_ceiling_en(x: dict | None) -> dict | None:
@@ -2209,7 +2227,7 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
                   "baselines_oof=)")
     cav = s.get("badge_caveat")
     if en and k.get("rozet") == "kararsiz":
-        reason = _small_gain_reason(k.get("fark"), reason)
+        reason = _small_gain_reason(k.get("fark"), reason, report.get("min_effect", k.get("min_effect")))
     out.append(f"**Badge: {badge}.** " + reason + (f" Caveat: {cav}." if cav else ""))
     if k.get("etiketler"):
         out.append("")
@@ -2231,6 +2249,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         meta += (f" · bootstrap: two-way, blocks of `{b['column']}` ({b['n_blocks']} blocks) × clusters"
                  + (" — CI not reliable across blocks (< 5 blocks)" if (b.get("n_blocks") or 0) < 5 else
                     " — few blocks (< 10): coarse CIs" if (b.get("n_blocks") or 0) < 10 else ""))
+    if s.get("min_effect") is not None:
+        meta += f" · min_effect={s['min_effect']:g} (smallest difference for 'high')"
     if s.get("ceiling_kind"):
         meta += f" · ceiling: {s['ceiling_kind']}"
     if s.get("declared_baselines"):

@@ -10,7 +10,7 @@ Taban = etiketsiz tabanların (tur baseline) birincil metrikte en iyisi; bedel s
 çarpanı, bizim yöntem döngüselse (çarpanı yok) ham kolun; ikisi de yoksa "ölçülmedi". Karttaki en yüksek çarpan
 başka bir yöntemdeyse (ör. etiketsiz taban) bedel notunda adıyla yazılır ama rozete dayanak olmaz (KARŞIT-2 K2-28:
 eskiden en yüksek çarpan seçiliyordu, taban kendini onaylıyordu ve en iyiyi seçmek kazananın lanetine açıktı).
-Rozet "yuksek" için: bizim − taban GA'sı sıfırın üstünde ve fark ≥ ANLAMLI_FARK; bedel bizim yöntemden geliyorsa
+Rozet "yuksek" için: bizim − taban GA'sı sıfırın üstünde ve fark ≥ ANLAMLI_FARK (ya da min_effect); bedel bizim yöntemden geliyorsa
 ayrıca alt sınır ≥ ESIK_BEDEL ve tabanın kendi bedel alt sınırının üstünde. Fark yalnız taban_var=False iken
 yoksa (taban yok ya da taban insanın kendisi, ör. Upworthy insan@100) bizim yöntemin bedeliyle; fark GA'sız ya da taban
 varken eşleşik fark yoksa "kararsiz". Bizim − taban GA'sı tümüyle sıfırın altındaysa her durumda "kararsiz".
@@ -29,12 +29,16 @@ ve sonradan eklenen notları kaybeder (`persona.attach` bunu kullanır).
 """
 from __future__ import annotations
 
+import contextvars
 import math
 
 SIRA = ("taban", "ham", "kalibre", "tavan", "bosluk", "bedel")
 EK_SIRA = ("persona", "dusen")   # yalnız oz["persona_alanlari"] varken, SIRA'dan sonra
 BILDIRILEN_NOT = "declared, scored when truth arrives: {}"
 ANLAMLI_FARK = 0.02
+# api.evaluate(min_effect=) bu eşiği metrik biriminde ezer (D12 #11: z-MAE 0,009 "küçük" sayılıyordu); degerlendir
+# sırasında buradan, sonradan kurulan kartta oz["min_effect"]'ten okunur. None: ANLAMLI_FARK.
+EN_KUCUK_ETKI: contextvars.ContextVar = contextvars.ContextVar("en_kucuk_etki", default=None)
 ESIK_BEDEL = 1.10  # bedelde en küçük etki: alt sınır 1,10×'in altındaysa N büyüdükçe 1,05× de "yüksek" almasın
 AZ_KUME = 10       # cekirdek.AZ_KUME ile aynı: daha az küme/testte bootstrap GA anlamsız
 
@@ -57,12 +61,14 @@ def _u(d) -> tuple:
 
 
 def rozet(satirlar: list[dict], fark: dict | None = None, gercek_var: bool = True, bedel_kaynak: str | None = None,
-          taban_bedel_alt: float | None = None, taban_var: bool = False, n_kume: int | None = None) -> tuple[str, str]:
-    """bedel_kaynak: "bizim" | "ham" | None (bedel satırı hangi yöntemin çarpanı); yalnız "bizim" rozete dayanak olur.
+          taban_bedel_alt: float | None = None, taban_var: bool = False, n_kume: int | None = None,
+          anlamli_fark: float | None = None) -> tuple[str, str]:
+    """anlamli_fark: "yüksek" için en küçük fark (metrik biriminde, metrik yönünde); None: ANLAMLI_FARK.
+    bedel_kaynak: "bizim" | "ham" | None (bedel satırı hangi yöntemin çarpanı); yalnız "bizim" rozete dayanak olur.
     taban_var: kartta kıyaslanacak bir taban var; o zaman eşleşik fark GA'sı olmadan "yüksek" verilmez.
     n_kume: bootstrap küme sayısı (ab: test sayısı); AZ_KUME'den azsa ya da fark GA'sı sıfır genişlikteyse "yüksek"
     yerine "kararsiz" (None: küme denetimi yok, geri uyum)."""
-    r, g = _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var)
+    r, g = _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var, anlamli_fark)
     if r != "yuksek":
         return r, g
     if n_kume is not None and n_kume < AZ_KUME:
@@ -74,7 +80,9 @@ def rozet(satirlar: list[dict], fark: dict | None = None, gercek_var: bool = Tru
     return r, g
 
 
-def _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var) -> tuple[str, str]:
+def _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var, anlamli_fark=None) -> tuple[str, str]:
+    esik = ANLAMLI_FARK if anlamli_fark is None else anlamli_fark
+    ozel = "" if anlamli_fark is None else f" En küçük etki eşiği (min_effect) {esik:g}."
     s = {r["tur"]: r for r in satirlar}
     if not gercek_var or all((s.get(t) or {}).get("deger") is None for t in ("kalibre", "ham")):
         return "bekliyor", "Gerçek sonuç henüz yok: tahmin mühürlü, kart gerçek gelince dolar."
@@ -90,13 +98,14 @@ def _rozet(satirlar, fark, gercek_var, bedel_kaynak, taban_bedel_alt, taban_var)
         elif taban_bedel_alt is not None and b["alt"] <= taban_bedel_alt:
             bedel_sorun = f"bizim yöntemin bedel alt sınırı {b['alt']:.2f}× tabanınkini ({taban_bedel_alt:.2f}×) geçmiyor"
     if tam:
-        if fark["alt"] > 0 and fark["fark"] >= ANLAMLI_FARK:
+        if fark["alt"] > 0 and fark["fark"] >= esik:
             if bedel_sorun:
-                return "kararsiz", f"Tabana göre fark {fark['fark']:+.3f} anlamlı, ama {bedel_sorun}."
-            return "yuksek", f"Tabana göre fark {fark['fark']:+.3f}, GA [{fark['alt']:+.3f}; {fark['ust']:+.3f}] sıfırın üstünde."
+                return "kararsiz", f"Tabana göre fark {fark['fark']:+.3f} anlamlı, ama {bedel_sorun}.{ozel}"
+            return "yuksek", (f"Tabana göre fark {fark['fark']:+.3f}, GA [{fark['alt']:+.3f}; {fark['ust']:+.3f}] "
+                              f"sıfırın üstünde.{ozel}")
         if fark["alt"] > 0:
             return "kararsiz", (f"Fark anlamlı ama küçük ({fark['fark']:+.3f}, GA [{fark['alt']:+.3f}; {fark['ust']:+.3f}]); "
-                                "en güçlü basit taban neredeyse aynı yerde.")
+                                f"en güçlü basit taban neredeyse aynı yerde (en küçük etki eşiği {esik:g}).")
         return "kararsiz", f"Tabana göre fark {fark['fark']:+.3f}, GA [{fark['alt']:+.3f}; {fark['ust']:+.3f}] sıfırı içeriyor."
     if fark or taban_var:  # fark verildi ama GA'sı yok, ya da taban var ama eşleşik kıyas yok
         return "kararsiz", "En güçlü basit tabana göre eşleşik farkın güven aralığı ölçülmedi."
@@ -244,9 +253,10 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     kb = oz.get("kart") or {}
     n_kume = min((int(n) for n in (kb.get("n_kume"), kb.get("n_madde") if oz.get("gorev") == "ab" else None)
                   if _f(n) is not None), default=None)
+    esik = oz.get("min_effect") if oz.get("min_effect") is not None else EN_KUCUK_ETKI.get()
     r, g = rozet(S, fark_r, gercek_var=bool(son), bedel_kaynak=bedel_kaynak,
                  taban_bedel_alt=_f(tbb[1].get("alt")) if tbb else None, taban_var=bool(biz and tb),
-                 n_kume=n_kume if son else None)
+                 n_kume=n_kume if son else None, anlamli_fark=esik)
     esit = ", ".join((tb_bel or {}).get("esitler") or [])
     if fark_r is not fark and r != "bekliyor":
         g = f"{g} (Rozet eşit tabanların en kötüsüne karşı: {esit}; badge against the worst tied baseline.)"
@@ -296,6 +306,8 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
             "satirlar": S, "fark": fark, "rejimler": rejimler or [],
             "yanilgi": _tekil(list(yanilgi or []) + list(oz.get("sinirlar") or [])), "muhur": muhur,
             "rozet": r, "rozet_gerekce": g, "etiketler": et, "dil": "tr"}
+    if esik is not None:
+        out["min_effect"] = esik
     if oz.get("kayitli_karsilastirmalar"):   # kayıtlı karşılaştırmalar / düşme koşulları (evaluate(compare=, blind_col=))
         out["kayitli"] = oz["kayitli_karsilastirmalar"]
     return out
