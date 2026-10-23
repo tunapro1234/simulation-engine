@@ -698,6 +698,9 @@ def pooled_distribution(frame: pd.DataFrame, weight_col: str = "n", by: str | Se
     for s in ("split", "bolum"):
         if s in frame.columns and s not in keys:
             keys.append(s)
+    for k in keys:                          # a missing key would pool unrelated cells into one 'NaN' item
+        if frame[k].isna().any():
+            raise ValueError(f"pooled_distribution: {int(frame[k].isna().sum())} row(s) with a missing {k!r}")
     wcol = _alias(frame, weight_col)
     w = pd.to_numeric(frame[wcol], errors="coerce").to_numpy(float)
     if not np.isfinite(w).all() or (w < 0).any():
@@ -771,6 +774,9 @@ def choice_frame(long_df: pd.DataFrame, task_col: str, alt_col: str, chosen_col:
     if missing or not arms:
         raise ValueError(f"choice_frame: prediction columns missing: {missing or 'none given'}")
     d = long_df.reset_index(drop=True)
+    for c in (task_col, alt_col):          # groupby drops NaN keys: those rows would vanish without a word
+        if d[c].isna().any():
+            raise ValueError(f"choice_frame: {int(d[c].isna().sum())} row(s) with a missing {c!r}")
     dup = d.duplicated([task_col, alt_col])
     if dup.any():
         raise ValueError(f"choice_frame: duplicate (task, alternative) rows, e.g. "

@@ -81,6 +81,10 @@ class PooledDistributionTest(unittest.TestCase):
             ev.pooled_distribution(f[["item", "n", "truth"]])
         with self.assertRaisesRegex(ValueError, "not in the frame"):
             ev.pooled_distribution(f, weight_col="w")
+        bad = f.astype({"item": object})
+        bad.loc[0, "item"] = None                                              # W9 review: was pooled as item NaN
+        with self.assertRaisesRegex(ValueError, "missing 'item'"):
+            ev.pooled_distribution(bad)
 
 
 def _long(seed=0, tasks=60):
@@ -151,6 +155,33 @@ class ChoiceFrameTest(unittest.TestCase):
             ev.choice_frame(lg, "task", "alt", "chosen", "pred_mnl", scores="logit")
         cf = ev.choice_frame(lg.assign(chosen=lg.chosen.astype(bool)), "task", "alt", "chosen", "pred_mnl")
         self.assertEqual(len(cf), 6)
+
+    def test_never_chosen_first_class_without_classes_raises(self):
+        # W9 review: 'bike' (first in text order) never chosen -> evaluate inferred 4 classes from truth and read the
+        # 5-long vectors shifted by one (logloss 3.6 instead of 1.2, silently); now it raises and names classes=
+        lg = _long()
+        lg = lg[lg.alt != "walk"].copy()
+        bike = lg.alt == "bike"
+        lg.loc[bike & (lg.chosen == 1), "chosen"] = 0
+        lg.loc[lg.task.isin(lg.loc[bike, "task"]) & (lg.alt == "car"), "chosen"] = 1
+        lg.loc[lg.task.isin(lg.loc[bike, "task"]) & (lg.alt != "car"), "chosen"] = 0
+        cf = ev.choice_frame(lg, "task", "alt", "chosen", "pred_mnl")
+        self.assertNotIn("bike", set(cf.truth))
+        with self.assertRaisesRegex(ValueError, "classes="):
+            _quiet(ev.evaluate, cf, ours="mnl", task="multiclass", primary="logloss", B=30, multiplier=False)
+        rep = _quiet(ev.evaluate, cf, ours="mnl", task="multiclass", primary="logloss", classes=cf.attrs["classes"],
+                     B=30, multiplier=False)
+        q = lg.pred_mnl / lg.groupby("task").pred_mnl.transform("sum")          # renormalised within the task
+        self.assertAlmostEqual(_value(rep, "mnl"), -np.mean(np.log(q[lg.chosen == 1])), places=6)
+
+    def test_missing_task_or_alternative_raises(self):
+        lg = _long(tasks=6)
+        for c in ("task", "alt"):
+            bad = lg.copy()
+            bad[c] = bad[c].astype(object)
+            bad.loc[0, c] = None
+            with self.assertRaisesRegex(ValueError, f"missing '{c}'"):
+                ev.choice_frame(bad, "task", "alt", "chosen", "pred_mnl")
 
     def test_exported(self):
         for name in ("pooled_distribution", "choice_frame"):

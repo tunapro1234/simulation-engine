@@ -42,16 +42,19 @@ class DryRunTest(unittest.TestCase):
         self.assertTrue(dry["baslik"].startswith(ev.DRY_RUN_STAMP))
         self.assertIn("T2 ladder", dry["baslik"])
         self.assertTrue(dry["sinirlar"][0].startswith(ev.DRY_RUN_STAMP))
-        self.assertEqual(dry["dry_run"]["level"], "item")
+        self.assertEqual(dry["dry_run"]["level"], "all")
         md = ev.card_markdown(dry)
         self.assertIn(ev.DRY_RUN_STAMP, md.splitlines()[0])
         self.assertEqual(ev.summary(dry)["title"], dry["baslik"])
 
-    def test_permute_keeps_item_marginals_marginal_mode_redraws(self):
+    def test_permute_keeps_marginals_marginal_mode_redraws(self):
         f = _binary()
         m, info = ev.mask_truth(f, seed=3)
         self.assertEqual(info["mode"], "permute")
         self.assertEqual(m["truth"].dtype, f["truth"].dtype)
+        self.assertEqual(m.truth.sum(), f.truth.sum())                          # column marginal kept
+        m, info = ev.mask_truth(f, seed=3, item="item")                          # opt-in: item marginals kept
+        self.assertEqual(info["level"], "item")
         pd.testing.assert_series_equal(m.groupby("item").truth.sum(), f.groupby("item").truth.sum())
         self.assertGreater(info["unchanged_share"], 0.3)                        # binary: half stays by chance
         self.assertLess(info["unchanged_share"], 0.75)
@@ -77,10 +80,29 @@ class DryRunTest(unittest.TestCase):
 
     def test_aggregate_by_item_is_not_masked_within_item(self):
         f = _binary()
-        _, info = ev.mask_truth(f, seed=0, aggregate_by="item")
+        _, info = ev.mask_truth(f, seed=0, item="item", aggregate_by="item")
         self.assertEqual(info["level"], "all")
-        _, info = ev.mask_truth(f, seed=0, aggregate_by="group")
+        _, info = ev.mask_truth(f, seed=0, item="item", aggregate_by="group")
         self.assertEqual(info["level"], "item")
+        with self.assertRaisesRegex(ValueError, "not in the frame"):
+            ev.mask_truth(f, item="question")
+
+    def test_item_level_prediction_does_not_keep_its_real_score(self):
+        # W9 review: a within-item shuffle leaves the score of an item-constant prediction (item-level LLM answer,
+        # the item-mean baseline rung) EXACTLY at its real value; the default whole-column mask must not.
+        rng = np.random.default_rng(0)
+        items = rng.choice([f"q{i}" for i in range(12)], 600)
+        rate = dict(zip([f"q{i}" for i in range(12)], rng.uniform(.1, .9, 12)))
+        p = np.array([rate[i] for i in items])
+        f = pd.DataFrame({"group": np.arange(600), "item": items, "truth": (rng.uniform(size=600) < p).astype(int),
+                          "pred_itemlvl": p})
+        kw = dict(ours="itemlvl", B=30, multiplier=False, primary="logloss")
+        real = _value(_quiet(ev.evaluate, f, **kw), "pred_itemlvl")
+        within = _value(_quiet(ev.dry_run, f, item="item", **kw), "pred_itemlvl")
+        self.assertAlmostEqual(within, real, places=9)                          # the leak the default avoids
+        dry = _quiet(ev.dry_run, f, **kw)
+        self.assertEqual(dry["dry_run"]["level"], "all")
+        self.assertGreater(_value(dry, "pred_itemlvl") - real, 0.1)
 
     def test_distribution_one_row_per_item_shuffles_components(self):
         rng = np.random.default_rng(2)
@@ -91,8 +113,15 @@ class DryRunTest(unittest.TestCase):
             rows.append({"item": f"q{i}", "truth": t.tolist(), "pred_llm": (0.7 * t + 0.3 / k).tolist()})
         f = pd.DataFrame(rows)
         m, info = ev.mask_truth(f, seed=0)
-        self.assertEqual(info["level"], "components")
+        self.assertEqual(info["level"], "all")                                   # swapped among same-length rows
+        self.assertEqual(info["component_rows"], 0)
         self.assertTrue(all(isinstance(v, list) and len(v) == len(w) for v, w in zip(m.truth, f.truth)))
+        self.assertLess(info["unchanged_share"], 0.2)
+        one = f.iloc[[0, 1, 2]]                                                  # lengths 3, 4, 5: nothing to swap
+        m1, info1 = ev.mask_truth(one, seed=0)
+        self.assertEqual(info1["level"], "components")
+        self.assertEqual(info1["component_rows"], 3)
+        self.assertTrue(all(np.allclose(sorted(v), sorted(w)) for v, w in zip(m1.truth, one.truth)))
         self.assertTrue(all(np.isclose(sum(v), 1) for v in m.truth))
         real = _quiet(ev.evaluate, f, ours="llm", task="distribution", B=30, multiplier=False)
         dry = _quiet(ev.dry_run, f, ours="llm", task="distribution", B=30, multiplier=False)
@@ -101,7 +130,7 @@ class DryRunTest(unittest.TestCase):
     def test_turkish_aliases_missing_truth_and_constant(self):
         f = _binary().rename(columns={"truth": "gercek", "item": "madde"})
         f.loc[:9, "gercek"] = np.nan
-        m, info = ev.mask_truth(f, seed=0)
+        m, info = ev.mask_truth(f, seed=0, item="item")                         # 'item' resolves to 'madde'
         self.assertEqual(info["level"], "item")
         self.assertEqual(info["masked_rows"], len(f) - 10)
         self.assertTrue(m.gercek.iloc[:10].isna().all())
@@ -110,6 +139,11 @@ class DryRunTest(unittest.TestCase):
             ev.dry_run(c, ours="a")
         with self.assertRaises(ValueError):
             ev.mask_truth(pd.DataFrame({"pred_a": [0.1]}))
+        na = pd.DataFrame({"truth": pd.array([1, 0, None, 1, 0, 1], dtype="Int64"), "pred_a": np.linspace(0, 1, 6)})
+        m, info = ev.mask_truth(na, seed=0)                                      # pd.NA stays missing, not a value
+        self.assertEqual(info["masked_rows"], 5)
+        self.assertTrue(pd.isna(m.truth.iloc[2]))
+        self.assertEqual(str(m.truth.dtype), "Int64")
 
     def test_exported(self):
         for name in ("dry_run", "mask_truth", "DRY_RUN_STAMP"):

@@ -198,7 +198,15 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
             siniflar = sorted(set(pd.unique(d["gercek"].dropna()).tolist()) | set(ek), key=str)
         for c in tsut:
             if _vektor_mu(d[c]):
-                d[c] = [_sinif_vektoru(_vektor(v), siniflar) for v in d[c]]
+                vs = [_vektor(v) for v in d[c]]
+                # konum vektörü sınıf sayısıyla aynı uzunlukta olmalı: yoksa indeksler kayar, logloss sessizce yanlış
+                bad = sorted({len(v) for v in vs if isinstance(v, np.ndarray) and v.ndim == 1} - {len(siniflar)})
+                if bad:
+                    raise ValueError(f"multiclass: {c!r} has probability vectors of length {bad} but the class set has "
+                                     f"{len(siniflar)} classes {list(siniflar)[:10]} (inferred from truth when "
+                                     "classes= is not given): pass classes= in the vector order (e.g. "
+                                     "classes=frame.attrs['classes'] for choice_frame) or use {class: p} dicts")
+                d[c] = [_sinif_vektoru(v, siniflar) for v in vs]
     elif gorev == "ikili":
         d["gercek"] = d["gercek"].map(lambda v: 1.0 if str(v) in ("1", "1.0", "True") else 0.0)
         if "tekrar" in d:

@@ -3,7 +3,7 @@
     import simengine.evidence as ev
     rep = ev.dry_run(frame, title="T2 ladder", ours="t2", seed=0)     # same kwargs as evaluate; truth masked first
     rep["baslik"]          # "DRY RUN: truth masked, numbers are not results | T2 ladder"
-    rep["dry_run"]         # {"mode", "level", "seed", "masked_rows", "unchanged_share", "note"}
+    rep["dry_run"]         # {"mode", "level", "seed", "masked_rows", "component_rows", "unchanged_share", "note"}
     ev.card(rep, "dry.md") # the stamp is in the title and the first limit line
     masked, info = ev.mask_truth(frame, seed=0, mode="marginal")      # the masked copy only (input left unchanged)
 
@@ -11,13 +11,20 @@ Why (TALP G2 #1): with FakeLLM the code smoke test still scored against the real
 values were seen before the pre-registration commit. A dry run checks that the pipeline runs end to end (columns,
 task detection, baselines, card) without showing a single real-truth number.
 
-Masking. mode="permute" (default) shuffles the truth values within each item (the whole column when there is no
-item column); mode="marginal" replaces each value by a draw with replacement from its item's truth values. Item
-marginals (class shares, mean) are kept; they are data, not results. Rows with missing truth stay missing. When
-the item level cannot hide the truth (more than half of the rows sit in items with one distinct truth value or, with
-aggregate_by, one aggregation unit, e.g. one row per item), the mask moves to the whole column, and for
-distribution truths of different lengths (or a column that is still frozen) to a per-row shuffle of the vector's
+Masking. mode="permute" (default) shuffles the truth values across the whole column; mode="marginal" replaces each
+value by a draw with replacement from the column's truth values. The column marginal (class shares, mean) is kept.
+Rows with missing truth stay missing. Distribution truths are shuffled among rows of the same vector length, and
+rows such a shuffle cannot change (a length nobody else has, or one distinct vector) get a per-row shuffle of their
 components. Truth that no mask can change (a constant column) raises ValueError: there is no dry run of it.
+
+Why the whole column and not within items (W9 review): a prediction that is constant within an item (an item-level
+LLM answer, the item-mean / item-majority baselines of the ladder) scores EXACTLY its real value when the truth is
+only shuffled within items, because every row-level metric of a constant prediction sums over the item's values in
+any order. The same holds for any prediction constant over the shuffled level, so the whole-column shuffle still
+shows the real score of a global constant (uniform 0.5, global majority) - a property of the marginal, not a
+result. item="item" restores the within-item shuffle (item marginals kept; it moves to the whole column when the
+items cannot hide the truth: more than half of the rows in items with one distinct value or, with aggregate_by, one
+aggregation unit); use it only when no prediction is item-level.
 """
 from __future__ import annotations
 
@@ -46,7 +53,9 @@ def _col(frame: pd.DataFrame, name: str | None) -> str | None:
 
 
 def _missing(v) -> bool:
-    return v is None or (isinstance(v, str) and not v.strip()) or (np.isscalar(v) and pd.isna(v))
+    if v is None or v is pd.NA or v is pd.NaT:          # pd.NA (nullable Int64 / string truth) is not np.isscalar
+        return True
+    return (isinstance(v, str) and not v.strip()) or (np.isscalar(v) and pd.isna(v))
 
 
 def _vec(v) -> np.ndarray | None:
@@ -105,11 +114,13 @@ def _components(values: list, rng: np.random.Generator) -> list:
     return out
 
 
-def mask_truth(frame: pd.DataFrame, *, seed: int = 0, mode: str = "permute", item: str | None = "item",
+def mask_truth(frame: pd.DataFrame, *, seed: int = 0, mode: str = "permute", item: str | None = None,
                aggregate_by: str | None = None) -> tuple[pd.DataFrame, dict]:
     """Copy of `frame` with the truth column masked (see the module docstring) and an info dict:
-    mode, level ("item" | "all" | "components"), seed, masked_rows, unchanged_share (rows whose value did not
-    change, by chance or because their stratum is frozen), note. `frame` itself is not modified."""
+    mode, level ("all" | "item" | "components"), seed, masked_rows, component_rows (rows whose vector components
+    were shuffled), unchanged_share (rows whose value did not change, by chance or because nothing could change
+    them), note. item=None (default) masks across the whole column; item="item" within items. `frame` itself is
+    not modified."""
     if mode not in MODES:
         raise ValueError(f"mask_truth: mode must be one of {MODES}, got {mode!r}")
     tcol = _col(frame, "truth")
@@ -122,25 +133,32 @@ def mask_truth(frame: pd.DataFrame, *, seed: int = 0, mode: str = "permute", ite
     vals = [frame[tcol].iloc[i] for i in have]
     keys = [_key(v) for v in vals]
     icol, acol = _col(frame, item), _col(frame, aggregate_by)
+    if item is not None and icol is None:
+        raise ValueError(f"mask_truth: item column {item!r} not in the frame")
     units = pd.factorize(frame[acol].iloc[have])[0] if acol else None
     vecs = [_vec(v) for v in vals]
     is_vec = all(x is not None for x in vecs)
-    same_len = is_vec and len({len(x) for x in vecs}) == 1
+    flat = np.array([len(np.unique(np.round(x, 12))) < 2 for x in vecs]) if is_vec else None
+    # whole-column level: vectors shuffle only among rows of the same length (a swap must keep the option count)
+    whole = (pd.factorize(np.array([len(x) for x in vecs]))[0] if is_vec else np.zeros(len(have), int))
     rng = np.random.default_rng(seed)
-    levels = ((["item"] if icol else []) + (["all"] if not is_vec or same_len else [])
-              + (["components"] if is_vec else []))
-    for level in levels:
-        if level == "components":
-            frozen = np.array([len(np.unique(np.round(x, 12))) < 2 for x in vecs])
-        else:
-            strata = (pd.factorize(frame[icol].iloc[have])[0] if level == "item" else np.zeros(len(have), int))
-            frozen = _frozen(keys, strata, units)
-        if frozen.mean() <= FROZEN_MAX:
-            break
-    else:
+    level, strata, frozen = "all", whole, _frozen(keys, whole, units)
+    if icol:
+        s_item = pd.factorize(frame[icol].iloc[have])[0]
+        f_item = _frozen(keys, s_item, units)
+        if f_item.mean() <= FROZEN_MAX:
+            level, strata, frozen = "item", s_item, f_item
+    comp = frozen & ~flat if is_vec else np.zeros(len(have), bool)
+    if level == "all" and is_vec and frozen.all():
+        level = "components"
+    if (frozen & ~comp).mean() > FROZEN_MAX or (frozen & ~comp).all():
         raise ValueError("mask_truth: the truth cannot be masked (constant column, or every row frozen): a dry run "
                          "would show the real numbers")
-    new = _components(vals, rng) if level == "components" else _shuffle(vals, strata, mode, rng)
+    new = _shuffle(vals, strata, mode, rng)
+    if comp.any():
+        cidx = np.flatnonzero(comp)
+        for i, v in zip(cidx, _components([vals[i] for i in cidx], rng)):
+            new[i] = v
     s = out[tcol].astype(object)
     for i, v in zip(have, new):
         s.iat[i] = v
@@ -149,12 +167,14 @@ def mask_truth(frame: pd.DataFrame, *, seed: int = 0, mode: str = "permute", ite
     where = {"item": f"within {icol!r}", "all": "across the whole column",
              "components": "by shuffling each distribution's components"}[level]
     how = "masked" if level == "components" else "permuted" if mode == "permute" else "redrawn from the marginal"
-    note = f"{DRY_RUN_STAMP}: truth {how} {where} (seed {seed}, {len(have)} rows, {100 * unchanged:.0f} % unchanged)"
+    extra = f", {int(comp.sum())} rows by their components" if comp.any() and level != "components" else ""
+    note = (f"{DRY_RUN_STAMP}: truth {how} {where}{extra} (seed {seed}, {len(have)} rows, "
+            f"{100 * unchanged:.0f} % unchanged)")
     return out, {"mode": mode, "level": level, "seed": int(seed), "masked_rows": int(len(have)),
-                 "unchanged_share": unchanged, "note": note}
+                 "component_rows": int(comp.sum()), "unchanged_share": unchanged, "note": note}
 
 
-def dry_run(frame: pd.DataFrame, *, seed: int = 0, mode: str = "permute", item: str | None = "item",
+def dry_run(frame: pd.DataFrame, *, seed: int = 0, mode: str = "permute", item: str | None = None,
             **evaluate_kw) -> dict:
     """`evaluate(**evaluate_kw)` on `mask_truth(frame)`: the report's title (`baslik`) is stamped
     "DRY RUN: truth masked, numbers are not results", the stamp leads the limits (card), and `report["dry_run"]`
