@@ -161,7 +161,7 @@ Notes for a new dataset:
 | `hooks` | `add_to_residual` (positions `last`, `last4`, `all`, int, slice; a tensor or a callable), `capture`, `replace_embeddings` (soft tokens on every family; Gemma 4 cannot `generate(inputs_embeds)`), `residual_norm`, `embedding_norm` |
 | `prompts` | G1/G2/G3 templates, `split` at the cell sentinel (prefix cached, suffix per cell), `short_split` for the injection arms, `answer_token_ids` (first-token variants, shared ids dropped) |
 | `readout` | `yes_prob` / `option_probs`: each prefix is run once and its KV cache is reused for every cell (hybrid DeltaNet and sliding-window caches included); only the last position's logits are computed; `Injection` adds a vector or soft tokens during the suffix pass; gradients flow for training |
-| `encoders` | E1 `SurveyOneHot`, `SurveyAutoencoder`; E2 `history_features`, `ImplicitALS`, `BagSVD`; E3 `text_embedding` (e5); E4 `llm_states` (a tuple of pools fills all of them from one forward pass); E5 `trait_directions`, `trait_person_vector`; E6 `behaviour_directions`; E7 `load_sae`, `sae_codes` |
+| `encoders` | E1 `SurveyOneHot`, `SurveyAutoencoder`; E2 `history_features`, `ImplicitALS`, `BagSVD`; E2c `SequenceEncoder` (GRU over the time-ordered purchase items -> 64-d u, self-supervised on the training persons' own earlier windows, early stopped on the validation persons; arms enc-sq, enc-angcsq, stk-sq, rsd-sq, sft-sq, added after the prereg lock, exploratory); E3 `text_embedding` (e5); E4 `llm_states` (a tuple of pools fills all of them from one forward pass); E5 `trait_directions`, `trait_person_vector`; E6 `behaviour_directions`; E7 `load_sae`, `sae_codes` |
 | `heads` | `EncoderHead` (logistic per category or MLP with a category embedding), `Probe` (PCA + logistic, or mass-mean + Platt), `platt`, `stack_lgbm` |
 | `steer` | directions (`mean_diff_direction`, `pca_direction`, `probe_direction`), `CAA`, `residual_projector`, `soft_token_projector`, `train_injector` / `predict_injector` (model frozen, BCE on the yes-logit), `derange` (swap control) |
 | `tasks` | `load_g1/g2/g3`, `TestGuard` (raises `LeakError` when a test row or a test person reaches a fit), `write_pred` (talp73 schema, optional seal) |
@@ -194,6 +194,7 @@ they were made in. Each prediction's `.meta.json` records the precision.
 PY="nice -n 19 /data/talp/venv/bin/python"; K=runs/latent/kos.py      # from the repo root
 $PY $K --list                                                    # arm ids, models, run log
 $PY $K --arm enc-an enc-gc enc-angc enc-e5L1 enc-e5L2 stk-e5 --seed 0 1 2       # LLM-free controls (CPU)
+$PY $K --arm enc-sq enc-angcsq stk-sq --device cpu --seed 0  # sequence encoder u=sq (a few minutes on CPU)
 $PY $K --model q38 --arm prm-L2 prb-L2 stk --seed 0             # G1; the file is prb-q38-L2_s0.parquet
 $PY $K --model q38 --arm rsd-angc rsd-angc-swap rsd-angc-zero sft-angc
 $PY $K --model q38 --arm prm-tf prm-tf0 rsd-tf enc-tf lgbm-tf   # G3: test rows + price sweep in one file
