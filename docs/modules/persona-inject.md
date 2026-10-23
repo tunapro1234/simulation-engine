@@ -51,6 +51,7 @@ Family pages: [interview](inject/interview.md), [own_answers](inject/own_answers
 - `controls=("no_persona", "swap")`: a `swap_<arm>` is added for every injector.
 - `metric="accuracy"` (any `evidence` multiclass metric), `parse=parse_option`, `max_tokens=256`.
 - `dry_run=True` renders and estimates only. `max_usd` refuses to start above the upper-bound estimate.
+- `estimate_cost` prices every prompt as its own call (`simengine.llm.pricing.cost_usd`, reply at `max_tokens`) and sums: `usd_max` total, `usd_per_call_max` dearest call, both None for an unpriced model. The long-context price applies only to a single prompt over the threshold, not to the summed tokens.
 - `llm_kw` passes extra keywords (`tag=`, `thinking=`, temperature for sampling arms) to every call.
 
 **Reading the table.** `diff_vs_no_persona` asks "does this persona content help at all?". `diff_vs_swap` asks "does it

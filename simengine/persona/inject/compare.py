@@ -68,17 +68,23 @@ def _key(v: Any) -> Any:
 
 def estimate_cost(llm, prompts: Sequence[Prompt], max_tokens: int) -> dict:
     """Calls, rough input tokens (chars / 4) and an upper-bound USD (every reply at max_tokens) when the model
-    is in simengine.llm.pricing; usd_max None otherwise."""
-    chars = sum(len(p.system) + len(p.flatten()) for p in prompts)
-    tin, tout = chars // CHARS_PER_TOKEN, len(prompts) * int(max_tokens)
-    usd = None
+    is in simengine.llm.pricing; usd_max / usd_per_call_max None otherwise.
+
+    Each prompt is priced as its own call and summed, so the long-context price applies only to a prompt that
+    is itself over the model's threshold (summing first and pricing once overstated Haiku runs ~5x).
+    usd_per_call_max: the dearest single call."""
+    mt = int(max_tokens)
+    tins = [(len(p.system) + len(p.flatten())) // CHARS_PER_TOKEN for p in prompts]
+    usd = per_call = None
     try:
         from ...llm.pricing import cost_usd
-        usd = round(cost_usd(getattr(llm, "model", "-"), tin, tout), 4)
+        model = getattr(llm, "model", "-")
+        costs = [cost_usd(model, t, mt) for t in tins]
+        usd, per_call = round(sum(costs), 4), round(max(costs, default=0.0), 6)
     except KeyError:
         pass
-    return {"calls": len(prompts), "input_tokens_est": tin, "output_tokens_max": tout, "usd_max": usd,
-            "model": getattr(llm, "model", None)}
+    return {"calls": len(prompts), "input_tokens_est": sum(tins), "output_tokens_max": len(prompts) * mt,
+            "usd_max": usd, "usd_per_call_max": per_call, "model": getattr(llm, "model", None)}
 
 
 def _resolve(injectors) -> list[Injector]:
