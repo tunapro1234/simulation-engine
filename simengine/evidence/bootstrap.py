@@ -178,7 +178,7 @@ def hesapla(orn: Orneklem, girdiler: dict, metrikler: list, madde=None, agirlik=
             for m in toplu:
                 nokta[s][m.ad] = _guvenli(m, ym, pm, mm)
                 tekrar[s][m.ad] = np.full(orn.B_toplu, np.nan)
-        # büyük tabloda bazı toplu metrikler (Spearman; ikili AUC, macro-F1, kappa, dengeli doğruluk, ECE) satır
+        # büyük tabloda bazı toplu metrikler (Spearman; ikili AUC, AP, macro-F1, kappa, dengeli doğruluk, ECE) satır
         # açmadan hesaplanır: yeniden örnek = satır çoklukları (küme sayımı), sıralar önceden kodlanmış değerlerden
         # birikimli toplamla (eşitlerde ortalama sıra). Sonuç açılmış örneklemdeki özgün metrikle aynı (kayan nokta).
         hizli = {}
@@ -241,7 +241,7 @@ def _hizli_metrik(m, k):
     from . import metrik as M
     if m.fn is M._spearman:
         return lambda w_tum: _spearman_cokluk(k["sat"], k["ky"], k["ny"], k["kp"], k["np"], w_tum)
-    ikili = {M._auc: _auc_cokluk, M._f1_ikili: _f1_cokluk, M._kappa_ikili: _kappa_cokluk,
+    ikili = {M._auc: _auc_cokluk, M._ap: _ap_cokluk, M._f1_ikili: _f1_cokluk, M._kappa_ikili: _kappa_cokluk,
              M._dengeli_ikili: _dengeli_cokluk, M._ece_ikili: _ece_cokluk}
     fn = ikili.get(m.fn)
     if fn is None or not k["ikili"]:
@@ -322,6 +322,17 @@ def _auc_cokluk(k, w, ozgun):
     Wp = np.bincount(k["kp"], w, k["np"])
     r = (np.cumsum(Wp) - Wp + (Wp + 1) / 2)[k["kp"]]
     return float((w @ (r * k["yb"]) - w1 * (w1 + 1) / 2) / (w1 * w0))
+
+
+def _ap_cokluk(k, w, ozgun):
+    """Average precision (metrik._ap) with row multiplicities: one threshold per distinct score, descending."""
+    W1 = np.bincount(k["kp"], w * k["yb"], k["np"])[::-1]
+    W = np.bincount(k["kp"], w, k["np"])[::-1]
+    tp, n = np.cumsum(W1), np.cumsum(W)
+    if tp[-1] <= 0:
+        return np.nan                                                 # özgün: pozitif yok → nan
+    v = W > 0                                                         # örneklemde olmayan skor eşik değil
+    return float(np.sum(W1[v] / tp[-1] * tp[v] / n[v]))
 
 
 def _ece_cokluk(k, w, ozgun):

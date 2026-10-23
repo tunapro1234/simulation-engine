@@ -142,8 +142,10 @@ def _auc(y, p, madde=None):
 
 def _ap(y, p, madde=None):
     """Average precision: basamaklı PR eğrisi altı alan, eşit skorlar tek eşik (sklearn average_precision_score ile
-    aynı; bench bank._ap). Pozitif yoksa nan."""
+    aynı; bench bank._ap). Pozitif yoksa, boş ya da sonlu olmayan skorda nan (sklearn hata verir)."""
     y, p = np.asarray(y, float), np.asarray(p, float)
+    if not len(p) or not np.isfinite(p).all():
+        return np.nan
     o = np.argsort(-p, kind="mergesort")
     y, p = y[o], p[o]
     esik = np.r_[np.flatnonzero(np.diff(p)), len(p) - 1]   # her farklı skorun son satırı

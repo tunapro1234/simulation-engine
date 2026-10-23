@@ -49,6 +49,31 @@ class AveragePrecisionTest(unittest.TestCase):
     def test_no_positive_is_nan(self):
         self.assertTrue(np.isnan(metrik._ap(np.zeros(5), np.linspace(0, 1, 5))))
 
+    def test_empty_or_nonfinite_score_is_nan(self):
+        # sklearn raises on NaN scores (-> nan via _guvenli); _ap used to return a number (0.75 here)
+        self.assertTrue(np.isnan(metrik._ap(np.array([0, 1, 0, 1.]), np.array([.1, np.nan, .3, .4]))))
+        self.assertTrue(np.isnan(metrik._ap(np.array([]), np.array([]))))
+
+    def test_fast_bootstrap_path_matches_expanded_sample(self):
+        # bootstrap row multiplicities (> HIZLI_SIRA_ESIK rows) must give the AP of the expanded resample
+        from simengine.evidence import bootstrap
+        rng = np.random.default_rng(4)
+        m = metrik.Metrik("ap", "toplu", metrik._ap, 1)
+        for t in range(80):
+            n = int(rng.integers(3, 60))
+            y = (rng.random(n) < rng.random()).astype(float)
+            p = np.round(rng.random(n), int(t % 3)) if t % 7 else np.full(n, 0.4)
+            k = bootstrap._sira_kodu(y, p, None)
+            w = rng.integers(0, 3, n).astype(float)
+            w[0] += 1
+            self.assertIsNotNone(bootstrap._hizli_metrik(m, k))
+            ii = np.repeat(np.arange(n), w.astype(int))
+            a, b = bootstrap._hizli_metrik(m, k)(w), metrik._ap(y[ii], p[ii])
+            if np.isnan(b):
+                self.assertTrue(np.isnan(a))
+            else:
+                self.assertAlmostEqual(a, b, places=12)
+
     def test_in_binary_family(self):
         fam = {m.ad: m for m in metrik.aile("ikili")}
         self.assertIn("ap", fam)

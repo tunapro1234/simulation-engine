@@ -1129,9 +1129,10 @@ ev.summary(rep)["rate_error"]                                          # rows, o
 
 - **Average precision** (`metrik._ap`, binary family, higher is better): step-wise area under the precision-recall
   curve, tied scores form one threshold, equal to `sklearn.metrics.average_precision_score` (to 1e-12 on 20 random
-  tie-heavy cases); no positive -> NaN. It is an aggregate metric, so its CI comes from the `B_aggregate` loop; there
-  is no multiplicity-weighted fast path yet: on 38,000 rows × 8 methods (B_aggregate=200) evaluate took 54 s with
-  it vs 45 s without *(this port, nice 19)*.
+  tie-heavy cases); no positive, an empty sample or a non-finite score -> NaN. It is an aggregate metric, so its CI
+  comes from the `B_aggregate` loop; above `HIZLI_SIRA_ESIK` rows it takes the multiplicity-weighted fast path next
+  to AUC (`bootstrap._ap_cokluk`, equal to the expanded resample to 1e-12): 20,000 binary rows × 6 methods
+  (B=300, B_aggregate=100) evaluate 5.0 s -> 3.6 s, same CI to the last digit *(this port, nice 19)*.
 - **`rate_error_by=`** (binary / continuous): for every method and baseline column, total rate error
   |Σp − Σy| / n (= |mean_bias|) and n-weighted segment rate error Σ_s |Σ_s p − Σ_s y| / n (= `segment_bias` with
   `weight=None`), weighted by the `weight` column when present; lower is better. The CIs and the ours − other
