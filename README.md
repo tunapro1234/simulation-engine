@@ -13,7 +13,9 @@ sweeps. A persona injection zoo (`simengine.persona.inject`: 52 methods in 12 fa
 no-persona and persona-swap controls; literature effects only, not yet measured here) compares ways of putting a
 real person's data into the prompt. The measured lesson: pure persona panels
 rarely beat simple baselines. The LLM helps when there is no data, when it is stacked with a learner, and when it
-serves as a prior in small tests. Every number below has a source in [docs/RESULTS.md](docs/RESULTS.md). This is
+serves as a prior in small tests. Eight end-to-end hackathon recipes in `examples/recipes/` (ad A/B, adoption,
+cold start, pricing, purchase prediction, segment survey, site funnel, spread; guides in `docs/recipes/`) run offline
+by default and call Claude only with `--live --max-usd <cap>`. Every number below has a source in [docs/RESULTS.md](docs/RESULTS.md). This is
 prior work: declare it if you use it at a hackathon (open source, AGPL-3.0-or-later; cite the dated `v0.1.0` release).
 
 ---
