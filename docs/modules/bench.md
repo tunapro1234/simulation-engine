@@ -1,7 +1,8 @@
 # simengine.bench
 
-`simengine.bench` holds seven benchmark tasks built from public human-behaviour datasets, plus three economic-game
-tasks built on `simengine.games` (`econ_games_b01`, `ertan_wtp` and the optional `beebench_b01_prior`; see
+`simengine.bench` holds 23 benchmark tasks built from public human-behaviour datasets (seven described under
+[Tasks](#tasks), sixteen more under [More dataset tasks](#more-dataset-tasks), each of those with its own page in
+`docs/modules/bench/`), plus three economic-game tasks built on `simengine.games` (`econ_games_b01`, `ertan_wtp` and the optional `beebench_b01_prior`; see
 [Economic-game tasks](#economic-game-tasks)). Each dataset task loads local files, applies a fixed train/test split
 by time, survey wave or person, computes LLM-free baselines and scores any method with the metric and bootstrap used
 in the research code it was ported from. The output is the shared
@@ -23,15 +24,23 @@ A method is any of the following:
 - an object with `.predict(data)`;
 - the name of one of the task's baselines.
 
-Bench code never imports `simengine.methods` internals.
+Bench code does not import `simengine.methods` internals, except where a task wraps a methods module: `m5` takes
+its baselines from `simengine.methods.forecast`.
+
+`examples/bench_new_demo.py` writes tiny synthetic files in the Hillstrom and MovieLens layouts, scores one own method
+per task next to the baselines with `bench.run`, and shows a task without files as a `missing_data` row. It runs
+offline in a few seconds.
 
 ## Usage
 
 ```python
 from simengine import bench
 
-bench.list()        # ['bank_marketing', 'beebench_b01_prior', 'econ_games_b01', 'ertan_wtp', 'gss', 'open_ecommerce',
-                    #  'opinionqa_groups', 'simbench', 'twin2k500', 'upworthy']
+bench.list()        # 26 names: ['bank_marketing', 'beebench_b01_prior', 'choices13k', 'cpc18', 'criteo_uplift',
+                    #  'econ_games_b01', 'ertan_wtp', 'global_opinionqa', 'gss', 'hillstrom_uplift', 'instacart', 'm5',
+                    #  'movielens', 'open_ecommerce', 'opinionqa_groups', 'retailrocket_next', 'retailrocket_purchase',
+                    #  'simbench', 'socsci210', 'subpop_opinionqa', 'swissmetro', 'twin2k500', 'upworthy',
+                    #  'webshop_buy', 'webshop_next_action', 'x5_uplift']
 task = bench.get("upworthy", split="temporal")
 data = task.load("/path/to/catalogue")            # or export SIMENGINE_DATA=/path/to/catalogue
 frame = task.run(methods={"mine": lambda d: my_model(d.train, d.test)}, data=data)   # baselines + mine
@@ -86,6 +95,20 @@ the non-commercial and academic-only ones may not allow it.
 | Dominick's | ABM elasticity results (abm) | **academic research use only** | clear it with the organiser before using it at an event |
 | SEISMIC (SNAP) | retweet-curve results (abm) | **no licence stated**, research use; cite Zhao et al. 2015 | ask the source before prize use |
 | BeeBench b01 results (edsl-test) | `beebench_b01_prior` | same owner, no LICENSE file (all rights reserved by default) | internal reuse only; do not ship the CSV |
+| Instacart Online Grocery 2017 (Kaggle layout) | `instacart` | **non-commercial** (Instacart terms) | no data or per-row predictions in a submission; ask the organiser before prize use |
+| M5 Accuracy (Walmart, Kaggle / Univ. of Nicosia) | `m5` | Kaggle competition terms; the mirror carries no licence file | internal research use; no redistribution |
+| MovieLens-1M (GroupLens) | `movielens` | **research use only**, citation required | no redistribution or commercial use without permission |
+| RetailRocket events (Kaggle) | `retailrocket_purchase`, `retailrocket_next` | **CC BY-NC-SA 4.0** | **non-commercial**; share-alike |
+| choices13k (Peterson et al. 2021) | `choices13k` | no licence file in the source repository | evaluation only; do not redistribute rows |
+| CPC15 + CPC18 raw data (Zenodo 10.5281/zenodo.2571510) | `cpc18` | CC BY 4.0 | attribution |
+| SocSci210 (Hugging Face; TESS experiments) | `socsci210` | **no licence stated** on the dataset card (unverified) | ask the source before prize use |
+| SubPOP OpinionQA files (Pew ATP) | `subpop_opinionqa` | **research use** (Pew terms), no re-identification | check before prize or commercial use |
+| GlobalOpinionQA | `global_opinionqa` | **CC BY-NC-SA 4.0** | **non-commercial**; share-alike |
+| Swissmetro (EPFL TRANSP-OR, Biogeme example data) | `swissmetro` | no licence text on the download page | cite Bierlaire, Axhausen & Abay 2001 |
+| Hillstrom MineThatData e-mail challenge (2008) | `hillstrom_uplift` | no licence text at the source | |
+| Criteo Uplift v2.1 | `criteo_uplift` | **CC BY-NC-SA 4.0** | **non-commercial** |
+| X5 RetailHero | `x5_uplift` | no licence stated (competition data) | evaluation only; do not redistribute |
+| WebShop human trajectories (princeton-nlp/WebShop) | `webshop_next_action`, `webshop_buy` | MIT (repository licence) | attribution |
 
 Sources: each adapter's `meta["source"]` and the research data notes (`makro/arastirma/veri-ham.md`,
 `makro/abm/arastirma/literatur.md`, `web/PROTOKOL.md`). The dataset's own page is what binds.
@@ -327,6 +350,157 @@ The LLM persona arms in the source are not part of bench, because they need an L
 grid collapses: dev AUC is 0.5 and it keeps a single tree (source `bilgi.lgbm_ayar`). The plain logistic model is the
 baseline to beat. Brier punishes every model trained on the old base rate.
 
+## More dataset tasks
+
+Sixteen more dataset tasks, built as separate units. After the build, each unit was reviewed: the reviewer checked the
+code against its paper or source code, looked for leakage between train and test, fixed what was wrong and re-ran the
+numbers. Every number below is copied from the task's own page, where the command, the run date, the cost and every
+caveat are given. Unless marked as literature, a number was measured on the local copy of the data (22-23 Oct 2026).
+Cells are `value [95% CI]` on the test split.
+
+| task | kind | question | primary metric | best LLM-free baseline (test) | page |
+|---|---|---|---|---|---|
+| `instacart` | binary | which earlier products are in a shopper's next order | mean per-user F1 ↑ | lgbm 0.3811 [0.3797, 0.3825] | [instacart](bench/instacart.md) |
+| `m5` | continuous | 28-day unit sales of 30,490 Walmart series | WRMSSE ↓ | lightgbm 0.675 [0.653, 0.710] | [m5](bench/m5.md) |
+| `movielens` | continuous / binary | a user's held-out ratings; the next movie among 100 candidates | RMSE ↓ / hit@10 ↑ | item_knn 0.8825 [0.8744, 0.8899] / 0.6689 | [movielens](bench/movielens.md) |
+| `retailrocket_purchase` | binary | does a session end in a purchase | PR-AUC ↑ | lgbm 0.5727 [0.4936, 0.6402] | [retailrocket](bench/retailrocket.md) |
+| `retailrocket_next` | ranked lists | which item the visitor opens next | recall@20 ↑ | cooc 0.2973 [0.2906, 0.3038] | [retailrocket](bench/retailrocket.md) |
+| `choices13k` | continuous | B-rate in a choice between two gambles | MSE ↓ | gbdt 0.01224 (seed 0) | [risky_choice](bench/risky_choice.md) |
+| `cpc18` | continuous | B-rate per block of five trials, 60 competition tasks | MSE ↓ | beast_sd 0.00703 [0.00539, 0.00900] | [risky_choice](bench/risky_choice.md) |
+| `socsci210` | distribution | answer distribution per condition of 210 survey experiments | W1 ↓ | scale_marginal 0.1473 [0.1251, 0.1710] (study split) | [socsci](bench/socsci.md) |
+| `subpop_opinionqa` | distribution | Pew answer distribution of a US group | ordinal WD ↓ | nearest_group 0.0506 [0.0480, 0.0531] (setting B) | [opinion_dist](bench/opinion_dist.md) |
+| `global_opinionqa` | distribution | answer distribution of a country | TVD ↓ | nearest_group 0.1602 [0.1564, 0.1639] (setting B) | [opinion_dist](bench/opinion_dist.md) |
+| `swissmetro` | multiclass | train, Swissmetro or car in a stated-choice situation | loglik ↑ | gbdt −0.6752 [−0.7602, −0.5981] | [mode_choice](bench/mode_choice.md) |
+| `hillstrom_uplift` | binary (uplift) | who visits because of the e-mail | Qini ↑ | s_gbdt 0.049 [0.013, 0.083] (womens e-mail) | [uplift](bench/uplift.md) |
+| `criteo_uplift` | binary (uplift) | who visits because of ad targeting | Qini ↑ | see page (not re-run after review) | [uplift](bench/uplift.md) |
+| `x5_uplift` | binary (uplift) | who buys because of the SMS | Qini ↑ | t_logistic 0.012 [0.006, 0.019] | [uplift](bench/uplift.md) |
+| `webshop_next_action` | multiclass | a shopper's next of 10 web actions | loglik ↑ | logistic −0.933 [−0.952, −0.915] | [web_behaviour](bench/web_behaviour.md) |
+| `webshop_buy` | binary | does the shopper press Buy on this product page | AUC ↑ | logistic 0.808 [0.793, 0.823] | [web_behaviour](bench/web_behaviour.md) |
+
+All sixteen are registered when `simengine.bench` is imported. Module-level helpers (readers, metric functions,
+persona and prompt builders) stay in `simengine.bench.tasks.<module>`. Methods receive `data.test` with the truth
+columns in it, as in every bench task, and are trusted not to read them.
+
+### `instacart` (binary): next-basket reorders
+
+- **Data and split:** the Instacart 2017 files in the Kaggle layout. The 131,209 users whose last order is labelled
+  are kept. Each user's last order is the test label, with features from the prior orders. Train is the same users
+  one order earlier, with features from the orders before that.
+- **Metrics:** mean per-user F1 at threshold 0.2 (a user with no reorders scores 1 only for an empty prediction),
+  and pooled AUC, with a user bootstrap.
+- **Baselines:** user, product and user × product reorder rates, and LightGBM on 23 features. On test, user_product_rate
+  scores F1 0.3133 and lgbm 0.3811 (AUC 0.8362).
+- **Caveat:** not comparable with the Kaggle leaderboard (one fixed threshold, scored on labelled train orders).
+  Details: [bench/instacart.md](bench/instacart.md).
+
+### `m5` (continuous): M5 demand forecasting
+
+- **Data and split:** M5 daily sales, 30,490 item × store series. `split="evaluation"` (default) forecasts
+  d_1942-1969, the competition's final window. `validation` and `dev` use earlier windows.
+- **Metrics:** WRMSSE over the competition's 12 levels (primary) and bottom-level WMAPE. Any NaN prediction makes
+  every score NaN, so a method cannot drop hard series.
+- **Baselines:** naive, snaive, ses, ets_lite and lightgbm from `simengine.methods.forecast`. Evaluation window:
+  lightgbm 0.675, ets_lite 0.763, snaive 0.847, naive 1.752. naive and snaive match the organisers' benchmark values
+  to three decimals, on all 12 levels. Literature: the winner scored 0.520 and the top 50 at most 0.576.
+- **Caveat:** the LightGBM baseline takes about 7 minutes per split. Details: [bench/m5.md](bench/m5.md).
+
+### `movielens` (continuous or binary): MovieLens-1M ratings and next item
+
+- **Data and split:** per-user temporal split. `target="rating"` holds out the last 20% of each user's ratings.
+  `target="next_item"` ranks each user's last movie among 100 candidates. Same-second ties are ordered by a fixed
+  hash (`tie_key`), because ordering them by movie id leaked the target.
+- **Metrics:** RMSE (rating) and sampled hit@10 / NDCG@10 (next item), with a user bootstrap.
+  `full_ranking(data, scorer)` ranks against every unrated movie.
+- **Baselines:** global, user and item means, a bias model and Koren's item-kNN (rating: bias 0.9209, item_knn
+  0.8825), popularity, item-kNN and random (next item: popularity 0.4551, item_knn 0.6689 sampled; 0.0412 and 0.0805
+  on the full ranking). `persona_text(data, user)` writes a profile from train ratings only.
+- **Caveat:** each user's split is cut at that user's own time, so train holds other users' later ratings. Details:
+  [bench/movielens.md](bench/movielens.md).
+
+### `retailrocket_purchase` (binary) and `retailrocket_next` (ranked lists)
+
+- **Data and split:** the RetailRocket event log, cut into sessions at 30-minute gaps. Sessions are split by start
+  time: train before 2015-08-21, valid from then until 2015-09-04, test from 2015-09-04. Item statistics use only events before the cut.
+- **Purchase:** the session's events before its first transaction predict whether one follows. PR-AUC (primary), AUC
+  and log loss, with a visitor bootstrap. lgbm 0.5727, counts_logistic 0.3697, has_addtocart 0.2639.
+- **Next item:** each method returns one ranked item list per row. The metrics are recall@20 (primary), MRR@20 and
+  recall@20 on items new to the session: cooc 0.2973, transition 0.2923, last_viewed 0.1592.
+- **Caveat:** a positive session is cut before its purchase while a negative one is complete, so the session's length
+  carries signal. `lgbm_no_end_position` (0.5090) shows how much. Details: [bench/retailrocket.md](bench/retailrocket.md).
+
+### `choices13k` and `cpc18` (continuous): choices between gambles
+
+- **Data and split:** `choices13k` (Peterson et al. 2021) uses 9,831 problems and a 90/10 split by `Problem`. `cpc18`
+  (Plonsky et al.) trains on sets 1-7 and tests on the 60 competition tasks × 5 blocks. `split="cpc15"` gives the
+  CPC15 split.
+- **Metrics:** MSE (primary), completeness (Fudenberg et al.: 0 = no better than always 0.5, 1 = as good as the
+  sampling noise allows) and preference accuracy, with a problem bootstrap.
+- **Baselines:** BEAST and BEAST.sd (checked line by line against the organisers' code), PT, CPT, EV-logit, GBDT and
+  constants. cpc18: beast_sd 0.00703 against the published 100 × MSE 0.708, and beast 0.00790 with completeness
+  0.889 against the published 88.9%. choices13k seed 0: gbdt 0.01224, cpt 0.01968.
+- **Caveat:** choices13k numbers come from one split per seed, while the papers average 50 splits. Details:
+  [bench/risky_choice.md](bench/risky_choice.md).
+
+### `socsci210` (distribution): answers in 210 survey experiments
+
+- **Data and split:** SocSci210 (Kolluri et al. 2025). The unit is a (study, outcome, condition) cell, and a method
+  predicts its answer distribution. The paper's three splits are available: unseen studies (default), conditions or
+  outcomes.
+- **Metric:** W1 on the scale rescaled to [0, 1], averaged over a study's cells and then over studies, with a study
+  bootstrap.
+- **Baselines:** uniform, scale_marginal, tfidf_knn and pooled. Study split: scale_marginal 0.1473, uniform 0.1564. On
+  the condition split, pooled (0.0449) beats the paper's best model, so compare against pooled there.
+- **Caveat:** Empirical Best (0.013-0.016 here, 0.086-0.125 in the paper) and Uniform Guess (0.181 against 0.203)
+  do not match the paper, and the cause is unknown. Details: [bench/socsci.md](bench/socsci.md).
+
+### `subpop_opinionqa` and `global_opinionqa` (distribution): group answer distributions
+
+- **Data and split:** one row per (question, group). `subpop_opinionqa` uses SubPOP's OpinionQA file with 22 US
+  groups (or 61); `global_opinionqa` uses GlobalOpinionQA, with one row per country. Questions are split 50/50 by a
+  fixed hash. Setting B (default) also shows other groups' answers to the same question, but only groups outside the
+  target's block (attribute or country).
+- **Metrics:** SubPOP's ordinal WD (subpop primary), TVD (global primary) and 1 − JS distance, with a question
+  bootstrap.
+- **Baselines:** uniform, overall and nearest_group. subpop test: nearest_group 0.0506, overall 0.0646, uniform 0.1815
+  (SubPOP Table 1 gives 0.178 for uniform; our full-set uniform is 0.1775). global test: nearest_group 0.1602, overall
+  0.1787 (TVD).
+- **Caveat:** with `peers="all"`, the target can be recovered from Overall by subtraction. Sibling questions from the
+  same Pew battery also fall on both sides of the split. Details: [bench/opinion_dist.md](bench/opinion_dist.md).
+
+### `swissmetro` (multiclass): stated mode choice
+
+- **Data and split:** the Biogeme Swissmetro survey (train, Swissmetro or car; nine situations per respondent).
+  `split="respondent"` (default) holds out 20% of respondents. `split="situation"` holds out each respondent's last
+  two situations.
+- **Metrics:** log-likelihood per choice (primary), accuracy, ρ² and share TVD, with a respondent bootstrap.
+- **Baselines:** uniform, shares, the Biogeme b01 logit, the b09 nested logit (coefficients and robust SEs reproduce
+  Biogeme's), mnl_rich and gbdt. Respondent split: gbdt −0.6752, mnl_rich −0.6801, mnl −0.7708. `persona_text`,
+  `prompts` and `llm_method` score an LLM on the same rows.
+- **Caveat:** the test set has only 150 respondents, so seed-to-seed spread (0.03-0.05 nats) is as large as the gaps
+  between neighbouring baselines. Details: [bench/mode_choice.md](bench/mode_choice.md).
+
+### `hillstrom_uplift`, `criteo_uplift` and `x5_uplift` (binary uplift)
+
+- **Data and split:** three randomised experiments (an e-mail, ad targeting and an SMS), split 80/20 stratified by
+  treatment and outcome. A method returns one uplift score per test row; only the order matters.
+- **Metrics:** normalised Qini (primary), AUUC and uplift@30, with scikit-uplift's definitions and a row bootstrap.
+- **Baselines:** random, t_logistic, t_gbdt, class_transform and s_gbdt. Hillstrom womens e-mail: s_gbdt 0.049 against
+  random 0.024. X5: t_logistic 0.012. Many intervals include random.
+- **Caveat:** in X5, first redemption dates after 2019-03-18 are masked, because the SMS changed them. Criteo numbers
+  were not re-run after the review. Details: [bench/uplift.md](bench/uplift.md).
+
+### `webshop_next_action` (multiclass) and `webshop_buy` (binary): human web shopping
+
+- **Data and split:** the WebShop human trajectories (Yao et al. 2022), 1,643 sessions. They are split by MTurk batch
+  date (default) or at random by session.
+- **Metrics:** next action: log-likelihood (primary), accuracy and share TVD. Buy: AUC (primary), log loss and Brier.
+  Both use a session bootstrap.
+- **Baselines:** uniform, frequency, Markov chains, logistic, and a chain fitted on UXAgent LLM-agent traces.
+  Next action: logistic −0.933 (accuracy 0.641), markov2 −1.003, uxagent_markov −1.967. Buy: logistic AUC 0.808.
+  `llm_method` and `compare_agents` cover the LLM arm.
+- **Caveat:** the batch test sessions come from 8 workers, and worker-clustered intervals are about three times wider
+  than the session intervals reported. Details: [bench/web_behaviour.md](bench/web_behaviour.md).
+
 ## Economic-game tasks
 
 Three tasks score `simengine.games` output against published human numbers. `econ_games_b01` and `ertan_wtp` need
@@ -468,8 +642,14 @@ frame = wtp.run({"soc": W.society_method(llm, personas, seeds=(0, 1, 2))})   # a
 
 ## Tests
 
-Run `python -m unittest discover -s tests -t . -p 'test_bench*.py'`. There are 46 tests, taking about 11 s on the
-research machine.
+Run `python -m unittest discover -s tests -t . -p 'test_bench*.py'`. There are 251 tests in 18 files, taking about
+30 s; 12 skip without data (`$SIMENGINE_DATA`) or an optional library. Each task under
+[More dataset tasks](#more-dataset-tasks) has its own `test_bench_<unit>.py` with synthetic files in its layout and a
+real-data check that runs when `$SIMENGINE_DATA` is set; its page lists what the file covers.
+
+- `test_bench_registry.py` checks that all sixteen are registered and exported, refuse unknown options and missing
+  files, that `run(baselines="name")` keeps that one baseline, that this page links every unit page, and that
+  `examples/bench_new_demo.py` runs.
 
 - `test_bench_adapters.py` writes tiny synthetic files in each task's layout and checks loading, split invariants,
   baselines, frame shape and metrics for all seven adapters, including the Upworthy raw-CSV fallback.
@@ -503,4 +683,8 @@ research machine.
 - `ertan_wtp` scores criteria, not raw Ertan statistics. Its CI is a criterion bootstrap, not a seed bootstrap. The
   `final_vote_punish_low` human rate is 0.875, so a real human group would average below 1.0 on that row.
 - `beebench_b01_prior` treats the prior arms as baselines in `bench.run` (`is_baseline` is true).
+- The sixteen tasks under [More dataset tasks](#more-dataset-tasks) keep their open points on their own pages
+  (Limitations). Common ones: `movielens` and `instacart` cut each user at their own time, not at one calendar date;
+  several data sets are non-commercial or carry no licence (see the licence table); `data.test` holds the truth
+  columns, so methods are trusted not to read them.
 - No dataset task runs LLM methods itself. `econ_games_b01` calls an LLM only when you pass `llm=`. LLM arms come in as user methods, for example from `simengine.methods`.
