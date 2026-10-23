@@ -10,10 +10,11 @@ Taban = etiketsiz tabanların (tur baseline) birincil metrikte en iyisi; bedel s
 çarpanı, bizim yöntem döngüselse (çarpanı yok) ham kolun; ikisi de yoksa "ölçülmedi". Karttaki en yüksek çarpan
 başka bir yöntemdeyse (ör. etiketsiz taban) bedel notunda adıyla yazılır ama rozete dayanak olmaz (KARŞIT-2 K2-28:
 eskiden en yüksek çarpan seçiliyordu, taban kendini onaylıyordu ve en iyiyi seçmek kazananın lanetine açıktı).
-Rozet "yuksek" için: bizim − taban GA'sı sıfırın üstünde ve fark ≥ ANLAMLI_FARK (ya da min_effect); bedel bizim yöntemden geliyorsa
-ayrıca alt sınır ≥ ESIK_BEDEL ve tabanın kendi bedel alt sınırının üstünde. Fark yalnız taban_var=False iken
-yoksa (taban yok ya da taban insanın kendisi, ör. Upworthy insan@100) bizim yöntemin bedeliyle; fark GA'sız ya da taban
-varken eşleşik fark yoksa "kararsiz". Bizim − taban GA'sı tümüyle sıfırın altındaysa her durumda "kararsiz".
+Rozet "yuksek" için: bizim − taban GA'sı sıfırın üstünde ve fark ≥ ANLAMLI_FARK (ya da min_effect); bedel bizim
+yöntemden geliyorsa ayrıca alt sınır ≥ ESIK_BEDEL ve tabanın kendi bedel alt sınırının üstünde. Fark yalnız
+taban_var=False iken yoksa (taban yok ya da taban insanın kendisi, ör. Upworthy insan@100) bizim yöntemin
+bedeliyle; fark GA'sız ya da taban varken eşleşik fark yoksa "kararsiz". Bizim − taban GA'sı tümüyle sıfırın
+altındaysa her durumda "kararsiz".
 Rozet hiçbir yoldan "yuksek" olmaz: fark GA'sı sıfır genişlikteyse (bootstrap dejenere) ya da küme sayısı (ab
 görevinde test sayısı) AZ_KUME'den azsa; "kararsiz"a iner, gerekçe yazılır.
 "En güçlü taban belirsiz" denetimi uyarıdaysa (ilk iki taban GA içinde) rozet, eşit tabanların en kötüsüne karşı

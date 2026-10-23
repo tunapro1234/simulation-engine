@@ -150,9 +150,9 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
     """Girdiyi doğrula, görev tipini bul, vektör sütunlarını çöz. df.attrs["kume_sutun"]: bootstrap küme sütunu."""
     if "gercek" not in df.columns:
         raise ValueError("'truth' column is required (alias: gercek)")
-    kume_sutun = df.attrs.get("kume_sutun")
+    kume_sutun = df.attrs.get("kume_sutun")    # api.evaluate doğrular; sütunsuz alt çerçevede yok sayılır
     if kume_sutun is not None and kume_sutun not in df.columns:
-        raise ValueError(f"cluster column {kume_sutun!r} is not a column of the frame")
+        kume_sutun = None
     tsut = [c for c in df.columns if c.startswith(ON_EK)]
     if yontemler:
         tsut = [ON_EK + y for y in yontemler]

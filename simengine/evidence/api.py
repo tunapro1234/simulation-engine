@@ -1480,8 +1480,8 @@ _PHRASES_EN = [
      r"Difference to the baseline \1, CI [\2, \3] above zero."),
     (r"Fark anlamlı ama küçük \((\S+), GA \[(\S+); (\S+)\]\); en güçlü basit taban neredeyse aynı yerde"
      r"(?: \(en küçük etki eşiği (\S+)\))?\.",
-     lambda m: f"Significant but small difference ({m.group(1)}, CI [{m.group(2)}, {m.group(3)}]); the strongest simple "
-               "baseline is almost level" + (f" (minimum effect {m.group(4)})" if m.group(4) else "") + "."),
+     lambda m: f"Significant but small difference ({m.group(1)}, CI [{m.group(2)}, {m.group(3)}]); the strongest "
+               "simple baseline is almost level" + (f" (minimum effect {m.group(4)})" if m.group(4) else "") + "."),
     (r" En küçük etki eşiği \(min_effect\) (\S+)\.", r" Minimum effect (min_effect) \1."),
     (r"Tabana göre fark (\S+), GA \[(\S+); (\S+)\] sıfırı içeriyor\.",
      r"Difference to the baseline \1, CI [\2, \3] includes zero."),
@@ -2233,8 +2233,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         out.append("")
         out.append("Flags: " + ", ".join(_md(_en_text(e)) if en else _dot(e, lang) for e in k["etiketler"]))
     meta = (f"Task: {s['task'] or '—'} · primary metric: {s['primary_metric'] or '—'}"
-            + (f" (`{s['primary_metric_internal']}`)" if s['primary_metric_internal'] else "") + f" · clusters: {k.get('n')}"
-            + (f" (cluster=`{s['cluster']}`)" if s.get("cluster_override") else ""))
+            + (f" (`{s['primary_metric_internal']}`)" if s['primary_metric_internal'] else "")
+            + f" · clusters: {k.get('n')}" + (f" (cluster=`{s['cluster']}`)" if s.get("cluster_override") else ""))
     if k.get("kaynak"):
         meta += f" · source: {_md(k.get('kaynak'))}"
     if s.get("aggregate"):
@@ -2561,7 +2561,8 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
         aggregate_by= the column must be constant within each group. On a report: the report's own bootstrap is
         reused (its block_col is returned); a different block_col raises ValueError.
     Returns {"metric", "a", "b", "value_a", "value_b", "diff", "lo", "hi", "p", "n" (clusters), "cluster",
-    "block_col", "n_blocks", "a_better", "B", "source"}. diff is raw a − b: for lower-is-better metrics a negative diff favours a."""
+    "block_col", "n_blocks", "a_better", "B", "source"}. diff is raw a − b: for lower-is-better metrics a negative
+    diff favours a."""
     if isinstance(frame_or_report, dict):
         return _paired_from_report(frame_or_report, a, b, metric, block_col)
     d = to_internal(frame_or_report)
