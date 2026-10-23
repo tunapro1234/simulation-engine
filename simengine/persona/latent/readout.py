@@ -14,6 +14,7 @@ token. An `Injection` adds a per-cell residual vector or replaces soft placehold
 from __future__ import annotations
 
 import copy
+import weakref
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -79,10 +80,15 @@ def _pad_id(tok) -> int:
 
 def _assign_recurrent(layer):
     """Make a linear-attention cache layer assign its new recurrent state instead of copying it in place (an in-place
-    copy into a tensor autograd still needs breaks the backward pass of the injectors)."""
+    copy into a tensor autograd still needs breaks the backward pass of the injectors). The method holds a weak
+    reference: a closure over `layer` made a layer -> method -> layer cycle, so every cache copy (and its GPU states)
+    lived until a gc pass; on Qwen3.8 that filled the 96 GB card (23 Eki)."""
+    ref = weakref.ref(layer)
+
     def update_recurrent_state(recurrent_states, state_idx: int = 0, **kwargs):
-        layer.recurrent_states[state_idx] = recurrent_states
-        layer.is_recurrent_states_initialized[state_idx] = True
+        lay = ref()
+        lay.recurrent_states[state_idx] = recurrent_states
+        lay.is_recurrent_states_initialized[state_idx] = True
         return recurrent_states
     layer.update_recurrent_state = update_recurrent_state
     layer.record_past = True                       # conv states are then assigned too, not copied in place

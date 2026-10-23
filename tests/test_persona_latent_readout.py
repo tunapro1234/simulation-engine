@@ -71,6 +71,24 @@ class TestCachedReadout(unittest.TestCase):
             b = readout.suffix_logits(ld, cache, mask, [0, 2], suf)       # same cache reused
         self.assertEqual(float((a - b).abs().max()), 0.0)
 
+    def test_cache_copy_freed_without_gc(self):
+        # 23 Eki: the qwen3_5 copy's update_recurrent_state closed over its layer (a cycle), copies piled up on the
+        # GPU until a gc pass and Qwen3.8 runs went out of memory
+        import gc
+        import weakref
+        import torch
+        from simengine.persona.latent import readout
+        ld = tiny("qwen3_5")
+        cache, mask, _ = readout.prefix_forward(ld, readout._ids(ld.tok, PRE))
+        gc.disable()
+        try:
+            c = readout.select_cache(cache, torch.tensor([0, 1]))
+            refs = [weakref.ref(lay) for lay in c.layers]
+            del c
+            self.assertTrue(all(r() is None for r in refs))
+        finally:
+            gc.enable()
+
     def test_expand_cache(self):
         from simengine.persona.latent import readout
         ld = tiny("gemma4")
