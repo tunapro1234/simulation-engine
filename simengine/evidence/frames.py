@@ -1,4 +1,4 @@
-"""Evidence frame helpers: repeated-split summary, cell-count frame, wide-to-long bridge, segment bias.
+"""Evidence frame helpers: repeated-split summary, cell counts, wide-to-long, segment bias, pooled dists, choices.
 
     import simengine.evidence as ev
     reps = [ev.evaluate(make_split(s), ours="t1", multiplier=False) for s in range(100)]
@@ -16,13 +16,22 @@
     sb = ev.segment_bias(frame, "region", ["ours", "base"])   # n-weighted |mean pred - mean truth| per segment
     sb["diff"]                                                 # paired cluster bootstrap ours - base
 
+    nat = ev.pooled_distribution(cells, weight_col="n", by="item")   # item x segment dists -> n-weighted national
+    ev.evaluate(nat, ours="llm", task="distribution", primary="one_minus_tvd")
+
+    cf = ev.choice_frame(long, "task", "alt", "chosen", ["pred_mnl"])   # (task, alternative) rows -> one per task
+    ev.evaluate(cf, ours="mnl", task="multiclass", primary="logloss", classes=cf.attrs["classes"])
+
 Why these exist (TALP rehearsals): a dev card tied to one random split hid split-to-split spread (D11 #5d, D12 #7);
 per-person argmax beat the baseline on accuracy but lost on the cell-count WMAPE, and the count frame was built by
 hand (D9 #5 #6); a sealed wide multi-target file had to be melted and scaled by the training sd by hand (D12 #20);
-the brief's segment error had no function and its single-arm bootstrap CI excluded the point (D12 #3 #21).
+the brief's segment error had no function and its single-arm bootstrap CI excluded the point (D12 #3 #21);
+the national TVD was written by hand because aggregate_by averages groups instead of n-weighting them (D6 #3a);
+the long (task, alternative) choice table had no converter to a multiclass frame (D8 #5).
 """
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from dataclasses import dataclass, field
@@ -32,7 +41,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from ..types import PRED_PREFIX, normalize_frame
+from ..types import COLUMN_ALIASES, PRED_PREFIX, normalize_frame
 from . import bootstrap as _boot
 from . import metrik as _metrik
 from .api import (FORECAST_TASKS, METRIC_TO_ENGLISH, _method, _metric, _task, prepare)
@@ -643,3 +652,163 @@ def segment_bias(frame: pd.DataFrame, seg: str | Sequence[str], arms: Sequence[s
     return {"metric": "segment_bias_" + ("equal" if equal else "n_weighted" if weight is None else "weighted"),
             "arms": res, "diff": diffs, "segments": tab, "cluster": clu_name or "row", "n_clusters": C, "B": B,
             "dropped": dropped, "note": ABS_CI_NOTE}
+
+
+# ------------------------------------------------------------------ pooled_distribution
+def _dist_vec(v, where: str) -> np.ndarray:
+    if isinstance(v, str):
+        v = json.loads(v)
+    if v is None or isinstance(v, dict) or np.isscalar(v):
+        raise ValueError(f"pooled_distribution: {where} is not a distribution vector (list / array / JSON list): {v!r}")
+    x = np.asarray(v, dtype=float).ravel()
+    if not np.isfinite(x).all() or (x < 0).any() or x.sum() <= 0:
+        raise ValueError(f"pooled_distribution: {where} needs finite shares >= 0 with a positive sum, got {x.tolist()}")
+    return x / x.sum()
+
+
+def _alias(frame: pd.DataFrame, name: str) -> str:
+    """Column name in the frame, accepting the Turkish alias of an English EvalFrame name (and back)."""
+    if name in frame.columns:
+        return name
+    for c in ({v: k for k, v in COLUMN_ALIASES.items()}.get(name), COLUMN_ALIASES.get(name)):
+        if c is not None and c in frame.columns:
+            return c
+    raise ValueError(f"column {name!r} not in the frame")
+
+
+def pooled_distribution(frame: pd.DataFrame, weight_col: str = "n", by: str | Sequence[str] = "item") -> pd.DataFrame:
+    """Segment-level distribution rows (one row per item x segment) -> one national row per item: the truth and
+    every pred_ column become sum_s n_s p_s / sum_s n_s, each segment vector normalised to sum 1 first.
+
+    weight_col: the segment size column (e.g. respondents); >= 0, finite, positive total per item.
+    by: the item key (str or list); a split column is added to the key when present (train and test cells are
+    never pooled together). A retest column with vectors is pooled too. Vectors of one item must have the same
+    length in every row and column; a missing cell raises. Output columns: by, [split], truth, pred_*, [retest],
+    weight_col (summed), n_cells. Lists are returned (JSON-ready).
+
+        nat = ev.pooled_distribution(cells, weight_col="n", by="item")
+        ev.evaluate(nat, ours="llm", task="distribution", primary="one_minus_tvd")    # national 1 - TVD
+
+    evaluate(aggregate_by=) averages groups with equal weight and is for binary / continuous tasks; this is the
+    n-weighted national distribution of TALP D6 (#3a: national TVD and net approval were written by hand).
+    """
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise ValueError("pooled_distribution: frame must be a non-empty DataFrame")
+    keys = [_alias(frame, b) for b in ([by] if isinstance(by, str) else list(by))]
+    for s in ("split", "bolum"):
+        if s in frame.columns and s not in keys:
+            keys.append(s)
+    wcol = _alias(frame, weight_col)
+    w = pd.to_numeric(frame[wcol], errors="coerce").to_numpy(float)
+    if not np.isfinite(w).all() or (w < 0).any():
+        raise ValueError(f"pooled_distribution: weights {weight_col!r} must be finite and >= 0")
+    tcol = _alias(frame, "truth")
+    cols = [tcol] + [c for c in frame.columns if isinstance(c, str) and c.startswith((PRED_PREFIX, ON_EK))]
+    for r in ("retest", "tekrar"):
+        if r in frame.columns and frame[r].map(lambda v: isinstance(v, (list, tuple, np.ndarray, str))).all():
+            cols.append(r)
+    if len(cols) < 2:
+        raise ValueError("pooled_distribution: at least one pred_<method> column is required")
+    rows = []
+    for key, idx in frame.groupby(keys, sort=False, dropna=False).indices.items():
+        key = key if isinstance(key, tuple) else (key,)
+        name = ", ".join(f"{k}={v!r}" for k, v in zip(keys, key))
+        ww = w[idx]
+        if ww.sum() <= 0:
+            raise ValueError(f"pooled_distribution: weights of {name} sum to 0")
+        row = dict(zip(keys, key))
+        L = None
+        for c in cols:
+            vs = [_dist_vec(frame[c].iat[i], f"{c} at {name}") for i in idx]
+            lens = {len(v) for v in vs} | ({L} if L is not None else set())
+            if len(lens) != 1:
+                raise ValueError(f"pooled_distribution: vectors of {name} do not align (lengths {sorted(lens)} "
+                                 f"across rows or columns; column {c!r})")
+            L = len(vs[0])
+            row[c] = (ww @ np.vstack(vs) / ww.sum()).tolist()
+        row[wcol] = float(ww.sum())
+        row["n_cells"] = int(len(idx))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------------ choice_frame
+def _softmax(u: np.ndarray) -> np.ndarray:
+    e = np.exp(u - u.max())
+    return e / e.sum()
+
+
+def choice_frame(long_df: pd.DataFrame, task_col: str, alt_col: str, chosen_col: str,
+                 pred_cols: str | Sequence[str] | Mapping[str, str], *, scores: str = "prob") -> pd.DataFrame:
+    """Long choice table (one row per task x alternative, a 0/1 chosen flag, one score column per method) -> one
+    row per task: truth = the chosen alternative, pred_<method> = probability vector over all alternatives, for
+    evaluate(task="multiclass", primary="logloss").
+
+    pred_cols: column name(s) (a pred_ prefix is dropped from the method name) or {method: column}.
+    scores: "prob" (>= 0, renormalised within the task) or "utility" (softmax within the task, e.g. logit utilities).
+    Classes = every alternative in the table, sorted as text (the order evaluate uses), in `frame.attrs["classes"]`;
+    an alternative missing from a task gets probability 0 there. Pass the classes on, or an alternative that is never
+    chosen drops out of the class set: ev.evaluate(cf, task="multiclass", primary="logloss",
+    classes=cf.attrs["classes"]). Columns constant within every task (person id, split, ...) are carried over.
+    Exactly one chosen alternative per task, unique (task, alternative) pairs and complete scores are required.
+
+        cf = ev.choice_frame(long, "task", "alt", "chosen", ["pred_llm", "pred_mnl"], scores="prob")
+        ev.evaluate(cf, ours="llm", task="multiclass", primary="logloss", classes=cf.attrs["classes"])
+
+    Why: TALP D8 #5, the long (task, alternative) format had no converter.
+    """
+    if scores not in ("prob", "utility"):
+        raise ValueError("choice_frame: scores must be 'prob' or 'utility'")
+    for c in (task_col, alt_col, chosen_col):
+        if c not in long_df.columns:
+            raise ValueError(f"choice_frame: column {c!r} not in the table")
+    if isinstance(pred_cols, Mapping):
+        arms = {str(k): v for k, v in pred_cols.items()}
+    else:
+        arms = {(c[len(PRED_PREFIX):] if c.startswith(PRED_PREFIX) else c): c
+                for c in ([pred_cols] if isinstance(pred_cols, str) else list(pred_cols))}
+    missing = [c for c in arms.values() if c not in long_df.columns]
+    if missing or not arms:
+        raise ValueError(f"choice_frame: prediction columns missing: {missing or 'none given'}")
+    d = long_df.reset_index(drop=True)
+    dup = d.duplicated([task_col, alt_col])
+    if dup.any():
+        raise ValueError(f"choice_frame: duplicate (task, alternative) rows, e.g. "
+                         f"{d.loc[dup, [task_col, alt_col]].iloc[0].tolist()}")
+    ch = pd.to_numeric(d[chosen_col].astype(object).map(lambda v: float(v) if isinstance(v, (bool, np.bool_)) else v),
+                       errors="coerce")
+    if ch.isna().any() or not ch.isin([0, 1]).all():
+        raise ValueError(f"choice_frame: {chosen_col!r} must be 0/1 (or bool)")
+    per = ch.groupby(d[task_col], sort=False).sum()
+    bad = per[per != 1]
+    if len(bad):
+        raise ValueError(f"choice_frame: {len(bad)} task(s) without exactly one chosen alternative, e.g. "
+                         f"{bad.index[0]!r} ({int(bad.iloc[0])} chosen)")
+    classes = sorted(pd.unique(d[alt_col]).tolist(), key=str)
+    pos = {a: i for i, a in enumerate(classes)}
+    skip = {task_col, alt_col, chosen_col, *arms.values()}
+    other = [c for c in d.columns if c not in skip]
+    const = [c for c in other if (d.groupby(task_col, sort=False)[c].nunique(dropna=False) <= 1).all()]
+    rows = []
+    for t, idx in d.groupby(task_col, sort=False).indices.items():
+        g = d.iloc[idx]
+        row = {task_col: t, **{c: g[c].iat[0] for c in const}}
+        row["truth"] = g[alt_col].to_numpy()[ch.to_numpy()[idx] == 1][0]
+        at = np.array([pos[a] for a in g[alt_col]])
+        for m, c in arms.items():
+            s = pd.to_numeric(g[c], errors="coerce").to_numpy(float)
+            if not np.isfinite(s).all():
+                raise ValueError(f"choice_frame: {c!r} has a missing or non-finite score in task {t!r}")
+            if scores == "prob":
+                if (s < 0).any() or s.sum() <= 0:
+                    raise ValueError(f"choice_frame: {c!r} needs probabilities >= 0 with a positive sum in task {t!r}")
+                p = s / s.sum()
+            else:
+                p = _softmax(s)
+            v = np.zeros(len(classes))
+            v[at] = p
+            row[PRED_PREFIX + m] = v
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    out.attrs["classes"] = classes
+    return out

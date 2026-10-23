@@ -13,6 +13,9 @@
     ev.counts_frame(people, {"m": "p_vec"}, by=["area"], probs=True, classes=cls)   # per-person -> cell counts (WMAPE)
     ev.long_frame(sealed_wide, truth_wide, "id", scale="sd_train", train=train)     # wide multi-target -> long (zMAE)
     ev.segment_bias(frame, "region", ["ours", "base"])                      # n-weighted segment error + paired CI
+    ev.dry_run(frame, title="T2", ours="t2")                                # evaluate on masked truth, stamped DRY RUN
+    ev.pooled_distribution(cells, weight_col="n", by="item")                # segment dists -> n-weighted national
+    ev.choice_frame(long, "task", "alt", "chosen", ["pred_llm"])            # (task, alternative) rows -> multiclass
 
 Report schema: docs/modules/evidence.md (keys keep the original Turkish names; `summary(report)` gives an
 English flat view). Internals are verbatim ports; the English API lives in `api.py`.
@@ -26,7 +29,9 @@ from .api import (MULTIPLIER_MAX_ROWS, audit_prompts, chain_paths, correlation_a
                   shuffle_control, split_audit, summary, to_internal, tvd, verify, verify_chain, wasserstein_ordinal,
                   worth_humans, worth_theory_curve)
 from .ab import ab_memorization, ab_memorization_items, ab_pairs_frame
-from .frames import SplitSummary, counts_frame, long_frame, segment_bias, split_summary
+from .dry_run import DRY_RUN_STAMP, dry_run, mask_truth
+from .frames import (SplitSummary, choice_frame, counts_frame, long_frame, pooled_distribution, segment_bias,
+                     split_summary)
 from .extras import (coefficient_recovery, completion_from_frame, completion_row, published_findings,
                      section_html, section_markdown, stylized_facts_score, variance_ratio)
 from .persons import DIST_METRICS, evaluate_distribution_persons
@@ -47,5 +52,6 @@ __all__ = [
     "why_match", "why_summary", "tfidf_encoder", "TfidfEncoder", "evaluate_distribution_persons", "DIST_METRICS",
     "ab_pairs_frame", "ab_memorization_items", "ab_memorization",
     "split_summary", "SplitSummary", "counts_frame", "long_frame", "segment_bias",
+    "dry_run", "mask_truth", "DRY_RUN_STAMP", "pooled_distribution", "choice_frame",
     "TASK_TO_INTERNAL", "TASK_TO_ENGLISH", "METRIC_TO_INTERNAL", "METRIC_TO_ENGLISH", "BADGE_TO_ENGLISH", "VERSION", "MULTIPLIER_MAX_ROWS",
 ]
