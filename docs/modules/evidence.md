@@ -1152,3 +1152,17 @@ ev.summary(rep)["rate_error"]                                          # rows, o
   warns. Per-item constant predictions give a warning row with the item count and `report["sira_tanimsiz"]`
   (constant / NaN rank-metric items per method). With `ours_uses_llm=False` the `raw=` arm keeps the memorization and
   contamination audits.
+
+## CLI block bootstrap, point pairs, declared split; seal source name (D4 #8, D6 #9)
+
+- **`simengine evaluate --block-col / --point-pairs / --split`** pass `block_col=`, `point_pairs=` and `split=` to
+  `evaluate`. `--point-pairs` is `auto` or `MEAN:MEDIAN` pairs, comma separated (`ours:ours_median,b:b_median`;
+  with or without `pred_`); a malformed value is a one-line error, exit 2. `--split` accepts the `split=` labels
+  (`test`, `holdout`, `deger`, `degerlendirme`, `oof`, `cv`, `time`).
+  ```
+  simengine evaluate bt.csv --ours lgbm --task forecast --primary mae --block-col origin --point-pairs auto --split time
+  ```
+- **Seal source is a file name.** The chain record's `"kaynak"` holds only the file name (`preds.csv`), so a committed
+  registry carries no machine path. `onkayit.muhurle(..., kaynak_yolu="tam")` (alias `"full"`; CLI
+  `muhurle --tam-yol`) keeps the path as given. Older records with full paths still verify (`zincir_dogrula`,
+  `dogrula`) and new records append to them; readers (selection-bias text match, card) use the name only.

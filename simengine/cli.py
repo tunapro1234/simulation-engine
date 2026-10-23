@@ -6,6 +6,8 @@
         --noise-ceiling variance_components --memorization audit.json --blind-col ours_blind --compare P1:L1 --compare P2
     simengine evaluate bt.csv --ours lgbm --task forecast --primary wmape --aggregate-by store_dept_week \
         --aggregate sum --ci basic --n-configs 6 --unlabeled-baselines mean4 --cutoff 2016-01-01    # forecast mode
+    simengine evaluate bt.csv --ours lgbm --task forecast --primary mae --block-col origin --point-pairs auto \
+        --split time                                   # two-way block bootstrap, mean/median rows, declared split
     simengine seal preds.csv "test predictions" --registry runs/.onkayit --no-copy   # hash-chain record only
     simengine card runs/card1/report.json -o card.md                           # Markdown (or *.json card dict)
     simengine bench list
@@ -191,6 +193,22 @@ def _compare_arg(spec: str) -> tuple:
     return (a, b) if label is None else (a, b, label)
 
 
+def _point_pairs_arg(spec: str | None):
+    """--point-pairs 'auto' | 'MEAN:MEDIAN[,MEAN:MEDIAN...]' -> evaluate(point_pairs=) value (None when not given)."""
+    if spec is None:
+        return None
+    if spec.strip() == "auto":
+        return "auto"
+    pairs = []
+    for part in (x.strip() for x in spec.split(",")):
+        mean, sep, median = (y.strip() for y in part.partition(":"))
+        if not (sep and mean and median and ":" not in median):
+            raise ValueError(f"--point-pairs {spec!r}: give auto or MEAN:MEDIAN pairs, comma separated "
+                             "(e.g. ours:ours_median)")
+        pairs.append((mean, median))
+    return pairs
+
+
 def cmd_evaluate(a) -> int:
     from . import evidence as ev
     from .evidence.onkayit import ZINCIR_ADI
@@ -209,6 +227,7 @@ def cmd_evaluate(a) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    point_pairs = _point_pairs_arg(a.point_pairs)
     df = _read_table(a.table)
     _check_methods(df, [("--ours", a.ours), ("--raw", a.raw)]
                    + [("--methods", m) for m in _csv_list(a.methods) or []])
@@ -240,7 +259,8 @@ def cmd_evaluate(a) -> int:
                          ceiling_label=a.ceiling_label, aggregate_by=a.aggregate_by,
                          prereg=a.prereg, multiplier=not a.no_multiplier, memorization=a.memorization,
                          offset_col=a.offset_col, noise_ceiling=a.noise_ceiling, blind_col=a.blind_col,
-                         compare=compare, ours_uses_llm=False if a.ours_no_llm else None, **extra)
+                         compare=compare, ours_uses_llm=False if a.ours_no_llm else None, block_col=a.block_col,
+                         point_pairs=point_pairs, split=a.split, **extra)
     out = Path(a.out or Path("runs") / (Path(a.table).with_suffix("").name + "-evidence"))
     paths = _write_outputs(report, out, lang=a.lang)
     s = ev.summary(report)
@@ -446,6 +466,11 @@ PRIMARY_NAMES = ("1-mae", "1-tvd", "accuracy", "ap", "auc", "average_precision",
                  "wmape")
 
 
+# evaluate(split=) labels: evidence.sema.TEST_ADLARI + evidence.api.SPLIT_DECLARED, spelled out for the same reason
+# (tests/test_cli_w9.py keeps them in sync)
+SPLIT_NAMES = ("test", "holdout", "deger", "degerlendirme", "oof", "cv", "time")
+
+
 def _primary_names() -> str:
     return ", ".join(PRIMARY_NAMES)
 
@@ -509,6 +534,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="blind twin of ours (no names/titles), e.g. ours_blind: paired ours − blind row")
     e.add_argument("--compare", action="append", metavar="A:B",
                    help="registered comparison, repeatable: A:B (paired A − B), A (A against 0), A:B:label")
+    e.add_argument("--block-col", dest="block_col",
+                   help="block bootstrap column (e.g. the forecast origin or week column, time accepted): blocks and "
+                        "clusters are resampled independently, so the CIs cover block-to-block variation too")
+    e.add_argument("--point-pairs", dest="point_pairs", metavar="auto|MEAN:MEDIAN[,...]",
+                   help="mean / median point forecasts of the same model: auto (ours with ours_median) or "
+                        "MEAN:MEDIAN pairs, comma separated; a card row per pair in forecast mode with an L1 primary "
+                        "(mae / wmape)")
+    e.add_argument("--split", choices=SPLIT_NAMES,
+                   help="frame without a split column: test / holdout / deger / degerlendirme fill a constant test "
+                        "split; oof / cv / time declare cross-fitted predictions (every row is scored); the audit "
+                        "says the split was declared, not derived")
     e.add_argument("--B", type=int, default=1000, help="bootstrap resamples for the metric CIs (default 1000)")
     e.add_argument("--B-aggregate", dest="B_aggregate", type=int, default=200,
                    help="bootstrap resamples for the slower aggregate blocks, e.g. the multiplier (default 200)")

@@ -156,8 +156,21 @@ def belge_kaydi(belge) -> dict:
     return {"dosya": p.name, "sha256": _sha(p.read_bytes())}
 
 
+KAYNAK_YOLU = {"ad": "ad", "name": "ad", "tam": "tam", "full": "tam"}
+
+
+def _kaynak(tahmin, kaynak_yolu: str) -> str | None:
+    """Kayıttaki "kaynak": varsayılan yalnız dosya adı (zincir commit'lenebilir, makine yolu girmesin); "tam"/"full"
+    verilen yolu olduğu gibi yazar. DataFrame → None."""
+    if kaynak_yolu not in KAYNAK_YOLU:
+        raise ValueError(f"kaynak_yolu {kaynak_yolu!r}: 'ad' (name, default) or 'tam' (full)")
+    if isinstance(tahmin, pd.DataFrame):
+        return None
+    return str(tahmin) if KAYNAK_YOLU[kaynak_yolu] == "tam" else Path(tahmin).name
+
+
 def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = False, *, kopya: bool = True,
-            arsiv_dizini=None, belge=None) -> dict:
+            arsiv_dizini=None, belge=None, kaynak_yolu: str = "ad") -> dict:
     """Tahmini mühürler: hash + zaman + zincir bağı; kanonik kopyayı saklar.
 
     kopya=False: yalnız zincir kaydı yazılır (kanonik kopya yok; kayıtta "arsiv": None). Doğrulama zincirle yapılır,
@@ -166,7 +179,10 @@ def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = F
     git-ignored ya da repo dışında tutun.
     belge: ön kayıt belgesi (ONKAYIT.md): ham bayt sha256'sı kayda "onkayit_belgesi" olarak girer ve açıklamanın
     sonuna "[ön kayıt belgesi <ad> sha256:<hash>]" eklenir; evaluate() bu belgeyi mühürle bağlar (belge o anki
-    içeriğiyle mühürden önce vardı)."""
+    içeriğiyle mühürden önce vardı).
+    kaynak_yolu: kayıttaki "kaynak" alanı: "ad" (varsayılan, name) yalnız dosya adı; "tam" (full) verilen yolun
+    tamamı (mutlak bir makine yolu commit'lenen zincire girer). Eski, tam yollu kayıtlar aynen doğrulanır."""
+    kaynak = _kaynak(tahmin, kaynak_yolu)
     if not kopya and arsiv_dizini is not None:
         raise ValueError("kopya=False ile arsiv_dizini birlikte verilemez (store_copy=False, archive_dir)")
     dizin = Path(kayit_dizini)
@@ -189,7 +205,7 @@ def muhurle(tahmin, aciklama: str, kayit_dizini=".onkayit", git_commit: bool = F
         "sutun": int(df.shape[1]),
         "sutunlar": sorted(str(s) for s in df.columns),
         "aciklama": aciklama,
-        "kaynak": None if isinstance(tahmin, pd.DataFrame) else str(tahmin),
+        "kaynak": kaynak,
         "dosya_sha256": _dosya_sha(tahmin),
         "arsiv": f"{sha[:12]}.csv.gz" if kopya else None,
         "onceki": son["sha256"] if son else None,
@@ -305,6 +321,7 @@ def main(argv=None) -> int:
     m.add_argument("--kopyasiz", action="store_true", help="kanonik kopya yazma, yalnız zincir kaydı (store_copy=False)")
     m.add_argument("--arsiv", help="kanonik kopyayı bu dizine yaz (archive_dir)")
     m.add_argument("--belge", help="ön kayıt belgesi (ONKAYIT.md): sha256'sı mühür kaydına girer (prereg_doc)")
+    m.add_argument("--tam-yol", action="store_true", help="kayda dosya adı yerine verilen yolun tamamını yaz")
     d = alt.add_parser("dogrula", help="tahmin mühürlü mü")
     d.add_argument("dosya")
     d.add_argument("--sha256")
@@ -320,7 +337,8 @@ def main(argv=None) -> int:
         print(json.dumps(veri, ensure_ascii=False, indent=2) if a.json else metin)
 
     if a.komut == "muhurle":
-        k = muhurle(a.dosya, a.aciklama, a.dizin, a.git, kopya=not a.kopyasiz, arsiv_dizini=a.arsiv, belge=a.belge)
+        k = muhurle(a.dosya, a.aciklama, a.dizin, a.git, kopya=not a.kopyasiz, arsiv_dizini=a.arsiv, belge=a.belge,
+                    kaynak_yolu="tam" if a.tam_yol else "ad")
         yaz(k, f"Mühürlendi #{k['sira']}: {k['sha256']}\n  zaman: {k['zaman']}  "
                f"({k['satir']} satır × {k['sutun']} sütun)\n  açıklama: {k['aciklama']}\n"
                f"  zincir: {k['kayit_hash'][:16]}…  önceki: {(k['onceki'] or 'yok')[:12]}")
