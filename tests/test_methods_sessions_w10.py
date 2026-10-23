@@ -212,5 +212,13 @@ class TestCarry(_Base):
             cutoff_windows(ev, self.cuts, "21D", label="transaction", kind_col="event", carry=["session_start"])
 
 
+class TestExport(unittest.TestCase):
+    def test_prefix_features_from_methods(self):
+        # D13-W10 #1: the playbook calls methods.prefix_features; the first run died on AttributeError
+        import simengine.methods as m
+        self.assertIs(m.prefix_features, prefix_features)
+        self.assertIn("prefix_features", m.__all__)
+
+
 if __name__ == "__main__":
     unittest.main()

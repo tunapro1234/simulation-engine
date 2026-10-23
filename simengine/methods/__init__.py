@@ -26,7 +26,7 @@ from .twin import (TwinStack, base_predict, binned_median, column_correlation, d
                    pooled_logistic_oof)
 from .transfer import GroupTransfer, oof_predict
 from .rct import rct_effects, rct_transfer
-from .sessions import cutoff_windows, history_features, rescale_to_rates, sessionize
+from .sessions import cutoff_windows, history_features, prefix_features, rescale_to_rates, sessionize
 from .uplift import (HeterogeneityResult, SLearner, TLearner, auuc, heterogeneity_test, qini, qini_coefficient,
                      qini_curve, segment_uplift, shrink_effects, split_half_effects, summarize_split_half,
                      uplift_at_k, uplift_curve)
@@ -71,7 +71,7 @@ __all__ = [
     "segment_uplift", "shrink_effects", "split_half_effects", "summarize_split_half", "heterogeneity_test",
     "HeterogeneityResult",
     # event logs: sessions, cutoff windows, pre-cutoff history features, rate rescaling (D13)
-    "sessionize", "cutoff_windows", "history_features", "rescale_to_rates",
+    "sessionize", "cutoff_windows", "history_features", "prefix_features", "rescale_to_rates",
     # item cold start
     "item_holdout_features", "ItemHoldout", "MFBaseline", "procrustes_align",
     # multi-series demand forecasting (D4)
