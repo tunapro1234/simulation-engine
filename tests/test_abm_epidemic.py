@@ -159,6 +159,9 @@ class TestGenerativeEpidemic(unittest.TestCase):
         self.assertEqual(ep.parse_isolation("Reasoning: x\nResponse: [Yes]")[0], True)        # echoes the template
         self.assertEqual(ep.parse_isolation("Reasoning: busy day\n**Response**: No"), (False, "busy day"))
         self.assertIsNone(ep.parse_isolation("I would rather not say.")[0])
+        for echo in ("Reasoning: x\nResponse: [Yes or No]", "Reasoning: x\nResponse: Yes/No", "Response: no or yes"):
+            self.assertIsNone(ep.parse_isolation(echo)[0])                     # unfilled template -> 'No' later
+        self.assertEqual(ep.parse_isolation("Reasoning: x\nResponse: No, staying out.")[0], False)
 
     def test_prompt_by_condition(self):
         a = ep.epi_personas(1, seed=0)[0]
