@@ -193,6 +193,279 @@ class SegmentRate:
     predict_proba = predict
 
 
+class ConditionalMode:
+    """Most frequent label per key cell (person x slot x day-type, ...) with neighbour smoothing, time decay and a
+    backoff chain, fit on a long table by sparse groupby counts (no dense user x period x item tensor). The
+    multiclass counterpart of ``SegmentRate``; generalises ``abm.mobility.slot_mode``.
+
+        m = ConditionalMode(["person", "slot", "daytype"], target="place",
+                            smooth={"slot": [(-1, 0.5), (1, 0.5)]}, wrap={"slot": 48},
+                            backoff=[["person", "daytype"], ["person"], ["slot", "daytype"]],
+                            decay=0.95, time_col="day").fit(history)
+        labels = m.predict(query)                       # (n,) labels
+        top3, level = m.predict(query, k=3, return_level=True)
+
+    smooth: {numeric column: [(offset, weight), ...]}. A cell at value v also counts the rows at v + offset with
+            ``weight`` (its own rows weigh 1). Several smoothed columns multiply. Applied on every level that holds
+            the column. ``wrap={col: period}`` makes offsets circular (48 half-hour slots, 7 weekdays).
+    backoff: key lists tried in order after ``keys`` when a query cell has no weight (> ``min_weight``); the
+            global mode always ends the chain. ``levels_`` lists the chain, ``return_level`` the index used per row.
+    decay:  row weight ``decay ** (ref - time)`` with ``ref`` the latest ``time_col`` value in fit (``now=``
+            overrides); datetimes count in days. ``weight_col`` multiplies in.
+    Ties go to the globally more frequent label, then the smaller label (as str). ``k`` returns an (n, k) object
+    array: the answering level's ranking, then the next levels' labels not yet listed, None-padded.
+    """
+
+    def __init__(self, keys: Sequence[str], target: str = "label", smooth: dict | None = None,
+                 backoff: Sequence[Sequence[str]] | None = None, decay: float | None = None,
+                 time_col: str | None = None, wrap: dict | None = None, weight_col: str | None = None,
+                 min_weight: float = 0.0):
+        self.keys, self.target = [keys] if isinstance(keys, str) else list(keys), target
+        self.smooth, self.wrap = dict(smooth or {}), dict(wrap or {})
+        self.backoff = [[b] if isinstance(b, str) else list(b) for b in (backoff or [])]
+        self.decay, self.time_col, self.weight_col, self.min_weight = decay, time_col, weight_col, min_weight
+
+    def _weights(self, df, now):
+        w = np.ones(len(df)) if self.weight_col is None else df[self.weight_col].to_numpy(float)
+        if self.decay is None:
+            return w
+        if self.time_col is None:
+            raise ValueError("decay needs time_col")
+        if not 0 < self.decay <= 1:
+            raise ValueError(f"decay must be in (0, 1], got {self.decay}")
+        t = df[self.time_col]
+        ref = t.max() if now is None else now
+        age = ref - t
+        age = age.dt.total_seconds() / 86400 if pd.api.types.is_timedelta64_dtype(age) else age
+        return w * self.decay ** np.asarray(age, float)
+
+    def _counts(self, base: pd.DataFrame, level: list) -> pd.DataFrame:
+        """Weighted label counts per cell of ``level`` (smoothed), sorted best first within each cell."""
+        y = self.target
+        c = base.groupby(level + [y], sort=False, observed=True)["_w"].sum().reset_index()
+        for col in [x for x in level if x in self.smooth]:
+            parts = [c]
+            for off, wt in self.smooth[col]:
+                s = c.copy()
+                s[col] = s[col] - off
+                if col in self.wrap:
+                    s[col] = s[col] % self.wrap[col]
+                s["_w"] = s["_w"] * float(wt)
+                parts.append(s)
+            c = pd.concat(parts, ignore_index=True).groupby(level + [y], sort=False, observed=True)["_w"].sum()
+            c = c.reset_index()
+        c = c[c["_w"] > 0]
+        tot = c.groupby(level, sort=False, observed=True)["_w"].transform("sum")
+        c = c[tot.to_numpy() > self.min_weight]
+        c = c.assign(_r=c[y].map(self.rank_).to_numpy())
+        return c.sort_values(level + ["_w", "_r"], ascending=[True] * len(level) + [False, True],
+                             kind="mergesort").reset_index(drop=True)
+
+    def fit(self, df: pd.DataFrame, now=None):
+        y = self.target
+        levels = [tuple(self.keys)] + [tuple(b) for b in self.backoff if tuple(b) != tuple(self.keys)]
+        self.levels_ = list(dict.fromkeys(levels + [()]))
+        cols = sorted({c for lv in self.levels_ for c in lv} | {y}, key=str)
+        missing = [c for c in cols + [self.time_col, self.weight_col] if c is not None and c not in df.columns]
+        if missing:
+            raise KeyError(f"ConditionalMode.fit: missing column(s) {missing}")
+        base = df[df[y].notna()]
+        base = base[cols].assign(_w=self._weights(base, now))
+        g = base.groupby(y, sort=False)["_w"].sum()
+        g = g[g > 0]
+        order = sorted(g.index, key=lambda v: (-g[v], str(v)))
+        if not order:
+            raise ValueError("ConditionalMode.fit: no rows with a label and positive weight")
+        self.rank_ = {v: i for i, v in enumerate(order)}
+        self.global_ = order
+        self.tables_ = [self._counts(base, list(lv)) if lv else None for lv in self.levels_]
+        return self
+
+    def _lookup(self, q: pd.DataFrame, i: int, k: int):
+        """Per query row: list of the top-k labels at level i (None where the cell is unknown)."""
+        lv = list(self.levels_[i])
+        if not lv:
+            return [self.global_[:k]] * len(q)
+        t = self.tables_[i]
+        top = t.groupby(lv, sort=False, observed=True).head(k)
+        lists = top.groupby(lv, sort=False, observed=True)[self.target].agg(list).rename("_l").reset_index()
+        m = q[lv].merge(lists, on=lv, how="left")
+        return m["_l"].tolist()
+
+    def predict(self, query: pd.DataFrame, k: int | None = None, return_level: bool = False):
+        q = query.reset_index(drop=True)
+        missing = [c for lv in self.levels_ for c in lv if c not in q.columns]
+        if missing:
+            raise KeyError(f"ConditionalMode.predict: missing column(s) {sorted(set(missing))}")
+        n, kk = len(q), 1 if k is None else int(k)
+        level = np.full(n, -1)
+        if k is None:                                  # top-1: vectorised merge per level
+            out = np.empty(n, dtype=object)
+            for i, lv in enumerate(self.levels_):
+                todo = np.flatnonzero(level < 0)
+                if not len(todo):
+                    break
+                if not lv:
+                    out[todo], level[todo] = self.global_[0], i
+                    break
+                best = self.tables_[i].drop_duplicates(list(lv))
+                lab = best[self.target].to_numpy(dtype=object)        # labels by row number, dtype kept
+                pos = q.iloc[todo][list(lv)].merge(best[list(lv)].assign(_i=np.arange(len(best))), on=list(lv),
+                                                   how="left")["_i"].to_numpy()
+                hit = ~np.isnan(pos)
+                out[todo[hit]], level[todo[hit]] = lab[pos[hit].astype(int)], i
+            res = pd.Series(out, dtype=object).infer_objects().to_numpy()   # int labels stay int
+            return (res, level) if return_level else res
+        found = [[] for _ in range(n)]
+        for i in range(len(self.levels_)):
+            todo = np.flatnonzero(np.fromiter((len(f) < kk for f in found), bool, n))
+            if not len(todo):
+                break
+            for j, lab in zip(todo, self._lookup(q.iloc[todo], i, kk)):
+                if not isinstance(lab, list):
+                    continue
+                if level[j] < 0:
+                    level[j] = i
+                f = found[j]
+                f.extend(v for v in lab if v not in f)
+                del f[kk:]
+        top = np.full((n, kk), None, dtype=object)
+        for j, f in enumerate(found):
+            top[j, :len(f)] = f
+        return (top, level) if return_level else top
+
+
+# ---------------------------------------------------------------- MAE ladder rungs (median constant, cell median)
+
+_L1_STATS = {"mae", "wmape", "wape", "l1", "mad", "smae", "zmae", "medae", "nmae"}
+_L2_STATS = {"mse", "rmse", "l2", "zmse", "zrmse", "r2"}
+
+
+def stat_for_metric(metric: str) -> str:
+    """The constant that minimises ``metric``: "median" for L1 errors (MAE, WAPE, zMAE), "mean" for L2 (MSE,
+    RMSE), as in ``forecast.point_for_metric``. For a pinball / quantile loss pass the level as ``stat=q``."""
+    m = str(metric).lower()
+    if m in _L1_STATS:
+        return "median"
+    if m in _L2_STATS:
+        return "mean"
+    raise ValueError(f"no constant stat for metric {metric!r}: one of {sorted(_L1_STATS | _L2_STATS)}, "
+                     "or pass stat='median' / 'mean' / a quantile level")
+
+
+def _wstat(v: np.ndarray, w: np.ndarray | None, stat) -> float:
+    """mean / median / quantile q of v; weighted quantiles are the weighted step quantile (midpoint on an exact
+    tie of the cumulative weight, so equal weights give np.median)."""
+    if stat == "mean":
+        return float(np.average(v, weights=w))
+    q = 0.5 if stat == "median" else float(stat)
+    if w is None:
+        return float(np.quantile(v, q))
+    o = np.argsort(v, kind="mergesort")
+    v, cw = v[o], np.cumsum(w[o])
+    h = q * cw[-1]
+    i = int(np.searchsorted(cw, h))
+    if i < len(v) - 1 and np.isclose(cw[i], h):
+        return float((v[i] + v[i + 1]) / 2)
+    return float(v[min(i, len(v) - 1)])
+
+
+def _resolve_stat(stat, metric):
+    s = stat_for_metric(metric) if stat is None else stat
+    if s not in ("mean", "median") and not (isinstance(s, (int, float)) and 0 <= float(s) <= 1):
+        raise ValueError(f"stat must be 'mean', 'median' or a quantile in [0, 1], got {s!r}")
+    return s
+
+
+def _loss(y, p, stat) -> float:
+    e = np.asarray(y, float) - np.asarray(p, float)
+    if stat == "mean":
+        return float(np.mean(e ** 2))
+    q = 0.5 if stat == "median" else float(stat)
+    return float(np.mean(np.maximum(q * e, (q - 1) * e)))
+
+
+class MedianConstant:
+    """The constant rung of an MAE ladder: training median (default, ``metric="mae"``), mean (``metric="mse"``)
+    or quantile ``stat=q``, optionally weighted. ``ConstantBaseline`` already has stat="median"; this one picks
+    the stat from the metric and takes weights. D12 pilot: the median constant beat the mean by +0.0075 zMAE."""
+
+    def __init__(self, stat=None, metric: str = "mae"):
+        self.stat, self.metric = stat, metric
+
+    def fit(self, y, X=None, weight=None):
+        self.stat_ = _resolve_stat(self.stat, self.metric)
+        v = pd.to_numeric(pd.Series(np.asarray(y, dtype=object)), errors="coerce").to_numpy(float)
+        w = None if weight is None else np.asarray(weight, float)
+        ok = ~np.isnan(v) if w is None else ~np.isnan(v) & (w > 0)
+        self.value_ = _wstat(v[ok], None if w is None else w[ok], self.stat_)
+        return self
+
+    def predict(self, X):
+        return np.full(_n(X), self.value_)
+
+
+class CellMedian:
+    """Cell median (mean / quantile) shrunk toward the global one: ``(n * cell + shrink * global) / (n + shrink)``,
+    n = rows in the cell (Kish effective n with ``weight``). shrink=0 is the raw cell stat, large shrink the
+    constant. Unseen cells get the global stat. The stat follows ``metric`` (median for MAE) unless ``stat`` is set.
+    ``shrink=None`` picks it from ``GRID`` by the metric's loss on ``fit(..., valid=df)`` (pinball for a quantile).
+
+        CellMedian(by=["store", "dow"], y_col="sales", shrink=None).fit(train, valid=dev).predict(test)
+    """
+
+    GRID = (0, 1, 2, 5, 10, 20, 50, 100, 200, 500)
+
+    def __init__(self, by, y_col: str = "y", shrink: float | None = 0.0, weight: str | None = None, stat=None,
+                 metric: str = "mae"):
+        self.by = [by] if isinstance(by, str) else list(by)
+        self.y_col, self.shrink, self.weight, self.stat, self.metric = y_col, shrink, weight, stat, metric
+
+    def _cells(self, df):
+        v = pd.to_numeric(df[self.y_col], errors="coerce")
+        w = None if self.weight is None else df[self.weight].astype(float)
+        ok = v.notna() if w is None else v.notna() & (w > 0)
+        d = df.loc[ok, self.by].assign(_v=v[ok].to_numpy(float))
+        if w is None:
+            g = d.groupby(self.by, observed=True)["_v"]
+            stat = g.mean() if self.stat_ == "mean" else g.quantile(0.5 if self.stat_ == "median" else self.stat_)
+            return stat.rename("_s"), g.size().astype(float).rename("_n"), \
+                _wstat(d["_v"].to_numpy(), None, self.stat_)
+        d["_w"] = w[ok].to_numpy(float)
+        rows = {k: (_wstat(x["_v"].to_numpy(), x["_w"].to_numpy(), self.stat_),
+                    x["_w"].sum() ** 2 / (x["_w"] ** 2).sum())
+                for k, x in d.groupby(self.by, observed=True)}
+        idx = pd.MultiIndex.from_tuples([k if isinstance(k, tuple) else (k,) for k in rows], names=self.by)
+        s = pd.Series([r[0] for r in rows.values()], index=idx, name="_s")
+        n = pd.Series([r[1] for r in rows.values()], index=idx, name="_n")
+        return s, n, _wstat(d["_v"].to_numpy(), d["_w"].to_numpy(), self.stat_)
+
+    def fit(self, df: pd.DataFrame, valid: pd.DataFrame | None = None):
+        self.stat_ = _resolve_stat(self.stat, self.metric)
+        self.cell_, self.n_, self.global_ = self._cells(df)
+        if self.shrink is not None:
+            self.shrink_ = float(self.shrink)
+            return self
+        if valid is None:
+            raise ValueError("shrink=None picks shrink on validation data: pass fit(df, valid=...)")
+        yv = pd.to_numeric(valid[self.y_col], errors="coerce").to_numpy(float)
+        ok = ~np.isnan(yv)
+        self.scores_ = {}
+        for a in self.GRID:
+            self.shrink_ = float(a)
+            self.scores_[a] = _loss(yv[ok], self.predict(valid)[ok], self.stat_)
+        self.shrink_ = float(min(self.GRID, key=lambda a: (round(self.scores_[a], 12), -a)))
+        return self
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        t = pd.concat([self.cell_, self.n_], axis=1).reset_index()
+        m = df[self.by].reset_index(drop=True).merge(t, on=self.by, how="left")
+        s, n = m["_s"].to_numpy(float), m["_n"].to_numpy(float)
+        a = self.shrink_
+        p = s if a == 0 else (n * s + a * self.global_) / (n + a)
+        return np.where(np.isnan(p), self.global_, p)
+
+
 # ---------------------------------------------------------------- distributions (group / segment level)
 
 def uniform_distribution(k: int) -> np.ndarray:

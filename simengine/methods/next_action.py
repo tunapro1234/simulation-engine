@@ -21,6 +21,11 @@ Inputs (English names; research aliases accepted):
   candidates: one row per (ex, ``key``) with optional ``y`` (1 = taken; computed from ``action`` if absent) and
          any feature columns.  (alias: k -> key)
 
+Generic query x candidate tables: ``NextActionRanker(query_col="qid", cand_col="cell", features=[...])`` ranks any
+table with one row per (query, candidate) and a relevance column ``y`` (0/1 or graded ints), e.g. person x time
+queries against candidate cells. No session priors are built: bring them as feature columns. ``fit(table)``,
+``score(table)``; ``top1`` / ``hit_at_k`` take ``query_col=`` / ``cand_col=``.
+
 Session level (no candidates needed): ``sessions(steps, outcome_key="purchase", prefix_k=3)`` turns the step
 table into one row per session (first-k action prefix, outcome label, length, optional query text) for "will this
 session convert / be abandoned, judged from its first steps"; ``funnel(steps, outcome_key="purchase")`` gives per
@@ -159,16 +164,24 @@ def negative_sample(tr: pd.DataFrame, top: int = 60, random: int = 40, seed: int
 class NextActionRanker:
     """LightGBM lambdarank over candidates (lightgbm imported lazily).
 
-    fit(train_steps, train_cands, numeric=(), categorical=()) -> builds OOF priors, samples negatives, trains;
-    score(test_steps, test_cands) -> (candidates with priors, scores). Feature set = priors + ``numeric`` +
-    ``categorical`` caller columns (categories fixed from train).
+    Session schema (default): fit(train_steps, train_cands, numeric=(), categorical=()) -> builds OOF priors,
+    samples negatives, trains; score(test_steps, test_cands) -> (candidates with priors, scores). Feature set =
+    priors + ``numeric`` + ``categorical`` caller columns (categories fixed from train).
+
+    Generic schema (``query_col`` set): fit(table) / score(table) on one table with a row per (query, candidate),
+    relevance ``y_col`` (0/1 or graded ints) and ``features`` (non-numeric ones become categoricals; force with
+    fit(..., categorical=[...])). Scores come back in the input row order. ``cand_col`` names the candidate id
+    (checked for duplicates per query; used by ``top1``). Every row is trained on unless ``sample_negatives=True``:
+    positives + the ``top`` rows by ``prior_col`` (if given) + ``random`` others per query.
 
     ``n_seeds``: train that many models (seeds ``seed .. seed + n_seeds - 1``, each with its own negative sample)
     and average their scores. The published 31.60 is a 3-seed average (``n_seeds=3``); the default 1 is faster."""
 
     def __init__(self, n_estimators: int = 300, learning_rate: float = 0.05, num_leaves: int = 31,
                  min_child_samples: int = 20, top: int = 60, random: int = 40, n_folds: int = 5, seed: int = 0,
-                 use_user_prior: bool = True, n_seeds: int = 1):
+                 use_user_prior: bool = True, n_seeds: int = 1, query_col: str | None = None,
+                 cand_col: str | None = None, features: Sequence[str] | None = None, y_col: str = "y",
+                 prior_col: str | None = None, sample_negatives: bool | None = None):
         self.params = dict(objective="lambdarank", n_estimators=n_estimators, learning_rate=learning_rate,
                            num_leaves=num_leaves, min_child_samples=min_child_samples, subsample=0.8,
                            subsample_freq=1, colsample_bytree=0.8, lambdarank_truncation_level=20,
@@ -176,6 +189,9 @@ class NextActionRanker:
         self.top, self.random, self.n_folds, self.seed = top, random, n_folds, seed
         self.use_user_prior = use_user_prior
         self.n_seeds = max(int(n_seeds), 1)
+        self.query_col, self.cand_col, self.y_col, self.prior_col = query_col, cand_col, y_col, prior_col
+        self.features = None if features is None else list(features)
+        self.sample_negatives = sample_negatives
 
     def _cat(self, c):
         c = c.copy()
@@ -183,7 +199,55 @@ class NextActionRanker:
             c[k] = pd.Categorical(c[k].fillna("NA").astype(str), categories=self.cats_[k])
         return c
 
-    def fit(self, train_steps, train_cands, numeric: Sequence[str] = (), categorical: Sequence[str] = ()):
+    def _check_generic(self, t: pd.DataFrame, train: bool):
+        need = [self.query_col] + self.features + ([self.y_col] if train else [])
+        need += [c for c in (self.cand_col, self.prior_col if train else None) if c is not None]
+        missing = [c for c in dict.fromkeys(need) if c not in t.columns]
+        if missing:
+            raise KeyError(f"NextActionRanker: table lacks column(s) {missing}")
+        if self.cand_col is not None and t.duplicated([self.query_col, self.cand_col]).any():
+            raise ValueError(f"duplicate ({self.query_col}, {self.cand_col}) rows: one row per query x candidate")
+
+    def _sample_generic(self, t: pd.DataFrame, seed: int) -> pd.DataFrame:
+        q = t[self.query_col]
+        keep = t[self.y_col].to_numpy() > 0
+        if self.prior_col is not None:
+            keep |= (t[self.prior_col].groupby(q).rank(ascending=False, method="first") <= self.top).to_numpy()
+        r = pd.Series(np.random.default_rng(seed).random(len(t)), index=t.index)
+        keep |= (r.groupby(q).rank(method="first") <= self.random).to_numpy()
+        return t[keep]
+
+    def _fit_generic(self, table: pd.DataFrame, numeric, categorical):
+        if self.features is None:
+            self.features = list(categorical) + list(numeric)
+        if not self.features:
+            raise ValueError("generic schema needs features=[...] (or numeric= / categorical= in fit)")
+        self._check_generic(table, train=True)
+        lgb = require_lightgbm()
+        t = table[table[self.y_col].notna()]
+        cat = list(categorical) or [c for c in self.features if not pd.api.types.is_numeric_dtype(t[c])]
+        self.categorical = [c for c in self.features if c in cat]
+        self.numeric = [c for c in self.features if c not in cat]
+        self.features_ = list(self.features)
+        self.cats_ = {k: sorted(t[k].fillna("NA").astype(str).unique().tolist()) for k in self.categorical}
+        self.models_, self.n_train_rows_ = [], 0
+        for i in range(self.n_seeds):
+            sd = self.seed + i
+            ti = self._sample_generic(t, sd) if self.sample_negatives else t
+            ti = self._cat(ti.sort_values(self.query_col, kind="mergesort"))
+            grp = ti.groupby(self.query_col, sort=True).size().to_numpy()
+            m = lgb.LGBMRanker(num_threads=n_threads(len(ti)), **{**self.params, "random_state": sd})
+            self.models_.append(m.fit(ti[self.features_], ti[self.y_col].astype(int), group=grp))
+            self.n_train_rows_ = max(self.n_train_rows_, len(ti))
+        self.model_ = self.models_[0]
+        return self
+
+    def fit(self, train_steps, train_cands=None, numeric: Sequence[str] = (), categorical: Sequence[str] = ()):
+        if self.query_col is not None:
+            return self._fit_generic(train_steps, numeric, categorical)
+        if train_cands is None:
+            raise TypeError("fit(train_steps, train_cands) needs candidates; for one query x candidate table "
+                            "set NextActionRanker(query_col=...)")
         lgb = require_lightgbm()
         self.train_steps_, self.train_cands_ = train_steps, train_cands
         self.numeric, self.categorical = list(numeric), list(categorical)
@@ -201,25 +265,31 @@ class NextActionRanker:
         self.model_ = self.models_[0]
         return self
 
-    def score(self, test_steps, test_cands):
+    def score(self, test_steps, test_cands=None):
+        if self.query_col is not None:
+            self._check_generic(test_steps, train=False)
+            te = self._cat(test_steps)
+            return te, np.mean([m.predict(te[self.features_]) for m in self.models_], axis=0)
         _, te = build_features(self.train_steps_, self.train_cands_, test_steps, test_cands, n_folds=self.n_folds)
         te = self._cat(te)
         return te, np.mean([m.predict(te[self.features_]) for m in self.models_], axis=0)
 
 
-def top1(cands: pd.DataFrame, scores) -> pd.DataFrame:
-    """Highest-scoring candidate per step: DataFrame with ex, key."""
-    c = cands.assign(_s=np.asarray(scores, float)).sort_values(["ex", "_s"], ascending=[True, False])
-    return c.groupby("ex").head(1)[["ex", "key"]].reset_index(drop=True)
+def top1(cands: pd.DataFrame, scores, query_col: str = "ex", cand_col: str = "key") -> pd.DataFrame:
+    """Highest-scoring candidate per step (query): DataFrame with query_col, cand_col."""
+    c = cands.assign(_s=np.asarray(scores, float)).sort_values([query_col, "_s"], ascending=[True, False],
+                                                               kind="mergesort")
+    return c.groupby(query_col).head(1)[[query_col, cand_col]].reset_index(drop=True)
 
 
-def hit_at_k(cands: pd.DataFrame, scores, ks: Sequence[int] = (1, 5, 10)) -> dict:
-    """Share of steps whose taken action ranks within the top k (steps without a positive candidate count as
-    misses)."""
+def hit_at_k(cands: pd.DataFrame, scores, ks: Sequence[int] = (1, 5, 10), query_col: str = "ex",
+             y_col: str = "y") -> dict:
+    """Share of steps (queries) whose taken action ranks within the top k (steps without a positive candidate
+    count as misses; graded labels: any y > 0 is a hit)."""
     c = cands.assign(_s=np.asarray(scores, float))
-    c["_r"] = c.groupby("ex")["_s"].rank(ascending=False, method="first")
-    r = c[c["y"] == 1].groupby("ex")["_r"].min()
-    n = c["ex"].nunique()
+    c["_r"] = c.groupby(query_col)["_s"].rank(ascending=False, method="first")
+    r = c[c[y_col] > 0].groupby(query_col)["_r"].min()
+    n = c[query_col].nunique()
     return {f"hit@{k}": float((r <= k).sum() / n) for k in ks}
 
 
