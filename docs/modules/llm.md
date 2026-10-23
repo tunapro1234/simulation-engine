@@ -344,6 +344,31 @@ res = se.sim.survey(personas, questions, llm=llm)              # res["unparsed"]
   fails, so a smoke test does not quietly go all `unparsed` (G2 #9). Use it for dry runs and tests only. It is not a
   measurement.
 
+## `DistributionFake` for distribution dry runs: `DistributionFake(value_fn=None, seed=0, noise=0.0, *, refuse=None, unparsed=None, segments=None, person_key="profile", alpha=1.0)`
+
+`fake_distribution.py`. A `FakeLLM` that parses the `sim.distribution` prompts (`DIST_TEMPLATE`, one segment x
+question; `PERSON_PROB_TEMPLATE`, a respondent table) and answers with JSON percentages that sum to 100, so
+`segment_distribution` / `persona_distribution` -> `distribution_frame` run end to end offline (G7 #11). Other prompts
+fall through to `sim.schema_responder(seed)`.
+
+```python
+llm = se.llm.DistributionFake(segments=segs)                     # synthetic_distribution per (segment, question)
+llm = se.llm.DistributionFake(lambda group, question, options: [70, 30] if group == "old" else None, segments=segs)
+res = se.sim.segment_distribution(segs, questions, llm=llm)       # res["invalid"] == 0
+```
+
+- **Default.** `synthetic_distribution(k, group, question, seed=0, alpha=1.0)`: a Dirichlet draw seeded by a hash of
+  (seed, group, question, k), shares summing to 1. `value_fn(group, question, options)` overrides it with a list
+  (fractions or percentages) or a dict keyed by option number / letter / text; `None` keeps the default, an unusable
+  value raises `ValueError`. `group` is the segment description the prompt shows, or its key with `segments=`; in a
+  persona table it is the respondent's profile line, or the id with `person_key="id"`. `question` is the question text.
+- **noise** in [0, 1] mixes in a second deterministic draw keyed on the framing line (or table session), `sample`
+  and respondent, so framings and repeats differ; with 0 every framing gets the same vector.
+- **refuse / unparsed**: a rate in [0, 1] (hash per group x question) or `callable(group, question) -> bool`. A refused
+  segment prompt gets a soft refusal (`looks_like_refusal` is true; the reframed re-ask refuses too, so the cell ends
+  `refused`); unparsed gets prose. In a persona table one refusing respondent refuses the whole batch; an unparsed
+  respondent is left out of the JSON (status `unparsed`). Dry runs and tests only, not a measurement.
+
 ## When it works and when it does not (measured)
 
 Every number below was measured in the research runs, not in this library. Apart from the opt-in live smoke test
