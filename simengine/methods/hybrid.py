@@ -18,7 +18,8 @@ import pandas as pd
 from ._util import EPS, logit
 from .baselines import LightGBMBaseline
 
-ALPHAS = tuple(np.round(np.linspace(0, 1, 11), 2))
+# 0..1 by 0.1 plus a finer low end (D5 #7: the tuned alpha sat at 0.1-0.2 and 0.01-0.05 were never tried)
+ALPHAS = (0.0, 0.01, 0.02, 0.03, 0.05, 0.07) + tuple(np.round(np.linspace(0.1, 1, 10), 2))
 LAMBDAS = (0.3, 1, 3, 10, 30, 100, 1e9)      # makro llm_onsel IZGARA; 1e9 ~ prior only
 
 
@@ -39,7 +40,18 @@ class ShrunkDeviation:
     makro ``llm_kal`` prior: b0 = b_category + e_llm - mean_category(e_llm)), or an explicit ``ref`` array (e.g. the
     LLM's overall distribution when ``base`` is the known overall distribution of a subgroup task).
     ``alpha`` is chosen on dev from ``alphas`` (0 = ignore the LLM) by ``loss`` (MSE default). Works for scalars
-    (n,) and distributions (n, K); distributions are clipped at 0 and renormalised.
+    (n,) and distributions (n, K); distributions are clipped at 0 and renormalised. The default grid ``ALPHAS`` is
+    0, 0.01, 0.02, 0.03, 0.05, 0.07, then 0.1 ... 1 by 0.1; ``alphas=`` replaces it.
+
+    ``losses_[alpha_]`` is an in-sample score: alpha is picked and scored on the same rows, so it is optimistic.
+    ``fit(..., cv_groups=g)`` also cross-fits it (D5 #7): for each group of ``g`` (e.g. country), alpha is picked on
+    the other groups and applied to that group's rows. ``cv_alphas_`` = {group: alpha}, ``cv_pred_`` = those
+    out-of-fold predictions, ``cv_loss_`` = ``loss(y, cv_pred_)``: report it as the dev score. ``alpha_`` (used by
+    ``predict``) is still the all-rows choice. The deviation (``groups`` means) uses the LLM values of all rows, no
+    labels. A single group cannot be cross-fitted: warns, and the cv results equal the in-sample ones::
+
+        sd = ShrunkDeviation().fit(base, llm, y, groups=category, cv_groups=country)
+        sd.cv_loss_, sd.losses_[sd.alpha_], sd.cv_alphas_      # honest vs in-sample dev loss, per-fold alphas
 
     Measured: makro M2 price elasticity, "level from category, deviation from LLM" + data: test WAPE 0.478 vs
     category + data 0.477 (no gain); the small test gain of averaged priors is reproduced by a shuffled-LLM placebo,
@@ -79,10 +91,31 @@ class ShrunkDeviation:
         P = np.asarray(base, float) + a * dev
         return _renorm(P) if self.distribution else P
 
-    def fit(self, base, llm, y, groups=None, ref=None):
+    def _select(self, base, dev, y):
+        losses = {a: self.loss(y, self._combine(base, dev, a)) for a in self.alphas}
+        return float(min(losses, key=losses.get)), losses
+
+    def fit(self, base, llm, y, groups=None, ref=None, cv_groups=None):
         dev = self.deviation(llm, groups, ref)
-        self.losses_ = {a: self.loss(y, self._combine(base, dev, a)) for a in self.alphas}
-        self.alpha_ = float(min(self.losses_, key=self.losses_.get))
+        self.alpha_, self.losses_ = self._select(base, dev, y)
+        if cv_groups is None:
+            return self
+        g, y = np.asarray(cv_groups), np.asarray(y)
+        if len(g) != len(dev):
+            raise ValueError(f"cv_groups has {len(g)} values for {len(dev)} rows")
+        B = np.broadcast_to(np.asarray(base, float), dev.shape)      # a shared base (scalar or (K,)) per row
+        keys = pd.unique(g)
+        if len(keys) < 2:
+            warnings.warn("ShrunkDeviation: cv_groups has one group, nothing to hold out; the cv results are the "
+                          "in-sample ones (optimistic)", stacklevel=2)
+        pred = np.zeros(dev.shape)
+        self.cv_alphas_ = {}
+        for k in keys:
+            out = g == k
+            a = self.alpha_ if len(keys) < 2 else self._select(B[~out], dev[~out], y[~out])[0]
+            self.cv_alphas_[k] = a
+            pred[out] = self._combine(B[out], dev[out], a)
+        self.cv_pred_, self.cv_loss_ = pred, float(self.loss(y, pred))
         return self
 
     def predict(self, base, llm, groups=None, ref=None):
