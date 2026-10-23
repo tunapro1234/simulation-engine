@@ -6,6 +6,7 @@ persons only (pass the TestGuard of the task); transform works for anyone.
     gc = history_features(g.history, uids, cats)                                     # E2, klasik features, wide
     als = ImplicitALS(dim=32, seed=0).fit(counts_fit).transform(counts)              # E2, user factors (fold-in)
     bag = BagSVD(dim=32, seed=0).fit(counts_fit).transform(counts)                   # E2b, tf-idf bag + SVD
+    sq = SequenceEncoder(dim=64, seed=0).fit(ev, fit_uids, val_uids, guard=g).transform(ev, uids)  # E2c, GRU
     e5 = text_embedding(texts)                                                       # E3, multilingual-e5-base
     hs = llm_states(ld, prefixes, [20, 40], pool="last")                             # E4, residual states
     dirs = trait_directions(ld, profiles, TRAIT_EDITS_G1, prefix_fn, layer=30)       # E5, paired profile edits
@@ -212,6 +213,250 @@ class Standardizer:
         return ((X - self.mu) / self.sd).astype(np.float32)
 
 
+# ------------------------------------------------------------------------------------------------- E2c sequence
+def _day_numbers(x) -> np.ndarray:
+    return pd.to_datetime(pd.Series(x)).to_numpy().astype("datetime64[D]").astype(np.int64)
+
+
+class SequenceEncoder:
+    """E2c: learned person vector from the time-ordered purchase line items (one token per item: category embedding
+    + days before the cut, gap to the previous item, log price, log quantity, day-of-year sin/cos) -> GRU -> mean /
+    max / last pooling -> `dim`-d vector u.
+
+    Training is self-supervised on the persons passed to fit (the training persons only; guard.check_uids): each
+    person's own history is cut again at kesim - k * horizon (k = 1..n_anchors), the items before that point are
+    the input and the label is which of the label categories (the `targets` first, then the most frequent others
+    among the fit persons) the person bought in the next `horizon` days, still before kesim. No target-window label
+    of anyone is read. Early stopping on the within-person AUC of the `targets` labels over the validation persons'
+    windows. transform cuts at each person's kesim (all items in `events` are already before it).
+
+    events: uid, kesim, tarih, kategori (+ fiyat, adet when present; missing -> 0), one kesim per uid.
+
+        enc = SequenceEncoder(dim=64, seed=0, targets=cats).fit(ev, fit_uids, val_uids, guard=guard)
+        U = enc.transform(ev, uids)                                                   # (len(uids), 64)
+    """
+    PAD, UNK, BOS = 0, 1, 2
+    N_NUM = 6
+
+    def __init__(self, dim: int = 64, *, emb: int = 48, hidden: int = 128, max_len: int = 256, horizon: int = 181,
+                 n_anchors: int = 4, targets: Sequence[str] | None = None, n_labels: int = 256,
+                 target_weight: float = 1.0, min_count: int = 3, epochs: int = 30, patience: int = 4,
+                 lr: float = 2e-3, weight_decay: float = 1e-4, batch_size: int = 128, dropout: float = 0.1,
+                 seed: int = 0, device: str = "cpu", max_seconds: float | None = None):
+        self.dim, self.emb, self.hidden, self.max_len, self.horizon = dim, emb, hidden, max_len, horizon
+        self.n_anchors, self.targets, self.n_labels = n_anchors, list(targets or []), n_labels
+        self.target_weight, self.min_count, self.epochs, self.patience = target_weight, min_count, epochs, patience
+        self.lr, self.weight_decay, self.batch_size, self.dropout = lr, weight_decay, batch_size, dropout
+        self.seed, self.device, self.max_seconds = seed, device, max_seconds
+
+    # ---- data
+    @staticmethod
+    def _table(events: pd.DataFrame, uids) -> dict:
+        """Per uid: (days, category, price, qty) sorted by date (stable) and the cut day."""
+        ev = events[events["uid"].isin(set(uids))]
+        n = len(ev)
+        d = pd.DataFrame({"uid": ev["uid"].to_numpy(), "day": _day_numbers(ev["tarih"]),
+                          "cut": _day_numbers(ev["kesim"]), "cat": ev["kategori"].astype(str).to_numpy(),
+                          "price": ev["fiyat"].to_numpy(float) if "fiyat" in ev else np.zeros(n),
+                          "qty": ev["adet"].to_numpy(float) if "adet" in ev else np.zeros(n)})
+        d = d.sort_values(["uid", "day"], kind="mergesort")
+        if (d.groupby("uid")["cut"].nunique() > 1).any():
+            raise ValueError("SequenceEncoder: one kesim per uid expected (filter events to each person's cut)")
+        out = {}
+        for u, g in d.groupby("uid", sort=False):
+            out[u] = (g["day"].to_numpy(), g["cat"].to_numpy(), np.nan_to_num(g["price"].to_numpy()),
+                      np.nan_to_num(g["qty"].to_numpy()), int(g["cut"].iloc[0]))
+        return out
+
+    def _tokens(self, rec, anchor: int):
+        """Token ids (BOS first) and numeric features of the last max_len - 1 items strictly before anchor."""
+        day, cat, price, qty, _ = rec
+        end = int(np.searchsorted(day, anchor, side="left"))
+        a = max(0, end - (self.max_len - 1))
+        dd, cc = day[a:end], cat[a:end]
+        ids = np.array([self.BOS] + [self.vocab_.get(c, self.UNK) for c in cc], np.int64)
+        num = np.zeros((len(ids), self.N_NUM), np.float32)
+        if len(dd):
+            gap = np.diff(dd, prepend=day[a - 1] if a > 0 else dd[0])
+            doy = 2 * np.pi * (dd % 365.25) / 365.25                   # day 0 = 1970-01-01
+            num[1:, 0] = np.log1p(np.maximum(anchor - dd, 0)) / 7
+            num[1:, 1] = np.log1p(np.maximum(gap, 0)) / 7
+            num[1:, 2] = np.log1p(np.maximum(price[a:end], 0)) / 5
+            num[1:, 3] = np.log1p(np.maximum(qty[a:end], 0)) / 2
+            num[1:, 4], num[1:, 5] = np.sin(doy), np.cos(doy)
+        return ids, num
+
+    def _batch(self, items):
+        """Right-padded (cat (n, L), num (n, L, 6), lengths (n,)) as torch tensors."""
+        import torch
+        L = max(len(i) for i, _ in items)
+        cat = np.zeros((len(items), L), np.int64)
+        num = np.zeros((len(items), L, self.N_NUM), np.float32)
+        for k, (i, x) in enumerate(items):
+            cat[k, :len(i)] = i
+            num[k, :len(i)] = x
+        return (torch.as_tensor(cat), torch.as_tensor(num),
+                torch.as_tensor(np.array([len(i) for i, _ in items], np.int64)))
+
+    def _samples(self, tab: dict, uids):
+        """Self-supervised windows: (tokens, label vector) per (uid, k) with at least one item before the anchor."""
+        X, Y, who = [], [], []
+        for u in uids:
+            rec = tab.get(u)
+            if rec is None:
+                continue
+            day, cat, cut = rec[0], rec[1], rec[4]
+            for k in range(1, self.n_anchors + 1):
+                anchor = cut - k * self.horizon
+                if np.searchsorted(day, anchor, side="left") == 0:
+                    continue
+                m = (day >= anchor) & (day < anchor + self.horizon)
+                y = np.zeros(len(self.labels_), np.float32)
+                hit = [self.label_ix_[c] for c in set(cat[m].tolist()) if c in self.label_ix_]
+                y[hit] = 1.0
+                X.append(self._tokens(rec, anchor))
+                Y.append(y)
+                who.append(f"{u}|{k}")
+        return X, (np.stack(Y) if Y else np.zeros((0, len(self.labels_)), np.float32)), who
+
+    # ---- model
+    def _net(self):
+        import torch
+        nn = torch.nn
+        enc = self
+
+        class Net(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.emb = nn.Embedding(len(enc.vocab_) + 3, enc.emb, padding_idx=0)
+                self.inp = nn.Linear(enc.emb + enc.N_NUM, enc.hidden)
+                self.gru = nn.GRU(enc.hidden, enc.hidden, batch_first=True)
+                self.proj = nn.Linear(3 * enc.hidden, enc.dim)
+                self.drop = nn.Dropout(enc.dropout)
+                self.head = nn.Linear(enc.dim, len(enc.labels_))
+
+            def encode(self, cat, num, lengths):
+                from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+                x = torch.nn.functional.gelu(self.inp(torch.cat([self.emb(cat), num], -1)))
+                out, h = self.gru(pack_padded_sequence(x, lengths, batch_first=True, enforce_sorted=False))
+                out, _ = pad_packed_sequence(out, batch_first=True, total_length=cat.shape[1])
+                mask = (torch.arange(cat.shape[1])[None, :] < lengths[:, None]).to(out.device).unsqueeze(-1)
+                mean = (out * mask).sum(1) / lengths.to(out.device)[:, None]
+                mx = out.masked_fill(~mask, -1e4).max(1).values
+                return self.proj(torch.cat([mean, mx, h[-1]], -1))
+
+            def forward(self, cat, num, lengths):
+                return self.head(self.drop(self.encode(cat, num, lengths)))
+
+        return Net()
+
+    def _logits(self, net, X, bs=512):
+        import torch
+        net.eval()
+        out = []
+        with torch.no_grad():
+            for i in range(0, len(X), bs):
+                c, n, l = self._batch(X[i:i + bs])
+                out.append(net(c.to(self.device), n.to(self.device), l).float().cpu().numpy())
+        return np.concatenate(out) if out else np.zeros((0, len(self.labels_)), np.float32)
+
+    def fit(self, events: pd.DataFrame, fit_uids, val_uids=(), *, guard=None) -> "SequenceEncoder":
+        import time
+
+        import torch
+        from .select import kisi_auc
+        t0 = time.time()
+        fit_uids, val_uids = list(fit_uids), list(val_uids)
+        if guard is not None:
+            guard.check_uids(fit_uids + val_uids, "sq encoder fit")
+        if set(fit_uids) & set(val_uids):
+            raise ValueError("fit and validation persons overlap")
+        tab = self._table(events, fit_uids + val_uids)
+        fit_set = set(fit_uids)
+        ev_fit = events[events["uid"].isin(fit_set)]
+        cnt = ev_fit["kategori"].astype(str).value_counts()
+        self.vocab_ = {c: i + 3 for i, c in enumerate(sorted(cnt[cnt >= self.min_count].index))}
+        npers = ev_fit.drop_duplicates(["uid", "kategori"])["kategori"].astype(str).value_counts()
+        others = [c for c in npers.index if c not in set(self.targets)]
+        self.labels_ = (self.targets + others)[:max(self.n_labels, len(self.targets))]
+        self.label_ix_ = {c: i for i, c in enumerate(self.labels_)}
+        tcols = np.arange(len(self.targets))
+        Xf, Yf, _ = self._samples(tab, fit_uids)
+        Xv, Yv, wv = self._samples(tab, val_uids)
+        if not Xf:
+            raise ValueError("SequenceEncoder: no training window (no fit person has items before kesim - horizon)")
+        torch.manual_seed(self.seed)
+        g = torch.Generator().manual_seed(self.seed)
+        net = self._net().to(self.device)
+        opt = torch.optim.AdamW(net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits
+        Yf_t = torch.as_tensor(Yf)
+        best, best_state, bad, hist = -np.inf, None, 0, []
+        for ep in range(self.epochs):
+            net.train()
+            perm = torch.randperm(len(Xf), generator=g).numpy()
+            tot = 0.0
+            for i in range(0, len(perm), self.batch_size):
+                b = perm[i:i + self.batch_size]
+                c, n, l = self._batch([Xf[j] for j in b])
+                y = Yf_t[b].to(self.device)
+                z = net(c.to(self.device), n.to(self.device), l)
+                loss = bce(z, y)
+                if len(tcols) and self.target_weight:
+                    loss = loss + self.target_weight * bce(z[:, tcols], y[:, tcols])
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+                opt.step()
+                tot += loss.item() * len(b)
+            rec = {"epoch": ep + 1, "train_loss": round(tot / len(perm), 5), "seconds": round(time.time() - t0, 1)}
+            if Xv:
+                zv = self._logits(net, Xv)
+                cols = tcols if len(tcols) else np.arange(zv.shape[1])
+                rec["val_loss"] = round(float(bce(torch.as_tensor(zv), torch.as_tensor(Yv))), 5)
+                rec["val_kisi_auc"] = kisi_auc(zv[:, cols].ravel(), Yv[:, cols].ravel(),
+                                               np.repeat(np.arange(len(Xv)), len(cols)))
+                score = rec["val_kisi_auc"] if rec["val_kisi_auc"] == rec["val_kisi_auc"] else -rec["val_loss"]
+            else:
+                score = -rec["train_loss"]
+            hist.append(rec)
+            if score > best:
+                best, bad = score, 0
+                best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
+            else:
+                bad += 1
+            if bad >= self.patience or (self.max_seconds and time.time() - t0 > self.max_seconds):
+                break
+        net.load_state_dict(best_state)
+        self.net_ = net.eval()
+        best_ep = max(hist, key=lambda r: r.get("val_kisi_auc", -r.get("val_loss", r["train_loss"])))["epoch"] \
+            if Xv else hist[-1]["epoch"]
+        self.info_ = {"seconds": round(time.time() - t0, 1), "epochs_run": len(hist), "best_epoch": best_ep,
+                      "best_val": float(best), "n_fit_windows": len(Xf), "n_val_windows": len(Xv),
+                      "n_fit_persons": len(fit_uids), "n_val_persons": len(val_uids), "vocab": len(self.vocab_),
+                      "labels": len(self.labels_), "hist": hist,
+                      "config": {k: getattr(self, k) for k in ("dim", "emb", "hidden", "max_len", "horizon",
+                                                               "n_anchors", "n_labels", "target_weight", "min_count",
+                                                               "epochs", "patience", "lr", "weight_decay",
+                                                               "batch_size", "dropout", "seed")}}
+        return self
+
+    def transform(self, events: pd.DataFrame, uids, bs: int = 512) -> np.ndarray:
+        """(len(uids), dim): each person's items before their own kesim; a person without items gets the BOS-only
+        sequence."""
+        import torch
+        tab = self._table(events, uids)
+        empty = (np.zeros(0, np.int64), np.zeros(0, object), np.zeros(0), np.zeros(0), 0)
+        X = [self._tokens(tab.get(u, empty), tab[u][4] if u in tab else 0) for u in uids]
+        out = []
+        self.net_.eval()
+        with torch.no_grad():
+            for i in range(0, len(X), bs):
+                c, n, l = self._batch(X[i:i + bs])
+                out.append(self.net_.encode(c.to(self.device), n.to(self.device), l).float().cpu().numpy())
+        return np.concatenate(out).astype(np.float32) if out else np.zeros((0, self.dim), np.float32)
+
+
 # ------------------------------------------------------------------------------------------------- E3 / E4
 def _cache_key(*parts) -> str:
     h = hashlib.sha256()
@@ -383,5 +628,5 @@ def sae_codes(states: np.ndarray, sae: Mapping, *, top_k: int | None = None, d_m
 
 
 __all__ = ["TRAIT_EDITS_G1", "TRAITS_G1", "SurveyOneHot", "SurveyAutoencoder", "history_features", "count_matrix",
-           "ImplicitALS", "BagSVD", "Standardizer", "text_embedding", "llm_states", "edit_profile",
+           "ImplicitALS", "BagSVD", "SequenceEncoder", "Standardizer", "text_embedding", "llm_states", "edit_profile",
            "trait_directions", "trait_values", "trait_person_vector", "behaviour_directions", "load_sae", "sae_codes"]

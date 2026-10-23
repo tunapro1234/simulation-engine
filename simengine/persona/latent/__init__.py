@@ -13,9 +13,10 @@ runs/latent/kos.py; usage docs/modules/latent.md. torch / transformers are impor
 """
 from __future__ import annotations
 
-from .encoders import (TRAIT_EDITS_G1, TRAITS_G1, BagSVD, ImplicitALS, Standardizer, SurveyAutoencoder,
-                       SurveyOneHot, behaviour_directions, count_matrix, edit_profile, history_features, llm_states,
-                       load_sae, sae_codes, text_embedding, trait_directions, trait_person_vector, trait_values)
+from .encoders import (TRAIT_EDITS_G1, TRAITS_G1, BagSVD, ImplicitALS, SequenceEncoder, Standardizer,
+                       SurveyAutoencoder, SurveyOneHot, behaviour_directions, count_matrix, edit_profile,
+                       history_features, llm_states, load_sae, sae_codes, text_embedding, trait_directions,
+                       trait_person_vector, trait_values)
 from .eval import decide, mad_accuracy, score_g1, score_g2, score_g3
 from .heads import EncoderHead, Probe, platt, platt_scores, stack_lgbm
 from .hooks import add_to_residual, capture, embedding_norm, replace_embeddings, residual_norm
@@ -38,8 +39,9 @@ __all__ = [
     "Injection", "yes_prob", "option_probs", "prefix_states", "select_cache", "expand_cache",
     # extraction
     "SurveyOneHot", "SurveyAutoencoder", "history_features", "count_matrix", "ImplicitALS", "BagSVD",
-    "Standardizer", "text_embedding", "llm_states", "trait_directions", "trait_values", "trait_person_vector",
-    "edit_profile", "behaviour_directions", "load_sae", "sae_codes", "TRAIT_EDITS_G1", "TRAITS_G1",
+    "SequenceEncoder", "Standardizer", "text_embedding", "llm_states", "trait_directions", "trait_values",
+    "trait_person_vector", "edit_profile", "behaviour_directions", "load_sae", "sae_codes", "TRAIT_EDITS_G1",
+    "TRAITS_G1",
     # heads / steering
     "EncoderHead", "Probe", "platt", "platt_scores", "stack_lgbm", "CAA", "mean_diff_direction", "pca_direction",
     "probe_direction", "residual_projector", "soft_token_projector", "soft_placeholder", "train_injector",

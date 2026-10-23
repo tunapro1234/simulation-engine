@@ -49,10 +49,11 @@ PANEL = Path(os.environ.get("TALP73_PANEL", "/data/talp/is/talp73/panel"))
 TASK_DIR = {"g1": "talp73", "g2": "twin", "g3": "twin_fiyat"}
 N_TEST_G1 = 8000
 
-LLM_FREE = {"g1": ("enc-an", "enc-gc", "enc-angc", "enc-e5L1", "enc-e5L2", "stk-e5"),
+LLM_FREE = {"g1": ("enc-an", "enc-gc", "enc-angc", "enc-e5L1", "enc-e5L2", "stk-e5", "enc-sq", "enc-angcsq",
+                    "stk-sq"),
             "g2": ("enc-tw", "enc-tw-e5"), "g3": ("enc-tf", "lgbm-tf")}
 LLM_U = {"prm": ("L0", "L1", "L2", "tw", "tf", "tf0"), "prb": ("L1", "L2", "tw"), "stk": ("",), "caa": ("",),
-         "rsd": ("angc", "e5L2", "tf"), "sft": ("angc", "tf")}
+         "rsd": ("angc", "e5L2", "tf", "sq"), "sft": ("angc", "tf", "sq")}
 VARIANTS = {"swap": ("caa", "rsd", "sft"), "zero": ("caa", "rsd", "sft")}
 
 # grids of the prereg (Extra); --kucuk keeps the first two configs of each
@@ -238,6 +239,7 @@ class V1:
         self.hist = {u: (a_, m) for u, a_, m in zip(g.history_text.uid, g.history_text.aralik, g.history_text.metin)}
         self.n_expected = None if ctx.kucuk else N_TEST_G1
         self._vec: dict = {}
+        self._info: dict = {}
         self._events = None
 
     def idx(self, rows: pd.DataFrame):
@@ -254,7 +256,7 @@ class V1:
 
     def events(self) -> pd.DataFrame:
         if self._events is None:
-            ev = self.g.events(columns=["uid", "kesim", "kategori"])
+            ev = self.g.events(columns=["uid", "kesim", "tarih", "kategori", "fiyat", "adet"])
             ev["kesim"] = pd.to_datetime(ev["kesim"]).dt.date
             self._events = ev.merge(self.persons[["uid", "kesim"]], on=["uid", "kesim"], how="inner")
         return self._events
@@ -268,13 +270,25 @@ def view1(ctx: Ctx, seed: int) -> V1:
 
 
 def g1_vectors(ctx: Ctx, v: V1, u: str) -> np.ndarray:
-    """Person vectors u (rows = v.uids): an, gc, angc, e5L1, e5L2. Encoders are fitted on train persons only."""
+    """Person vectors u (rows = v.uids): an, gc, angc, e5L1, e5L2, sq, angcsq. Encoders are fitted on train persons
+    only (sq: gradient on fit persons, early stopping on the validation persons, self-supervised on their own
+    pre-cut history; see lt.SequenceEncoder)."""
     if u in v._vec:
         return v._vec[u]
     tr_uids = [x for x, t in zip(v.uids, v.is_train) if t]
     v.guard.check_uids(tr_uids, f"{u} encoder fit")
     if u == "angc":
         X = np.hstack([g1_vectors(ctx, v, "an"), g1_vectors(ctx, v, "gc")])
+    elif u == "angcsq":
+        X = np.hstack([g1_vectors(ctx, v, "an"), g1_vectors(ctx, v, "gc"), g1_vectors(ctx, v, "sq")])
+    elif u == "sq":
+        fit_u = [x for x, f in zip(v.uids, v.is_fit) if f]
+        val_u = [x for x, t, f in zip(v.uids, v.is_train, v.is_fit) if t and not f]
+        enc = lt.SequenceEncoder(dim=64, seed=v.seed, targets=v.cats,
+                                 device="cuda" if str(ctx.a.device).startswith("cuda") else "cpu",
+                                 epochs=2 if ctx.kucuk else 30)
+        X = enc.fit(v.events(), fit_u, val_u, guard=v.guard).transform(v.events(), v.uids)
+        v._info["sq"] = {k: x for k, x in enc.info_.items()}
     elif u == "an":
         S = v.g.survey.set_index("uid").reindex(v.uids).reset_index()
         X = lt.SurveyOneHot().fit(S[v.is_train]).transform(S)
@@ -347,6 +361,7 @@ def run_enc_g1(ctx: Ctx, arm: Arm, seed: int):
         return lt.val_metrics_g1(h.predict(X, va[0], va[1]), v.val)
 
     best, val, n = _choose(ctx, arm, seed, configs, score)
+    extra = {"u_info": v._info["sq"]} if "sq" in arm.u else {}
     if best["head"] == "logistic":                     # refit on all train persons (prereg)
         tr = v.idx(v.train)
         v.guard.check(v.train, "enc refit")
@@ -354,7 +369,7 @@ def run_enc_g1(ctx: Ctx, arm: Arm, seed: int):
     else:                                              # early-stopped MLP: kept as trained on fit persons
         h = make(best).fit(X, f[0], f[1], f[2], val=(X, va[0], va[1], va[2]))
     return pred_g1(v.test, h.predict(X, te[0], te[1])), {"config": best, "val": val, "n_configs": n,
-                                                         "dim": int(X.shape[1])}
+                                                         "dim": int(X.shape[1]), **extra}
 
 
 def _hist_long(v: V1) -> pd.DataFrame:
@@ -400,9 +415,15 @@ def _stack(ctx: Ctx, arm: Arm, seed: int, v: V1, E: np.ndarray, extra_meta: dict
                                                           "lgbm_rounds": rounds, **extra_meta}
 
 
-def run_stk_e5(ctx: Ctx, arm: Arm, seed: int):
+STK_U = {"e5": "e5L2", "sq": "sq"}
+
+
+def run_stk_free(ctx: Ctx, arm: Arm, seed: int):
+    """stk-e5 / stk-sq: _stack on the e5L2 text embedding or the learned sequence vector."""
     v = view1(ctx, seed)
-    return _stack(ctx, arm, seed, v, g1_vectors(ctx, v, "e5L2"), {"embedding": "e5L2"})
+    u = STK_U[arm.u]
+    E = g1_vectors(ctx, v, u)
+    return _stack(ctx, arm, seed, v, E, {"embedding": u, **({"u_info": v._info[u]} if u in v._info else {})})
 
 
 # ------------------------------------------------------------------------------------------------- G1 prompt arms
@@ -1097,7 +1118,7 @@ def run_prb_tw(ctx: Ctx, arm: Arm, seed: int):
 # ------------------------------------------------------------------------------------------------- dispatch
 def runner(arm: Arm):
     k, u, t = arm.kind, arm.u, arm.task
-    table = {("enc", "g1"): run_enc_g1, ("stk", "g1"): run_stk_e5 if arm.model is None else run_stk_m,
+    table = {("enc", "g1"): run_enc_g1, ("stk", "g1"): run_stk_free if arm.model is None else run_stk_m,
              ("prm", "g1"): run_prm_g1, ("prb", "g1"): run_prb_g1, ("caa", "g1"): run_caa_g1,
              ("rsd", "g1"): run_rsd_g1, ("sft", "g1"): run_sft_g1,
              ("enc", "g3"): run_enc_tf, ("lgbm", "g3"): run_lgbm_tf, ("prm", "g3"): run_prm_tf,
