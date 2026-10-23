@@ -9,12 +9,15 @@ subscriptions per 100 people) or pass None for no upper bound.
     C.linear_trend(t, y, target, upper=200)          # subscriptions per 100 people can pass 100
     C.constant_growth(t, y, target)                  # last 3 years' log growth, damped (phi 0.8, as in rehearsal D7)
     C.CurveBaseline("growth", phi=1.0, upper=None)   # fit / predict wrapper, keyword arguments go to the curve
+    C.BassAnalogy(group_col="kind")                  # analogy prior only from series of the target's own kind
 
 Measured on OWID internet adoption (dev, 122 series, MAE pp; makro/RAPOR.md, M1 table): naive 20.42,
 linear trend 12.75, damped trend 13.69, logistic 16.96, Gompertz 12.39, Bass NLS 15.97, Bass + analogy 15.94.
 Early in the curve, S-curve fits rarely beat a straight trend.
 """
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -199,13 +202,25 @@ class CurveBaseline:
 
 class BassAnalogy:
     """Bass + analogy prior: median Bass (log p, log q) of the OTHER series at the same cutoff becomes a penalty.
-    Classic marketing method (Sultan-Farley-Lehmann type), leak free: only data with t <= cutoff."""
+    Classic marketing method (Sultan-Farley-Lehmann type), leak free: only data with t <= cutoff.
+    `group_col=` (a history column, e.g. "kind") takes donors only from series with the target's value there, as in
+    AdoptionABCAnalogy; fewer than 3 donors -> no prior (plain Bass NLS) with a warning. None pools every series."""
     kind = "baseline"
     name = "bass_analogy"
 
-    def __init__(self, weight=1.0, min_points=6, upper=UPPER):
-        self.weight, self.min_points, self.upper = weight, min_points, upper
+    def __init__(self, weight=1.0, min_points=6, upper=UPPER, group_col=None):
+        self.weight, self.min_points, self.upper, self.group_col = weight, min_points, upper, group_col
         self._cache: dict = {}
+
+    def _same_group(self, history, series):
+        """Series names in the target's group (None without group_col); a NaN group has no donors."""
+        if self.group_col is None:
+            return None
+        if self.group_col not in history.columns:
+            raise ValueError(f"group_col={self.group_col!r} is not a column of history")
+        grp = history.groupby("series")[self.group_col].first()
+        g = grp.get(series)
+        return set() if pd.isna(g) else set(grp.index[grp == g])
 
     def _prior(self, history, cutoff, exclude):
         key = (cutoff, len(history))
@@ -218,8 +233,12 @@ class BassAnalogy:
                     if p is not None:
                         pq[s] = (np.log(p["p"]), np.log(p["q"]))
             self._cache[key] = pq
-        pq = [v for s, v in self._cache[key].items() if s != exclude]
+        same = self._same_group(history, exclude)
+        pq = [v for s, v in self._cache[key].items() if s != exclude and (same is None or s in same)]
         if len(pq) < 3:
+            if same is not None:
+                warnings.warn(f"BassAnalogy: {len(pq)} donor series in {exclude!r}'s {self.group_col} group "
+                              f"(< 3); no analogy prior, plain Bass NLS", stacklevel=3)
             return None
         return np.median(np.array(pq), axis=0)
 

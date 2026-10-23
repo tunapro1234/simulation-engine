@@ -210,7 +210,7 @@ sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor 
   150-190). `scale=None` / `1.0` gives the old output byte for byte.
 - **`group_col=`** on `AdoptionABCAnalogy` / `BassABCAnalogy`: analogy donors only from series with the target's
   value in that column (one kind), fewer than 3 donors falls back to the flat prior as before. This is the fix for
-  the mixed-technologies failure above; `BassAnalogy` (curves) does not take it yet.
+  the mixed-technologies failure above; `BassAnalogy` (curves) takes the same option (see Adoption baselines).
 - **`scenario(..., delta=False, anchor=None)`.** `delta=True` adds the paired intervention - baseline difference
   (`delta`, `delta_lo80`, `delta_hi80`; 0 on baseline rows). `anchor=` (a frame with t and y_pred, a {t: value}
   dict or a Series; a frame with a series column is cut to the model's series) implies it and adds
@@ -227,6 +227,9 @@ sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor 
 `curves.py` holds naive, linear trend (last 5 points), damped trend (phi 0.9 fixed), logistic, Gompertz and Bass
 NLS. The S-curve fits use multi-start least squares with m bounded below by the observed max. It also holds
 `BassAnalogy`, which uses the median (log p, log q) of the other series as a penalty term.
+- **`BassAnalogy(group_col=)`** *(this port)*. The (log p, log q) prior is the median over series with the
+  target's value in that column only (same semantics as `AdoptionABCAnalogy(group_col=)`); fewer than 3 donors
+  gives no prior (plain Bass NLS) with a warning. `None` (default) pools every series as before (not measured).
 
 - **`upper=`** *(this port)*. Every curve clips to [0, upper] and bounds m above by it; the default 100 keeps the
   research behaviour. Raise it for quantities that pass 100 (mobile subscriptions per 100 people), or pass `None`

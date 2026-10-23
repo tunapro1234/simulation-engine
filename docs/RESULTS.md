@@ -162,7 +162,7 @@ The short version:
 
 | setting | result | source |
 |---|---|---|
-| OWID internet adoption, test MAE (pp), 7 seeds | **ABM + ABC + analogy 8.48 ± 0.16**; Bass-simulator control 9.73 ± 0.12; linear 10.72; Gompertz 11.61; Bass NLS 14.86; naive 18.39; paired ABM − Bass control −1.25 ± 0.21 per seed; seed-averaged series bootstrap −1.32 [−1.83, −0.82]; better on 58/81 series | makro `RAPOR.md` (M1), `abm/m1/NOTLAR.md` |
+| OWID internet adoption, test MAE (pp), 7 seeds | **ABM + ABC + analogy 8.48 ± 0.16**; Bass-simulator control 9.73 ± 0.12; linear 10.72; Gompertz 11.61; Bass NLS 14.86; naive 18.39; paired ABM − Bass control −1.25 ± 0.21 per seed; seed-averaged series bootstrap −1.32 [−1.83, −0.82]; better on 58/81 series. Measured at relative cutoffs (t0 + k); did not reproduce at fixed calendar origins in rehearsal G10: ABM − Bass control +0.28 at 2010 (11.01 vs 10.73), +1.54 at 2015 (13.32 vs 11.78), so do not cite −1.25 for a calendar-origin task | makro `RAPOR.md` (M1), `abm/m1/NOTLAR.md`; G10 rehearsal (modules/abm.md) |
 | same | 81-85% of the gain over Bass NLS from ABC + analogy prior, 15-19% from the ABM structure | makro `abm/m1/NOTLAR.md` |
 | same, h = 1 | ABM 2.64, Gompertz 2.13, linear 2.20 (simple baselines win) | makro `abm/m1/NOTLAR.md` |
 | US household technologies | plain ABC 8.54 vs linear 8.70 (n.s.); analogy prior hurts (10.07) | makro `abm/m1/NOTLAR.md` |
