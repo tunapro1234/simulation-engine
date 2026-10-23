@@ -1024,10 +1024,10 @@ class LightGBMBaseline:
     ``refit_full=True`` (default off) is the "tree count from early stopping, then train on everything" step: after
     early stopping on ``eval_set`` (required), the model is refit once on train + eval rows with
     ``round(best_iteration_ * refit_scale)`` trees (``refit_scale`` 1.1 by default: ~10% more rows, a few more trees).
-    ``best_iteration_`` / ``n_estimators_`` keep both counts; categories cover the eval rows too. No held-out score is
-    left after the refit, so read the dev score from a ``refit_full=False`` fit. With ``calibrate`` it needs a
-    separate ``calibrate_set`` (the eval rows are now training rows); ``sample_weight`` is refused (eval rows have
-    none).
+    ``best_iteration_`` / ``n_estimators_`` keep both counts (set without refit too: both = trees used); categories
+    cover the eval rows too. No held-out score is left after the refit, so read the dev score from a
+    ``refit_full=False`` fit. With ``calibrate`` it needs a separate ``calibrate_set`` (the eval rows are now training
+    rows); ``sample_weight`` is refused (eval rows have none).
 
     Usage::
 
@@ -1120,8 +1120,10 @@ class LightGBMBaseline:
                 kw["eval_y"] = (np.searchsorted(cls, yv),)
             kw["callbacks"] = [lgb.early_stopping(100, verbose=False)]
         self.model_ = Model(**prm).fit(self._frame(X), y, **kw)
+        # set in both modes (D13: a refit_full=False fit had them only on model_); no eval_set -> all trees
+        self.best_iteration_ = int(self.model_.best_iteration_ or prm["n_estimators"])
+        self.n_estimators_ = self.best_iteration_
         if self.refit_full:
-            self.best_iteration_ = int(self.model_.best_iteration_ or prm["n_estimators"])
             self.n_estimators_ = max(1, int(round(self.best_iteration_ * self.refit_scale)))
             X = pd.concat([X, pd.DataFrame(eval_set[0])[self.columns_]], ignore_index=True)
             # continuous: let numpy promote (int train labels must not truncate float eval labels)

@@ -32,8 +32,12 @@ class TestLightGBMRefitFull(unittest.TestCase):
 
     def test_default_off_unchanged(self):
         m = LightGBMBaseline(**FAST).fit(self.tr, self.ytr, eval_set=(self.dv, self.ydv))
-        self.assertFalse(hasattr(m, "n_estimators_"))
         self.assertEqual(trees(m), m.model_.best_iteration_)          # the booster is cut at the best iteration
+        self.assertEqual((m.best_iteration_, m.n_estimators_), (m.model_.best_iteration_,) * 2)   # D13-W10 #2
+
+    def test_counts_without_eval_set(self):
+        m = LightGBMBaseline(n_estimators=37, **FAST).fit(self.tr, self.ytr)
+        self.assertEqual((m.best_iteration_, m.n_estimators_, trees(m)), (37, 37, 37))
 
     def test_refit_tree_count_and_rows(self):
         es = LightGBMBaseline(**FAST).fit(self.tr, self.ytr, eval_set=(self.dv, self.ydv))
