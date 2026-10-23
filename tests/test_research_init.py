@@ -1,6 +1,8 @@
 """simengine.research package exports: the search and method modules are re-exported lazily, every name in
-__all__ resolves to the object of its home module, and a bare import does not load scipy / scikit-learn."""
+__all__ resolves to the object of its home module, a bare import does not load scipy / scikit-learn, and
+examples/research_new_demo.py runs."""
 import importlib
+import os
 import subprocess
 import sys
 import types
@@ -47,6 +49,15 @@ class TestResearchExports(unittest.TestCase):
                 "in sys.modules))")
         out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, check=True)
         self.assertEqual(out.stdout.split(), ["0", "0", "0"])
+
+
+class TestNewDemo(unittest.TestCase):
+    def test_example_runs(self):
+        out = subprocess.run([sys.executable, str(ROOT / "examples" / "research_new_demo.py")], cwd=ROOT,
+                             capture_output=True, text=True, timeout=120, env={**os.environ, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        for tag in ("bandits", "bayesopt", "hyperband", "tree_search", "prompt_evolution", "hypotheses"):
+            self.assertIn(f"[{tag}]", out.stdout)
 
 
 if __name__ == "__main__":
