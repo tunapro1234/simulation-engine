@@ -4,10 +4,10 @@ scored by WRMSSE over the competition's 12 aggregation levels and by bottom-leve
     from simengine import bench
     from simengine.bench.tasks import m5
     from simengine.methods import forecast as fc
-    task = m5.M5(n_series=3000)                       # or bench.get("m5", stores="CA_1"); default: all 30,490 series
+    task = m5.M5(n_series=3000, baselines="snaive")   # or bench.get("m5", stores="CA_1"); default: all 30,490 series
     data = task.load("/path/to/catalogue")            # or $SIMENGINE_DATA
     mine = lambda d: m5.align(d, fc.moving_mean(m5.future_panel(d), d.meta["origin"], 28, window=28, **m5.COLS))
-    frame = task.run(methods={"ma28": mine}, data=data, baselines="snaive")
+    frame = task.run(methods={"ma28": mine}, data=data)  # fits only the `baselines` option (unset: all five)
     task.score(frame, "ma28")                         # {'metric': 'wrmsse', 'value', 'lo', 'hi', 'n'}
     m5.wrmsse_by_level(frame, "ma28")                 # one row per aggregation level (compare M5 paper Table B)
 
@@ -39,6 +39,7 @@ CI: 95% percentile bootstrap, default_rng(42), B = 1000. WRMSSE resamples the ag
 (w and RMSSE of a resampled series move together, level value = sum c w RMSSE / sum c w); the levels are resampled
 independently and the hierarchy's scales are held fixed, so levels 1-5 (1-10 series) add almost no width. WMAPE
 resamples bottom series.
+A method has to forecast every test row: one NaN or inf prediction makes both metrics (and the CI) NaN.
 
 Baselines (all bottom level, aggregated bottom-up by the metric, as the M5 benchmarks):
 
@@ -240,6 +241,12 @@ def level_scores(frame: pd.DataFrame, col: str) -> list[tuple[np.ndarray, np.nda
     return out
 
 
+def _complete(frame: pd.DataFrame, col: str) -> bool:
+    """Every test row has a finite prediction. Both metrics are NaN otherwise: a method is not scored on the subset
+    of series it chose to forecast (`level_scores` drops every aggregate holding a gap, `fc.wmape` the rows)."""
+    return bool(np.isfinite(frame[col].to_numpy(float)).all())
+
+
 def _weighted(w: np.ndarray, r: np.ndarray) -> float:
     ok = np.isfinite(r) & np.isfinite(w)
     return float((w[ok] * r[ok]).sum() / w[ok].sum()) if w[ok].sum() > 0 else float("nan")
@@ -248,14 +255,17 @@ def _weighted(w: np.ndarray, r: np.ndarray) -> float:
 def wrmsse(frame: pd.DataFrame, method: str) -> float:
     """WRMSSE of one pred_<method> column (point value, no CI)."""
     col = method if method in frame.columns else f"pred_{method}"
+    if not _complete(frame, col):
+        return float("nan")
     return float(np.mean([_weighted(w, r) for w, r in level_scores(frame, col)]))
 
 
 def wrmsse_by_level(frame: pd.DataFrame, method: str) -> pd.DataFrame:
     """level, keys, n_series, wrmsse per aggregation level, and an 'average' row (= WRMSSE)."""
     col = method if method in frame.columns else f"pred_{method}"
-    sc = level_scores(frame, col)
-    rows = [{"level": lv, "keys": "+".join(LEVELS[lv - 1]) or "total", "n_series": len(w), "wrmsse": _weighted(w, r)}
+    sc, ok = level_scores(frame, col), _complete(frame, col)
+    rows = [{"level": lv, "keys": "+".join(LEVELS[lv - 1]) or "total", "n_series": len(w),
+             "wrmsse": _weighted(w, r) if ok else float("nan")}
             for lv, (w, r) in enumerate(sc, 1)]
     rows.append({"level": "average", "keys": "", "n_series": sum(len(w) for w, _ in sc),
                  "wrmsse": float(np.mean([x["wrmsse"] for x in rows]))})
@@ -274,6 +284,8 @@ def _ratio_boot(num: np.ndarray, den: np.ndarray, rng, B: int, block: int = 100)
 
 
 def _wrmsse_metric(task, frame, col, B, seed):
+    if not _complete(frame, col):
+        return {"value": float("nan"), "lo": float("nan"), "hi": float("nan"), "n": int(frame["group"].nunique())}
     sc = level_scores(frame, col)
     point = float(np.mean([_weighted(w, r) for w, r in sc]))
     rng = np.random.default_rng(seed)
@@ -287,8 +299,10 @@ def _wrmsse_metric(task, frame, col, B, seed):
 
 def _wmape_metric(task, frame, col, B, seed):
     y, p = frame["truth"].to_numpy(float), frame[col].to_numpy(float)
-    ok = np.isfinite(y) & np.isfinite(p)
     g = pd.factorize(frame["group"])[0]
+    if not _complete(frame, col):
+        return {"value": float("nan"), "lo": float("nan"), "hi": float("nan"), "n": int(g.max() + 1)}
+    ok = np.isfinite(y)
     a = np.bincount(g[ok], np.abs(y - p)[ok], minlength=g.max() + 1)
     t = np.bincount(g[ok], y[ok], minlength=g.max() + 1)
     point = fc.wmape(y, p)
