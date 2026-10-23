@@ -30,8 +30,9 @@ from .twin import Twin2K500
 from .uplift import CriteoUplift, HillstromUplift, X5Uplift
 from .upworthy import Upworthy
 from .web_behaviour import WebShopBuy, WebShopNextAction
+from .yjmob import YJMob
 
 __all__ = ["BankMarketing", "BeeBenchB01Prior", "CPC18", "Choices13k", "CriteoUplift", "EconGamesB01", "ErtanWTP",
            "GSSWave", "GlobalOpinionQA", "HillstromUplift", "Instacart", "M5", "MovieLens1M", "OpenEcommerce",
            "OpinionQAGroups", "RetailRocketNext", "RetailRocketPurchase", "SimBench", "SocSci210", "SubPOPOpinionQA",
-           "SwissmetroModeChoice", "Twin2K500", "Upworthy", "WebShopBuy", "WebShopNextAction", "X5Uplift"]
+           "SwissmetroModeChoice", "Twin2K500", "Upworthy", "WebShopBuy", "WebShopNextAction", "X5Uplift", "YJMob"]

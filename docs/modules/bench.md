@@ -505,6 +505,17 @@ columns in it, as in every bench task, and are trusted not to read them.
 - **Caveat:** the batch test sessions come from 8 workers, and worker-clustered intervals are about three times wider
   than the session intervals reported. Details: [bench/web_behaviour.md](bench/web_behaviour.md).
 
+### `yjmob` (multiclass): where a person is, slot by slot, for 15 future days
+
+- **Data and split:** YJMob100K dataset 1 (Yabe et al. 2024, CC BY 4.0), 100,000 people on a 200 x 200 grid of
+  500 m cells in 30-minute slots. HuMob 2023 task 1 split: days 1-60 are history, days 61-75 are predicted
+  (`split='dev'`: 45 -> 46-60). 2,000 people are drawn by default (`users`, `seed`, `pool='all' | 'humob_test'`).
+- **Metrics:** GEO-BLEU (primary), DTW (km) and exact-cell accuracy, per user, with a user bootstrap;
+  `variant='humob23'` (default) or `'humob25'`.
+- **Baselines:** pool `all`, humob23: slot_mode GEO-BLEU 0.298 [0.290, 0.305], markov_sample 0.225, markov_argmax
+  0.208, EPR 0.136, global_slot_mode 0.004. The prediction is a cell code, so there is no LLM arm yet.
+- **Details:** [abm/mobility.md](abm/mobility.md) (metric checks against both HuMob reference READMEs, the EPR port).
+
 ## Economic-game tasks
 
 Three tasks score `simengine.games` output against published human numbers. `econ_games_b01` and `ertan_wtp` need
