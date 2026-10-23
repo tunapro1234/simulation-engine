@@ -365,6 +365,22 @@ def _dagilim(veri, sutunlar, n_listesi, R, B, rng, notlar, kontrol):
     return sonuc
 
 
+# ------------------------------------------------------------------ uygulanabilirlik
+def panel_yok(df: pd.DataFrame, gorev: str | None, *, ham_var: bool, llm_yok: bool) -> tuple[str, str] | None:
+    """İkili görevde insan paneli yok mu: PPI++ 'kaç insana bedel' n gerçek insanın yanıtına simülasyon ekler; olay
+    günlüğü (oturum → satın alma) gibi bir ikili görevde yerine geçilecek insan yanıtı yoktur (D13 #11c, D13-W8 #7).
+    Panel yok sayılır: görev ikili, LLM kolu yok (ham kol yok ve ours_uses_llm=False), madde sütunu yok ya da tek
+    madde, insan tekrar (retest) sütunu yok. Döner (Türkçe neden, İngilizce neden) | None."""
+    if gorev != "ikili" or ham_var or not llm_yok or "tekrar" in df.columns:
+        return None
+    if "madde" in df.columns and df["madde"].nunique() > 1:
+        return None
+    return ("ikili görev, insan paneli yok (madde yok, LLM kolu yok: ours_uses_llm=False); yerine geçilecek insan "
+            "yanıtı yok",
+            "binary task without a human panel (no item column, no LLM arm: ours_uses_llm=False), no human answers "
+            "to stand in for")
+
+
 # ------------------------------------------------------------------ ana API
 def carpan(veri, sutunlar: dict, n_listesi=(10, 25, 50, 100, 200), R: int = 40,
            tohum: int = 0, B: int = 300) -> dict | None:

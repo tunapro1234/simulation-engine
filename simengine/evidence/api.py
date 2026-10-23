@@ -43,7 +43,7 @@ from . import onkayit as _onkayit
 from . import orneklem as _orneklem
 from . import pano as _pano
 from .cekirdek import SURUM, degerlendir
-from .sema import ON_EK, TEST_ADLARI, _eksik, gercek_yok, hazirla
+from .sema import ON_EK, TEST_ADLARI, _eksik, gercek_yok, gorev_bul, hazirla
 
 VERSION = SURUM
 DOMINANT_BLOCK_SHARE = 0.20  # balance_col: one block above this share of scored rows -> block-equal-weighted check
@@ -359,12 +359,37 @@ def prepare(df: pd.DataFrame, task: str | None = None, methods: Sequence[str] | 
     return hazirla(to_internal(df), _task(task), _methods(methods), classes)
 
 
+def _multiplier_task(d: pd.DataFrame, task: str | None) -> str | None:
+    """Internal task for the multiplier default: the declared one, else auto-detected as degerlendir would."""
+    if task is not None:
+        return _task(task)
+    cols = [c for c in d.columns if str(c).startswith(ON_EK)]
+    if "gercek" not in d.columns or not cols:
+        return None
+    try:
+        return gorev_bul(d, cols)
+    except (TypeError, ValueError):
+        return None
+
+
+def _multiplier_not_applicable(rep: dict, note: str) -> None:
+    """Default-skipped PPI++ multiplier: audit row, report key and the card's bedel row say 'not applicable'
+    (same shape as degerlendir's segment / study level rule)."""
+    rep["carpan_uygulanamaz"] = note
+    rep.setdefault("denetim", []).append({"kontrol": "etkin örneklem çarpanı (PPI++ kaç insana bedel)",
+                                          "durum": "atlandi", "deger": None, "uygulanamaz": True, "ayrinti": note})
+    for r in (rep.get("kanit_kart") or {}).get("satirlar") or []:
+        if r.get("tur") == "bedel":
+            r.update(deger=None, alt=None, ust=None, birim="", **{"not": note})
+
+
 # ------------------------------------------------------------------ evaluate
 def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: str | None = None, *,
              dataset: str = "", task: str | None = None, methods: Sequence[str] | None = None,
              labels: dict | None = None, primary: str | None = None, B: int = 1000, B_aggregate: int = 200,
              seed: int = 0, calibrate: Sequence[str] | None = None, cutoff: str | None = None,
-             memorization: str | dict | None = None, multiplier: bool = True, limits: Sequence[str] | None = None,
+             memorization: str | dict | None = None, multiplier: bool | None = None,
+             limits: Sequence[str] | None = None,
              prereg: list | str | os.PathLike | None = None, classes: list | None = None, baselines: bool = True,
              multiplier_methods: Sequence[str] | None = None, circular: Sequence[str] | None = None,
              level: str | None = None, source: str | None = None,
@@ -461,6 +486,11 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     n_configs: number of configurations tried before picking ours; written in the selection-bias audit (and >= 4
         with ours the best adds the optimism note). The audit says ours was "named in advance" only when the ours
         name occurs in the seal records or the text files of the prereg= registry; otherwise "not verified".
+    multiplier: the PPI++ "worth N humans" effective-sample multiplier. None (default) computes it, except on a
+        binary task without a human panel (no LLM arm: no raw= and ours_uses_llm=False, no blind_col, no item
+        column or a single item, no retest column), e.g. an event log: there is no human answer to stand in for, so it
+        is skipped and the card / `report["carpan_uygulanamaz"]` say "not applicable". True always computes it,
+        False always skips it (no note).
     multiplier_max_rows: single-item frames larger than this compute the PPI++ multiplier on a fixed-seed
         subsample of this many rows (None: whole table, slow). A warning is raised for large frames.
     offset_col: a per-row offset column (e.g. the member's training mean): subtracted from truth, retest, the
@@ -648,6 +678,17 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
                 f"{r} input rows)"]
     kiyas = _compare_list(compare)
     oran_seg = _rate_error_columns(d, rate_error_by, aggregated=toplama is not None)
+    carpan_na = None
+    if multiplier is None:
+        # D13-W8 #7: binary task without a human panel (event log): PPI++ 'worth N humans' has nothing to stand in for
+        multiplier = True
+        na = _orneklem.panel_yok(d, _multiplier_task(d, task), ham_var=raw is not None or blind_col is not None,
+                                 llm_yok=ours_uses_llm is False)
+        if na:
+            multiplier = False
+            carpan_na = (f"uygulanamaz: {na[0]}; PPI++ 'kaç insana bedel' atlandı, istenirse multiplier=True "
+                         f"(not applicable: {na[1]}; PPI++ 'worth N humans' skipped, pass multiplier=True to "
+                         "compute it)")
     if multiplier and len(d) > (multiplier_max_rows or MULTIPLIER_MAX_ROWS) and not gercek_yok(d):
         tek = "madde" not in d or d["madde"].nunique() <= 1
         warnings.warn(
@@ -676,6 +717,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         _kart.EN_KUCUK_ETKI.reset(esik_token)
         if tmp:
             os.unlink(tmp)
+    if carpan_na and rep.get("orneklem") is None and "carpan_uygulanamaz" not in rep:
+        _multiplier_not_applicable(rep, carpan_na)
     if min_effect is not None:
         rep["min_effect"] = min_effect
     if toplama:
@@ -1557,6 +1600,8 @@ _PHRASES_EN = [
      + ", ".join(_check_en(x) for x in m.group(1).split(", ")) + " skipped)"),
     (r"LLM kolu yok: ezber denetimi uygulanamaz \(no LLM arm: memorization audit not applicable\)",
      "no LLM arm: memorization audit not applicable"),
+    (r"uygulanamaz: ikili görev, insan paneli yok .*? \(not applicable: (binary task without a human panel .*? to "
+     r"compute it)\)", r"not applicable: \1"),
     (r"yüzdelik GA nokta tahminini dışarıda bırakıyor \((.*?), (\d+) sütun\)",
      r"percentile CI excludes the point estimate (\1, \2 columns)"),
     (r"; ci='basic' deneyin", "; try ci='basic'"),
