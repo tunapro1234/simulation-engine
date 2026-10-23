@@ -39,7 +39,7 @@ Leakage: a fit only sees `history` (all series, t <= cutoff). m is never fixed; 
 Options (defaults leave the output unchanged):
 
     AdoptionABC(scale=2.0)                    # y per 100 people up to 200: the bank's m <= 1 means 2 x 100
-    AdoptionABCAnalogy(scale={s: c / 100 for s, c in prior["ceiling"].items()})   # LLM ceiling (abm.ceiling)
+    AdoptionABCAnalogy(scale={s: c / 100 for s, c in ceiling_upper(prior).items()})   # LLM ceiling (abm.ceiling)
     AdoptionABCAnalogy(group_col="kind")      # analogy donors only from the target's own kind
     sc = abm.scenario(model, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor = best forecast + ABM delta
     sc.attrs["origin_fit_error"]              # the ABM baseline's miss at the last observed year (data units)
@@ -106,12 +106,19 @@ def _check_scale(scale):
     return scale
 
 
-def _anchor_at(anchor, ts) -> np.ndarray:
-    """Anchor forecast values at times ts (NaN where missing). Frame with t and y_pred (or y), dict or Series."""
+def _anchor_at(anchor, ts, series=None) -> np.ndarray:
+    """Anchor forecast values at times ts (NaN where missing). Frame with t and y_pred (or y), dict or Series.
+    A frame with a series column is cut to `series` (a panel forecast is not averaged across series)."""
     if isinstance(anchor, pd.DataFrame):
         col = "y_pred" if "y_pred" in anchor.columns else "y"
         if "t" not in anchor.columns or col not in anchor.columns:
             raise ValueError("anchor frame needs columns t and y_pred (or y)")
+        sc = "series" if "series" in anchor.columns else "seri" if "seri" in anchor.columns else None
+        if sc is not None:
+            if (anchor[sc] == series).any():
+                anchor = anchor[anchor[sc] == series]
+            elif anchor[sc].nunique() > 1:
+                raise ValueError(f"anchor frame has {anchor[sc].nunique()} series and not the model's {series!r}")
         anchor = anchor.groupby("t")[col].mean()
     elif isinstance(anchor, dict):
         anchor = pd.Series(anchor, dtype=float)
@@ -383,7 +390,8 @@ class AdoptionABC:
         intervention as a change. delta=True adds delta, delta_lo80, delta_hi80: the paired (same draw, same random
         numbers) intervention - baseline difference, median and 10%/90% quantiles; 0 on the baseline rows.
         anchor = your best forecast (a frame with t and y_pred or y, a {t: value} dict or a Series indexed by t)
-        implies delta and adds y_anchor = anchor + delta (NaN where the anchor has no t). Either way
+        implies delta and adds y_anchor = anchor + delta (NaN where the anchor has no t; a frame with a series column
+        is cut to the model's series, an average over several series is never used). Either way
         frame.attrs["origin_fit_error"] = baseline median - observed y at the last observed year (data units)."""
         m = model or self._last
         if m is None:
@@ -432,7 +440,7 @@ class AdoptionABC:
         for r, (lo, mid, hi) in zip(rows, ((zero, zero, zero), (d[0], d[1], d[2]))):
             r["delta"], r["delta_lo80"], r["delta_hi80"] = mid, lo, hi
         if anchor is not None:
-            a = _anchor_at(anchor, ts)
+            a = _anchor_at(anchor, ts, m["series"])
             for r in rows:
                 r["y_anchor"] = a + r["delta"].to_numpy()
         out = pd.concat(rows, ignore_index=True)

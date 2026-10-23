@@ -88,10 +88,35 @@ class TestCeilingPrior(unittest.TestCase):
         pr = A.llm_ceiling_prior(FakeLLM(shape_responder), self.df, groups="kind", perturb=0)
         self.assertNotIn("ceiling_perturbed", pr.columns)
         for g, sub in pr.groupby("group"):
-            self.assertEqual(sub["ceiling_group_median"].nunique(), 1)
-            self.assertAlmostEqual(sub["ceiling_group_median"].iloc[0], sub["ceiling"].median())
+            for s in sub.index:                                  # leave-one-out: the series' own value is not in it
+                self.assertAlmostEqual(sub.loc[s, "ceiling_group_median"], sub["ceiling"].drop(s).median())
             self.assertEqual(sorted(sub["ceiling_shuffled"]), sorted(sub["ceiling"]))
             self.assertTrue((sub["ceiling_shuffled"] != sub["ceiling"]).all())   # no series keeps its own value
+
+    def test_placebos_carry_no_own_value_in_small_groups(self):
+        # group of 3: the plain median IS the middle series' own ceiling; a singleton would keep its own in both
+        df = self.df[self.df.series.isin(["web:c0", "web:c2", "web:c4", "cell:c1"])]
+        pr = A.llm_ceiling_prior(FakeLLM(shape_responder), df, groups="kind", perturb=0)
+        web = pr[pr.group == "web"]
+        mid = web["ceiling"].sort_values().index[1]
+        self.assertNotAlmostEqual(web.loc[mid, "ceiling_group_median"], web.loc[mid, "ceiling"])
+        self.assertTrue((web["ceiling_group_median"] != web["ceiling"]).all())
+        self.assertTrue(np.isnan(pr.loc["cell:c1", "ceiling_shuffled"]))
+        self.assertTrue(np.isnan(pr.loc["cell:c1", "ceiling_group_median"]))
+        up = A.ceiling_upper(pr, col="ceiling_shuffled")         # NaN placebo -> observed max, never its own ceiling
+        self.assertEqual(up["cell:c1"], pr.loc["cell:c1", "hist_max"])
+
+    def test_last_keeps_full_history_max(self):
+        # a series that peaked and fell: last=3 shows only the decline, the floor must still be the real maximum
+        rows = [dict(series=f"s{i}", t=float(t), y=float(v + i))
+                for i in range(3) for t, v in zip(range(2000, 2008), [5, 20, 60, 90, 80, 70, 65, 60])]
+        df = pd.DataFrame(rows)
+        llm = FakeLLM(lambda s, u: '{"ceiling": 50}')
+        pr = A.llm_ceiling_prior(llm, df, perturb=0, last=3)
+        self.assertTrue(all(len(values(u)) == 3 for _, u in llm.calls))
+        np.testing.assert_allclose(pr["hist_max"], [90.0, 91.0, 92.0])
+        self.assertEqual(pr.attrs["leak_check"]["n_below_hist"], 3)
+        self.assertEqual(A.ceiling_upper(pr)["s0"], 90.0)
 
     def test_named_only_and_blind_only(self):
         llm = FakeLLM(shape_responder)

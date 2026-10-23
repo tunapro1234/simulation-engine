@@ -9,11 +9,14 @@ answer is NaN (counted in the leak check), never an exception.
     prior = llm_ceiling_prior(llm, history[history.t <= origin], groups="kind")    # long frame series, t, y
     prior["ceiling"]                      # per series (index), named prompt; ceiling_blind, ceiling_perturbed
     prior["ceiling_shuffled"]             # placebo: named ceilings permuted within group (no series keeps its own)
-    prior["ceiling_group_median"]         # placebo: the group's median ceiling (no series-specific information)
+    prior["ceiling_group_median"]         # placebo: median of the OTHER members' ceilings (leave-one-out)
     prior.attrs["leak_check"]["message"]  # plain sentence; also gap, Spearman, scale elasticity, n_failed
     upper = ceiling_upper(prior)          # {series: ceiling}, floored at the observed max, NaN -> group median
     DirectForecaster("hgb", target="logit", upper=upper)                         # or prior["ceiling"] as a column
     AdoptionABCAnalogy(scale={s: c / 100 for s, c in upper.items()})              # ABM ceiling m <= 1 -> c
+
+A series alone in its group gets NaN in both placebos (there is no other member); ceiling_upper then falls back to
+the observed maximum.
 
 Placebo controls cost no calls: run the downstream method with `ceiling`, `ceiling_shuffled` and
 `ceiling_group_median`; a gain that survives the shuffle is not series knowledge (the elasticity prior's LLM-swap
@@ -25,7 +28,9 @@ Leak check (heuristic thresholds, this port's choice, not calibrated on a real m
   model's training data possibly knowledge of the outcome.
 * perturbed vs blind: an answer reasoned from the numbers scales with u (scale elasticity ~1, Spearman ~1); an answer
   from recognising the exact numbers ignores the rescaling (elasticity ~0). Flagged as recognition when the
-  elasticity is under 0.5 or the Spearman under 0.8 (>= 5 series).
+  elasticity is under 0.5 or the Spearman under 0.8 (>= 5 series). A unit with a natural cap (percent of people:
+  "it saturates at 100") also gives elasticity ~0 without any recognition; read the flag on series far from that
+  cap, or in a unit without one.
 * `future=` (the post-origin truth, dev only): Spearman of each ceiling's headroom (ceiling - last value) with the
   observed post-origin change (mean future y - last value). Named far above blind means the name carries the
   outcome.
@@ -96,14 +101,29 @@ def _groups(hist: pd.DataFrame, series: list, groups) -> pd.Series:
 
 
 def _shuffle_within(values: pd.Series, grp: pd.Series, rng) -> pd.Series:
-    """Cyclic shift along a random order inside each group: every series gets another member's value."""
+    """Cyclic shift along a random order inside each group: every series gets another member's value. A series alone
+    in its group has no other member to borrow from: NaN (keeping its own value would leak it into the placebo)."""
     out = values.copy()
     for _, idx in values.groupby(grp.fillna("__na__"), sort=True).groups.items():
         idx = list(idx)
         if len(idx) < 2:
+            out.loc[idx] = np.nan
             continue
         order = [idx[i] for i in rng.permutation(len(idx))]
         out.loc[order] = values.loc[order[1:] + order[:1]].to_numpy()
+    return out
+
+
+def _loo_median(values: pd.Series, grp: pd.Series) -> pd.Series:
+    """Median of the OTHER members' values in each group (leave-one-out; NaN when there is none). The plain group
+    median contains the series' own value, and in a group of 3 it is that value for the middle series."""
+    out = pd.Series(np.nan, index=values.index, dtype=float)
+    for _, idx in values.groupby(grp.fillna("__na__"), sort=True).groups.items():
+        v = values.loc[list(idx)].to_numpy(float)
+        for j, s in enumerate(idx):
+            rest = np.delete(v, j)
+            rest = rest[np.isfinite(rest)]
+            out.loc[s] = float(np.median(rest)) if len(rest) else np.nan
     return out
 
 
@@ -117,7 +137,8 @@ def llm_ceiling_prior(llm, series_hist: pd.DataFrame, *, blind: bool = True, nam
     N points per series in the prompts. `perturb=0` skips the perturbed prompt.
 
     Returns a frame indexed by series: group, last_t, last_y, hist_max, ceiling (named; blind when named=False),
-    ceiling_blind, ceiling_perturbed and u (when perturb > 0 and blind), ceiling_shuffled, ceiling_group_median.
+    ceiling_blind, ceiling_perturbed and u (when perturb > 0 and blind), ceiling_shuffled, ceiling_group_median
+    (leave-one-out). hist_max is over the whole history, also with `last`.
     attrs["leak_check"]: source, n_series, n_failed (per prompt), n_below_hist, named_blind_gap (median relative),
     named_blind_abs_gap, rho_perturbed_blind, scale_elasticity, rho_future ({column: rho} or None), recognition
     (True / False / None when it cannot be judged) and message (plain sentences)."""
@@ -138,9 +159,9 @@ def llm_ceiling_prior(llm, series_hist: pd.DataFrame, *, blind: bool = True, nam
     items = []                                                     # (kind, series, user prompt)
     info = {}
     for s, g in hist.groupby("series", sort=False):
-        g = g.tail(last) if last else g
+        info[s] = dict(last_t=float(g["t"].iloc[-1]), last_y=float(g["y"].iloc[-1]), hist_max=float(g["y"].max()))
+        g = g.tail(last) if last else g                            # prompt only; hist_max stays the full history's
         t, y = g["t"].to_numpy(float), g["y"].to_numpy(float)
-        info[s] = dict(last_t=t[-1], last_y=y[-1], hist_max=float(np.max(y)))
         if named:
             items.append(("named", s, ceiling_prompt(t, y, unit, name=str(s))))
         if blind:
@@ -171,7 +192,7 @@ def llm_ceiling_prior(llm, series_hist: pd.DataFrame, *, blind: bool = True, nam
         out["ceiling_perturbed"] = col("perturbed") / u
         out["u"] = u
     out["ceiling_shuffled"] = _shuffle_within(out["ceiling"], out["group"], rng)
-    out["ceiling_group_median"] = out.groupby(out["group"].fillna("__na__"))["ceiling"].transform("median")
+    out["ceiling_group_median"] = _loo_median(out["ceiling"], out["group"])
     out.attrs["leak_check"] = _leak_check(out, named, blind, use_pert, failed, future, perturb)
     return out
 
@@ -238,7 +259,8 @@ def _leak_check(out, named, blind, use_pert, failed, future, perturb) -> dict:
 def ceiling_upper(prior: pd.DataFrame, col: str = "ceiling", floor: bool = True) -> dict:
     """{series: upper} from a llm_ceiling_prior frame, for DirectForecaster(upper=) / CurveBaseline(upper=) or an
     ABM scale (upper / 100). NaN falls back to the group median, then to the observed maximum; floor=True raises
-    every value to at least the observed maximum (a logit target cannot sit below the data)."""
+    every value to at least the observed maximum (a logit target cannot sit below the data). A floored value equals the
+    maximum exactly, so a logit forecaster cannot grow that series past it."""
     v = prior[col].fillna(prior["ceiling_group_median"]).fillna(prior["hist_max"])
     if floor:
         v = np.maximum(v, prior["hist_max"])

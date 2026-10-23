@@ -189,15 +189,17 @@ sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor 
   `ceiling` is the named answer (blind when `named=False`). Unparseable answers are NaN and counted in
   `leak_check["n_failed"]`.
 - **Placebo controls, no extra calls.** `ceiling_shuffled` permutes the named ceilings within `groups` (no series
-  keeps its own), `ceiling_group_median` gives every series its group's median. Run the downstream method with all
-  three; a gain that survives the shuffle is not series knowledge (the elasticity prior's gain was matched by its
-  LLM-swap placebo, see below).
+  keeps its own), `ceiling_group_median` gives every series the median of the other members of its group
+  (leave-one-out: the plain median holds the series' own value). A series alone in its group gets NaN in both.
+  Run the downstream method with all three; a gain that survives the shuffle is not series knowledge (the
+  elasticity prior's gain was matched by its LLM-swap placebo, see below).
 - **Leak check** (`attrs["leak_check"]`): the named - blind gap (median relative), the Spearman of perturbed vs
   blind and the scale elasticity (slope of log(raw perturbed / blind) on log u: 1 = the answer follows the numbers,
   0 = it ignores them). Elasticity under 0.5 or Spearman under 0.8 (>= 5 series) sets `recognition=True` and the
-  message says the blind prompt looks like recognition. With `future=` (post-origin truth, dev only) it adds the
-  Spearman of each ceiling's headroom with the observed post-origin change, and says so when the named one is
-  more than 0.2 above the blind one. Thresholds are this port's choice, not calibrated on a real model.
+  message says the blind prompt looks like recognition. A unit with a natural cap (percent of people, answer
+  "100") also gives elasticity ~0; read the flag on series far from such a cap. With `future=` (post-origin
+  truth, dev only) it adds the Spearman of each ceiling's headroom with the observed post-origin change, and says
+  so when the named one is more than 0.2 above the blind one. Thresholds are this port's choice, not calibrated on a real model.
 - **Upper.** `ceiling_upper(prior)` returns {series: value}: NaN falls back to the group median, then the observed
   maximum, and every value is at least the observed maximum. Pass the dict to `DirectForecaster(upper=)` (dict or
   panel column, see methods.md); `CurveBaseline(upper=)` takes one float, so loop per series there.
@@ -211,8 +213,9 @@ sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor 
   the mixed-technologies failure above; `BassAnalogy` (curves) does not take it yet.
 - **`scenario(..., delta=False, anchor=None)`.** `delta=True` adds the paired intervention - baseline difference
   (`delta`, `delta_lo80`, `delta_hi80`; 0 on baseline rows). `anchor=` (a frame with t and y_pred, a {t: value}
-  dict or a Series) implies it and adds `y_anchor = anchor + delta`, so the intervention is read as a change on
-  your best forecast, not on the ABM's own level. `attrs["origin_fit_error"]` is the baseline's miss at the last
+  dict or a Series; a frame with a series column is cut to the model's series) implies it and adds
+  `y_anchor = anchor + delta`, so the intervention is read as a change on your best forecast, not on the ABM's
+  own level. `attrs["origin_fit_error"]` is the baseline's miss at the last
   observed year; report it next to any scenario.
 - **The M1 result did not reproduce at a calendar origin.** M1 measured ABM - Bass control = -1.25 MAE at relative
   cutoffs (t0 + k). In rehearsal G10 at fixed calendar origins the analogy ABM was worse than its Bass control:

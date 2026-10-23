@@ -130,6 +130,14 @@ class TestScenarioAnchor(unittest.TestCase):
         obs = float(self.df[(self.df.series == "s2") & (self.df.t == 2004)]["y"].iloc[0])
         b = sc[sc.scenario == "baseline"]
         self.assertAlmostEqual(err, float(np.interp(2004.0, b["t"], b["y_pred"])) - obs, places=6)
+        # a panel forecast frame (several series) is cut to the model's series, never averaged across them
+        other = anchor.assign(series="s9", y_pred=anchor["y_pred"] + 30)
+        panel = pd.concat([anchor.assign(series="s2"), other], ignore_index=True)
+        sc3 = self.m.scenario(self.mod, {"imitation": 1.3}, n_draws=40, anchor=panel)
+        np.testing.assert_allclose(sc3["y_anchor"].to_numpy(), sc["y_anchor"].to_numpy())
+        with self.assertRaises(ValueError):
+            self.m.scenario(self.mod, {"imitation": 1.3}, n_draws=40,
+                            anchor=pd.concat([other, other.assign(series="s8")], ignore_index=True))
         sc2 = self.m.scenario(self.mod, {"imitation": 1.3}, n_draws=40, anchor={2005.0: 41.0})
         self.assertAlmostEqual(sc2[(sc2.scenario == "baseline") & (sc2.t == 2005)]["y_anchor"].iloc[0], 41.0)
 
