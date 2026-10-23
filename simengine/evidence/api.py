@@ -43,7 +43,7 @@ from . import onkayit as _onkayit
 from . import orneklem as _orneklem
 from . import pano as _pano
 from .cekirdek import SURUM, degerlendir
-from .sema import ON_EK, TEST_ADLARI, gercek_yok, hazirla
+from .sema import ON_EK, TEST_ADLARI, _eksik, gercek_yok, hazirla
 
 VERSION = SURUM
 DOMINANT_BLOCK_SHARE = 0.20  # balance_col: one block above this share of scored rows -> block-equal-weighted check
@@ -153,6 +153,7 @@ def _methods(names: Iterable[str] | None) -> list[str] | None:
 
 FORECAST_TASKS = ("forecast", "tahmin")   # handled inside evidence: continuous + forecast behaviour (see evaluate)
 AGGREGATES = ("mean", "sum")
+UNIT_MEAN = "unit_mean"      # evaluate(aggregate=): per-row metric within each unit, then the mean of the units
 CI_METHODS = ("percentile", "basic")
 
 
@@ -440,6 +441,13 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         (and per item / split when present) and the bootstrap resamples groups. Binary/continuous tasks only.
     aggregate: "mean" (default) or "sum" with aggregate_by: sum per group instead of the mean (hierarchical totals,
         e.g. aggregate_by="store_dept_week" for a store x dept x week WMAPE).
+        "unit_mean": rows are not averaged; each scored row gets weight 1 / n_unit (times the weight column) and the
+        unit is the bootstrap group, so a per-row metric (accuracy, MAE, Brier) is the mean within each unit, then the
+        equal-weighted mean of the units (D9 #3b, per-person accuracy); the task is kept (binary stays binary).
+        Rank / correlation metrics are one weighted sample value. Every aggregate_by mode counts the units with no
+        scored row (no test-split row, truth or predictions missing): `report["toplama"]` n_units, n_units_scored,
+        n_dropped, n_rows_dropped; when n_dropped > 0 a UserWarning, a limit line and the card meta say
+        "k of N units dropped" (D9 #4d: 15 persons had no DEV rows and were dropped silently).
     ci: "percentile" (default) or "basic" (2*theta - bootstrap quantiles) for column, ladder, headline and paired
         CIs. When the point estimate falls outside the percentile CI (possible for ratio/aggregate metrics) a warning
         is raised and the card gets an audit row and a flag.
@@ -503,8 +511,12 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     Missing truth: rows with no truth are dropped (noted); when the truth column is absent or all missing the
     report is an "awaiting truth" card (seals + prediction summary; no ladder, calibration or bootstrap).
     """
-    if aggregate not in AGGREGATES:
-        raise ValueError(f"aggregate must be one of {AGGREGATES}, not {aggregate!r}")
+    if aggregate not in AGGREGATES + (UNIT_MEAN,):
+        raise ValueError(f"aggregate must be one of {AGGREGATES + (UNIT_MEAN,)}, not {aggregate!r}")
+    if aggregate == UNIT_MEAN and aggregate_by is None:
+        raise ValueError("aggregate='unit_mean' needs aggregate_by= (the unit column, e.g. the person)")
+    if aggregate == UNIT_MEAN and noise_ceiling is not None:
+        raise ValueError("noise_ceiling works on group means; use aggregate='mean' with it, not 'unit_mean'")
     if ci not in CI_METHODS:
         raise ValueError(f"ci must be one of {CI_METHODS}, not {ci!r}")
     forecast = task in FORECAST_TASKS
@@ -582,7 +594,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     tavan_sutun = tavan_etiket = None
     se_info = None
     if se_metric is not None:
-        d, se_info = _se_ceiling(d, se_col, se_metric, seed, by=aggregate_by, how=aggregate)
+        d, se_info = _se_ceiling(d, se_col, se_metric, seed, by=None if aggregate == UNIT_MEAN else aggregate_by,
+                                 how=aggregate)
         tavan_sutun, tavan_etiket = "tavan_model", SE_CEILING_LABEL
         if methods_i:
             methods_i = [m for m in methods_i if m != _method(se_col)]
@@ -598,7 +611,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     toplama = None
     tavan_yarim = None
     d_rows = d          # row (person) level frame, before aggregate_by
-    if aggregate_by is not None:
+    if aggregate_by is not None and aggregate == UNIT_MEAN:
+        d, toplama = _unit_mean(d, aggregate_by, _task(task), methods_i)
+        limits = list(limits or []) + [toplama["note"]]
+    elif aggregate_by is not None:
         d, toplama = _aggregate(d, aggregate_by, _task(task),
                                 halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed, how=aggregate,
                                 keep={**({kume: "cluster"} if kume else {}), **({blok: "block_col"} if blok else {})})
@@ -606,6 +622,18 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         task = "continuous"
         limits = list(limits or []) + [toplama["note"]]
         level = level or "grup"
+    if toplama is not None:
+        dus = _dropped_units(d_rows, d, toplama["column"], methods_i)
+        toplama.update(dus)
+        if dus.get("n_dropped"):
+            n, N, r = dus["n_dropped"], dus["n_units"], dus["n_rows_dropped"]
+            warnings.warn(f"evaluate: aggregate_by={aggregate_by!r}: {n} of {N} units dropped (no scored row: no test "
+                          f"split row, or truth / predictions missing; {r} input rows); the metric covers the other "
+                          f"{N - n} units", UserWarning, stacklevel=2)
+            limits = list(limits or []) + [
+                f"aggregate_by={aggregate_by}: {N} birimden {n} tanesinin değerlendirilen satırı yok, düşürüldü "
+                f"({r} girdi satırı) ({n} of {N} units dropped by aggregate_by={aggregate_by}: no scored row, "
+                f"{r} input rows)"]
     kiyas = _compare_list(compare)
     oran_seg = _rate_error_columns(d, rate_error_by, aggregated=toplama is not None)
     if multiplier and len(d) > (multiplier_max_rows or MULTIPLIER_MAX_ROWS) and not gercek_yok(d):
@@ -658,7 +686,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     if prereg_texts:
         _declared_primary_check(rep, prereg_texts)
     if denge is not None and rep.get("sonuclar"):
-        _dominant_block(rep, d_rows, denge, explicit=balance_col is not None, by=aggregate_by, how=aggregate,
+        _dominant_block(rep, d_rows, denge, explicit=balance_col is not None,
+                        by=None if aggregate == UNIT_MEAN else aggregate_by, how=aggregate,
                         share=dominance_share)
     if ofset:
         rep["ofset"] = {k: v for k, v in ofset.items() if k != "note"}
@@ -1046,6 +1075,66 @@ def _within_variance(y: np.ndarray, codes: np.ndarray, G: int):
     with np.errstate(invalid="ignore", divide="ignore"):
         s2 = np.where(n >= 2, ss / (n - 1), np.nan)
     return n, s2
+
+
+def _scored_rows(d: pd.DataFrame, methods: Sequence[str] | None) -> np.ndarray:
+    """Rows sema.hazirla scores: test split (when a split column exists), truth and every prediction present."""
+    m = np.ones(len(d), bool)
+    if "bolum" in d.columns:
+        m &= d["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()
+    m &= ~_eksik(d["gercek"]) if "gercek" in d.columns else False
+    cols = ([ON_EK + x for x in methods] if methods else
+            [c for c in d.columns if isinstance(c, str) and c.startswith(ON_EK)])
+    for c in cols:
+        if c in d.columns:
+            m &= ~_eksik(d[c])
+    return m
+
+
+def _dropped_units(rows: pd.DataFrame, scored: pd.DataFrame, col: str, methods) -> dict:
+    """Units of the input (`rows`) with no scored row in the evaluated frame (aggregate_by drops them silently: D9
+    #4d, 15 persons without DEV rows). Empty when there is no truth at all (awaiting-truth card)."""
+    if col not in rows.columns or col not in scored.columns or "gercek" not in rows.columns \
+            or bool(_eksik(rows["gercek"]).all()):
+        return {}
+    keep = set(scored.loc[_scored_rows(scored, methods), col].tolist())
+    units = rows[col]
+    n_units = int(units.nunique(dropna=False))
+    lost = ~units.isin(keep).to_numpy()
+    n_drop = int(units[lost].nunique(dropna=False))
+    return {"n_units": n_units, "n_units_scored": n_units - n_drop, "n_dropped": n_drop,
+            "n_rows_dropped": int(lost.sum())}
+
+
+def _unit_mean(d: pd.DataFrame, by: str, task: str | None, methods) -> tuple[pd.DataFrame, dict]:
+    """aggregate="unit_mean": rows stay rows; scored rows get weight w / (sum of w in their unit) (the weight column
+    or 1) and the unit becomes the bootstrap group, so a per-row metric is the mean within each unit, then the
+    equal-weighted mean of the units (D9 #3b: per-person accuracy)."""
+    col = COLUMN_TO_INTERNAL.get(by, by) if by not in d.columns else by
+    if col not in d.columns:
+        raise ValueError(f"aggregate_by {by!r} is not a column of the frame")
+    if task == "ab":
+        raise ValueError("aggregate='unit_mean' does not apply to the ab task")
+    if d[col].isna().any():
+        raise ValueError(f"aggregate_by {by!r} has {int(d[col].isna().sum())} missing (NaN) rows")
+    d = d.copy()
+    w = pd.to_numeric(d["agirlik"], errors="coerce").to_numpy(float) if "agirlik" in d.columns else np.ones(len(d))
+    ok = _scored_rows(d, methods)
+    tot = pd.Series(np.where(ok, w, 0.0)).groupby(d[col].to_numpy()).transform("sum").to_numpy()
+    d["agirlik"] = np.where(ok & (tot > 0), w / np.where(tot > 0, tot, 1.0), w)
+    if col != "grup":
+        d["grup"] = d[col].astype(str)
+    n_units = int(d.loc[ok, col].nunique())
+    note = (f"Birim ortalaması (aggregate_by={by}, aggregate='unit_mean'): {int(ok.sum())} değerlendirme satırında "
+            f"satır metriği önce her birimin içinde, sonra {n_units} birim eşit ağırlıkla ortalandı (satır ağırlığı "
+            "1/n_birim); bootstrap birimler üzerinden. Sıra/korelasyon metrikleri (AUC, Spearman) birim ortalaması "
+            "değil, bu ağırlıklarla tek örneklem değeridir "
+            f"(unit mean, aggregate_by={by}: a per-row metric averaged within each of {n_units} units over "
+            f"{int(ok.sum())} scored rows, then across units with equal weight; bootstrap over units; rank and "
+            "correlation metrics are one weighted sample value, not a mean of units)")
+    info = {"by": by, "column": col, "n_rows": int(len(d)), "n_groups": n_units, "n_eval_rows": int(ok.sum()),
+            "aggregate": UNIT_MEAN, "note": note}
+    return d, info
 
 
 def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0,
@@ -2119,7 +2208,11 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         meta += f" · source: {_md(k.get('kaynak'))}"
     if s.get("aggregate"):
         a = s["aggregate"]
-        meta += f" · level: group (aggregate_by={a.get('by')}: {a.get('n_rows')} rows -> {a.get('n_groups')} groups)"
+        meta += (f" · level: unit mean (aggregate_by={a.get('by')}: metric within each of {a.get('n_groups')} units, "
+                 "then their mean)" if a.get("aggregate") == UNIT_MEAN else
+                 f" · level: group (aggregate_by={a.get('by')}: {a.get('n_rows')} rows -> {a.get('n_groups')} groups)")
+        if a.get("n_dropped"):
+            meta += f" · {a['n_dropped']} of {a['n_units']} units dropped (no scored row)"
     if s.get("block_bootstrap"):
         b = s["block_bootstrap"]
         meta += (f" · bootstrap: two-way, blocks of `{b['column']}` ({b['n_blocks']} blocks) × clusters"
