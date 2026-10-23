@@ -74,8 +74,8 @@ ok/warning/error/skipped), `orneklem` (multiplier), `kanit_kart` (evidence card)
 
 ### Metrics (`metrik.py`; `metric_family`, `compute_metrics`, `hit_at_k`)
 The metric family is chosen per task:
-- **binary:** accuracy (0.5 earns half a point), balanced accuracy, kappa, AUC, macro-F1, Brier, log loss, ECE,
-  `mean_bias` (mean prediction − base rate, signed).
+- **binary:** accuracy (0.5 earns half a point), balanced accuracy, kappa, AUC, average precision (`ap`; aliases
+  `average_precision`, `pr_auc`), macro-F1, Brier, log loss, ECE, `mean_bias` (mean prediction − base rate, signed).
 - **multiclass:** accuracy (ties shared), balanced accuracy, kappa, macro-F1, plus Brier, log loss and ECE
   when the predictions are probability vectors.
 - **distribution:** 1 − TVD, SimBench score 100·(1 − TVD/TVD_uniform), ordinal Wasserstein on a 0-1 scale
@@ -136,6 +136,17 @@ within each item. It keeps the marginal and removes the person information.
   item mean 0.013 [0.012–0.014], ours − shuffled persona 0.020 [0.019–0.021].
 - *Limit:* without `retest` there is no ceiling and no gap closed. The card then says "no ceiling" and does
   not invent one (OE has no retest) [kanit RAPOR §6].
+- *Honest rungs (rehearsal D9 #4a, G4 #13, D11 §8):* with no split column the labelled rungs say "(cross-fitted,
+  5-fold by group|row)". A binary marginal without items (or one row per item) is one constant when cross-fitting:
+  per-fold training rates are anti-correlated with the held-out fold (marginal AUC 0.383 on a 60-row frame, now
+  0.5); with a split column the item's train rate is kept. Constant truth on the scored rows: the fitted marginal /
+  demographic rungs drop (warning row naming only the rungs really dropped) only when their fitting rows share the
+  constant, so they cannot copy it and win the badge; the continuous random rung (it shuffles the test truth) drops,
+  0.5 / uniform stay. The demographic rung is skipped when no item × segment cell is seen in fitting (segment = unit),
+  checked for binary / multiclass / continuous only. Hard-label multiclass with more than `ETIKET_ESIK` = 200 classes:
+  the rungs are labels (uniform random label; item or item × segment mode of the training folds, ties broken by
+  global frequency), not n × K probability vectors (20,000 rows × 5,000 classes, B=200: 237 s / 4.8 GB -> 13.4 s /
+  205 MB with the bincount kappa / balanced accuracy / macro-F1 of `metrik`).
 
 ### Calibration (`kalibrasyon.py`; `recalibrate`, `reliability`)
 Cross-fitted recalibration, which goes through the same bootstrap as the raw column:
@@ -271,7 +282,12 @@ The card's limits (`kanit_kart["yanilgi"]`) carry every limit note (duplicates d
 only the first three, so prereg and dominant-block notes vanished). On a pending card (no truth yet) the baseline row
 reads `report["bildirilen_tabanlar"]` and says "declared, scored when truth arrives: T0, T1" instead of "taban yok".
 When the report has `persona_alanlari` (e.g. `persona.field_report(...)`), two rows follow the six: `persona`
-(fields that reached the prompt; partly missing fields in the note) and `dusen` (dropped fields).
+(fields that reached the prompt; partly missing fields in the note) and `dusen` (dropped fields). On an evaluated
+report use `persona.attach(report, field_rep)`: it edits the stored card in place (`kart.persona_ekle`, idempotent)
+and adds the `as_limit` line to the limits; rebuilding the card with `kart.kart(report)` would drop the seal record.
+The count is in the label and in `sayi` (the value column stays empty, so 6 fields do not print as 6.000); the
+Markdown card names the rows "Persona fields" and "Dropped fields". A declared baseline without a label is skipped on
+the pending card instead of printing "None".
 
 `panel_cost` converts extra answers to a public panel price ($0.95–2.86 per answer, a calculation).
 - *Measured:* under this rule none of the four example cards (Twin, OE value, OE class, OE LLM-500) is
@@ -549,14 +565,27 @@ ev.evaluate(df, ours="llm", aggregate_by="country", primary="spearman")   # e.g.
 absent or entirely missing (on test rows), `evaluate` returns an "awaiting truth" report with the same keys:
 - the badge `bekliyor` (`summary()["badge"] == "awaiting truth"`)
 - `gercek_bekleniyor: True`
-- `tahmin_ozeti`, the per-method prediction summary (`summary()["predictions"]`)
-- the attached seals; the card says when the predictions are not sealed
+- `tahmin_ozeti`, the per-method prediction summary (`summary()["predictions"]`): numeric columns get mean / sd /
+  quartiles, multiclass tasks and integer class codes (3-20 distinct integers, no task given) get the top labels and
+  the number of distinct labels instead of a meaningless mean; with an `item` column also per item (`maddeler`, up
+  to 100 items, beyond that only the constant ones) and `n_sabit_madde`, with a "sabit tahmin (sd 0)" audit warning
+  for items where a method predicts one value (rank metrics will be undefined there)
+- the attached seals; the card header and `summary()["headline_en"]` name **ours' seal**, not the chain's last
+  record: description marker (`ours: <name>`) > the seal whose canonical sha256 matches the frame's columns > name
+  in the description (unless the seal holds only other methods' `pred_` columns) > a seal holding `pred_<ours>`;
+  none of these -> the last record with the note "ours not matched" (`report["bizim_muhur"]`,
+  `summary()["ours_seal"]`). An audit row compares the frame with ours' sealed file. The card says when the
+  predictions are not sealed
+- declared baselines (`unlabeled_baselines=`, `baselines_oof=`) kept in `tabanlar` / `bildirilen_tabanlar`
 - an empty ladder and empty results
 
 A truth column that is present but entirely missing also emits a `UserWarning` (often a failed join on `unit`);
 frames built with `truth=None` (the `sim.*_frame` helpers) trigger it too, so drop the column to stay silent.
 
-The Markdown card adds a "Predictions (awaiting truth)" table, the dashboard shows a predictions section, and
+The Markdown card adds a "Predictions (awaiting truth)" table (distribution or top labels, distinct labels, items and
+constant items per column, then the constant items by name) and, with an `item` column, a "Predictions per item"
+table (mean ± sd, or the top label with its share and distinct count; up to 30 items, constant ones first), in both
+`lang="en"` and `lang="mixed"`. The dashboard shows a predictions section, and
 `simengine evaluate` accepts such a frame. A frame that has truth but whose `split` (`bolum`) column has no test
 row (accepted: `test`, `deger`, `degerlendirme`, `holdout`; for example `split="cv"`) raises
 `ValueError("no test rows in split ...")`. It is not reported as awaiting truth.
@@ -1089,3 +1118,36 @@ sb = ev.segment_bias(frame, "region", ["ours", "base"])             # sb["arms"]
   error, 30 seeds: the point fell below its single-arm percentile CI in 29 of 30, while the paired difference CI of
   two unbiased arms covered 0 in 30 of 30. The result flags `point_outside_ci` (with a `UserWarning`) and carries the
   note; judge arms on `diff`.
+
+## Average precision, rate error rows, not-applicable audits (D5 #8, D9 #9, D11 #7, D12 #12 #14 #16 #18, D13 #5 #10)
+
+```python
+rep = ev.evaluate(df, ours="kb1", primary="ap")                       # also "average_precision", "pr_auc"
+rep = ev.evaluate(df, ours="kb1", primary="auc", rate_error_by="segment")   # or a column name / list of columns
+ev.summary(rep)["rate_error"]                                          # rows, ours − other differences
+```
+
+- **Average precision** (`metrik._ap`, binary family, higher is better): step-wise area under the precision-recall
+  curve, tied scores form one threshold, equal to `sklearn.metrics.average_precision_score` (to 1e-12 on 20 random
+  tie-heavy cases); no positive -> NaN. It is an aggregate metric, so its CI comes from the `B_aggregate` loop; there
+  is no multiplicity-weighted fast path yet: on 38,000 rows × 8 methods (B_aggregate=200) evaluate took 54 s with
+  it vs 45 s without *(this port, nice 19)*.
+- **`rate_error_by=`** (binary / continuous): for every method and baseline column, total rate error
+  |Σp − Σy| / n (= |mean_bias|) and n-weighted segment rate error Σ_s |Σ_s p − Σ_s y| / n (= `segment_bias` with
+  `weight=None`), weighted by the `weight` column when present; lower is better. The CIs and the ours − other
+  differences (p, `a_iyi`) use the ladder's paired cluster bootstrap (same clusters, `block_col` blocks, seed, `B`,
+  `ci=`). `"segment"` means the frame's `segment` column, else its `seg_*` columns (each its own column of the table).
+  Report `oran_hatasi` (`satirlar`, `farklar`, `segmentler`), `summary()["rate_error"]`, card table "Rate error
+  (lower is better)". The single-arm CI of an absolute value lies above the point when the true gap is near 0
+  (`point_outside_ci` flag; see `segment_bias`): judge arms on the paired differences. Unknown columns and other
+  tasks raise `ValueError`; with `aggregate_by=` only the columns kept by the aggregation can be used.
+- **Not applicable instead of failing** (368e5a8, review 36ea5d5): `level="segment" / "study" / "effect"`, or one row
+  per segment in every item where the segment cells form a grid repeated across items (distinct cells ≤ max rows per
+  item; an explicit other `level=` such as `"person"` turns the detection off), marks the persona shuffle and the
+  PPI++ "worth N humans" multiplier "not applicable" with the reason (audit rows, the worth row's note,
+  `report["carpan_uygulanamaz"]`). "Strongest other method" warns only when the paired CI excludes 0 in the bad
+  direction, otherwise "tied"; without a CI it warns on the point sign, worded "point estimate only". A low sd ratio
+  under an L1 primary (mae / one_minus_mae / wmape) is an informational note (`bilgi_notu`), over-dispersion still
+  warns. Per-item constant predictions give a warning row with the item count and `report["sira_tanimsiz"]`
+  (constant / NaN rank-metric items per method). With `ours_uses_llm=False` the `raw=` arm keeps the memorization and
+  contamination audits.

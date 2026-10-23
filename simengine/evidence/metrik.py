@@ -5,7 +5,7 @@
          Bootstrap'ta küme toplamlarıyla hızlı hesaplanır.
   oran   (y, p) → (pay, payda) satır vektörleri; metrik = Σpay / Σpayda (WMAPE, yanlılık). Bootstrap'ta pay ve
          payda AYNI küme yeniden örnekleriyle birlikte toplanır (tekrar başına toplamların oranı).
-  toplu  (y, p, madde) → tek sayı (AUC, macro-F1, korelasyon, ECE, ab kazananı). Bootstrap'ta döngü.
+  toplu  (y, p, madde) → tek sayı (AUC, average precision, macro-F1, korelasyon, ECE, ab kazananı). Bootstrap'ta döngü.
 yon: +1 büyük iyi, -1 küçük iyi. tavan: test-retest tavanı bu metrikte anlamlı mı.
 
 Dağılım görevinde Wasserstein sayısal şık konumlarını kullanır (konum/pos sütunu, sayısal secenekler/options ya da
@@ -138,6 +138,20 @@ def _auc(y, p, madde=None):
     if len(np.unique(y)) < 2:
         return np.nan
     return roc_auc_score(y, p)
+
+
+def _ap(y, p, madde=None):
+    """Average precision: basamaklı PR eğrisi altı alan, eşit skorlar tek eşik (sklearn average_precision_score ile
+    aynı; bench bank._ap). Pozitif yoksa nan."""
+    y, p = np.asarray(y, float), np.asarray(p, float)
+    o = np.argsort(-p, kind="mergesort")
+    y, p = y[o], p[o]
+    esik = np.r_[np.flatnonzero(np.diff(p)), len(p) - 1]   # her farklı skorun son satırı
+    tp = np.cumsum(y)[esik]
+    if not len(tp) or tp[-1] <= 0:
+        return np.nan
+    fp = (esik + 1) - tp
+    return float(np.sum(np.diff(np.r_[0, tp / tp[-1]]) * tp / (tp + fp)))
 
 
 def _f1_ikili(y, p, madde=None):
@@ -454,6 +468,8 @@ def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: b
             Metrik("dengeli_dogruluk", "toplu", _dengeli_ikili, +1, tavan=True, aciklama="sınıf dengesizliğine dayanıklı"),
             Metrik("kappa", "toplu", _kappa_ikili, +1, tavan=True, aciklama="Cohen kappa: şans düzeltmeli uyum"),
             Metrik("auc", "toplu", _auc, +1, aciklama="sıralama kalitesi"),
+            Metrik("ap", "toplu", _ap, +1, aciklama="average precision (basamaklı PR-AUC, eşit skor tek eşik; "
+                                                     "sklearn average_precision_score): seyrek pozitifte sıralama"),
             Metrik("macro_f1", "toplu", _f1_ikili, +1, tavan=True),
             Metrik("brier", "birim", _brier_ikili, -1, aciklama="olasılık hatası (uygun skor)"),
             Metrik("logloss", "birim", _logloss_ikili, -1, aciklama="olasılık hatası (uygun skor)"),

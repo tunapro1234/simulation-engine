@@ -66,6 +66,7 @@ REVERSE_PREFIX = ("reverse_", "ters_")   # position-swap column for pair prompts
 
 METRIC_TO_INTERNAL = {
     "accuracy": "dogruluk", "balanced_accuracy": "dengeli_dogruluk", "kappa": "kappa", "auc": "auc",
+    "average_precision": "ap", "pr_auc": "ap", "ap": "ap",
     "macro_f1": "macro_f1", "brier": "brier", "logloss": "logloss", "ece": "ece",
     "one_minus_tvd": "bir_eksi_tvd", "1-tvd": "bir_eksi_tvd", "simbench": "simbench", "wasserstein": "wasserstein",
     "js": "js", "ks": "ks", "mode_match": "mod_eslesme",
@@ -113,7 +114,8 @@ MEMORIZATION_CAVEAT_EN = "gain may come from recognition/memorization"
 CAVEAT_REASON_EN = {"ezber_denetimi": "memorization audit warning", "kor_kol": "the blind arm loses most of the gain"}
 ROW_TO_ENGLISH = {"taban": "Strongest simple baseline", "ham": "Raw method", "kalibre": "Ours",
                   "tavan": "Human retest ceiling", "bosluk": "Gap closed (ours - base)/(ceiling - base)",
-                  "bedel": "Worth N humans (+100 real answers)"}
+                  "bedel": "Worth N humans (+100 real answers)", "persona": "Persona fields",
+                  "dusen": "Dropped fields"}
 
 
 def to_internal(df: pd.DataFrame) -> pd.DataFrame:
@@ -370,7 +372,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              aggregate: str = "mean", ci: str = "percentile", n_configs: int | None = None,
              block_col: str | None = None, point_pairs: Sequence | None = None,
              prereg_doc: str | os.PathLike | Sequence | None = None, split: str | None = None,
-             balance_col: str | None = None, dominance_share: float = DOMINANT_BLOCK_SHARE) -> dict:
+             balance_col: str | None = None, dominance_share: float = DOMINANT_BLOCK_SHARE,
+             rate_error_by: str | Sequence[str] | None = None) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -382,6 +385,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         and the card says "not applicable" (no human answers, no person information). A model ceiling still works
         via ceiling_col=.
     primary: metric name (English alias or internal); default per task, macro-F1 when the majority class > 60 %.
+        Binary also "ap" (= "average_precision", "pr_auc"): step-wise average precision, tied scores one threshold
+        (sklearn average_precision_score), CI from the B_aggregate loop.
         Continuous ratio metrics: "wmape" (= "wape", sum|y - p| / sum|y|, lower is better; the cluster bootstrap
         resamples numerator and denominator together, ratio of sums per replicate) and "bias" (sum p / sum y - 1,
         signed diagnostic, never primary). Passing primary="wmape" adds both to any continuous evaluation.
@@ -480,6 +485,12 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         median point forecast. In forecast mode with an L1 primary (mae / wmape) the card shows a row per pair with the
         primary metric and bias of both, plus the observed direction. Explicit columns are always validated
         (ValueError); outside forecast + L1 an explicit list is skipped with a UserWarning.
+    rate_error_by: None (default: off), "segment" (the frame's `segment` / `seg_*` columns) or column name(s), binary
+        and continuous tasks: rows of total rate error |sum p − sum y| / n (= |mean_bias|) and n-weighted segment rate
+        error sum_s |sum_s p − sum_s y| / n (= sum_s (n_s/n) |mean_s p − mean_s y|) for every method and baseline
+        column (agirlik/weight column: weighted sums), lower is better. CIs and ours − other differences (p, a_iyi) on
+        the paired cluster bootstrap of the ladder (same clusters, blocks, seed, B, ci=). `report["oran_hatasi"]`,
+        `summary()["rate_error"]`, a "Rate error" card table. A missing column raises ValueError, as do other tasks.
     Missing truth: rows with no truth are dropped (noted); when the truth column is absent or all missing the
     report is an "awaiting truth" card (seals + prediction summary; no ladder, calibration or bootstrap).
     """
@@ -580,6 +591,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         limits = list(limits or []) + [toplama["note"]]
         level = level or "grup"
     kiyas = _compare_list(compare)
+    oran_seg = _rate_error_columns(d, rate_error_by, aggregated=toplama is not None)
     if multiplier and len(d) > (multiplier_max_rows or MULTIPLIER_MAX_ROWS) and not gercek_yok(d):
         tek = "madde" not in d or d["madde"].nunique() <= 1
         warnings.warn(
@@ -637,7 +649,132 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             rep.pop("_forecast", None)
         if pairs:
             rep["ortalama_medyan"] = pairs
+    if oran_seg and rep.get("sonuclar") and not rep.get("gercek_bekleniyor"):
+        rep["oran_hatasi"] = _rate_error(rep, d, oran_seg, methods=methods_i, classes=classes, block=blok, B=B,
+                                         seed=seed, ci=ci)
     return rep
+
+
+RATE_ERROR_TASKS = ("ikili", "surekli")
+
+
+def _rate_error_columns(d: pd.DataFrame, by, aggregated: bool = False) -> list[str] | None:
+    """rate_error_by= -> internal segment column names, checked against the evaluated frame before scoring."""
+    if by is None:
+        return None
+    names = [by] if isinstance(by, str) else list(by)
+    out = []
+    for x in names:
+        if x == "segment" and "segment" not in d.columns:
+            segs = [c for c in d.columns if isinstance(c, str) and c.startswith("seg_")]
+            if not segs:
+                raise ValueError("rate_error_by='segment' needs a 'segment' or 'seg_*' column in the evaluated frame "
+                                 "(or pass a column name)" + (" (aggregate_by= keeps only the group, item, split "
+                                                              "and block columns)" if aggregated else ""))
+            out += segs
+            continue
+        c = COLUMN_TO_INTERNAL.get(x, x)
+        if c not in d.columns:
+            raise ValueError(f"rate_error_by: {x!r} is not a column of the evaluated frame"
+                             + (" (aggregate_by= keeps only the group, item, split and block columns)"
+                                if aggregated else ""))
+        out.append(c)
+    return list(dict.fromkeys(out))
+
+
+def _rate_error(rep: dict, d: pd.DataFrame, segs: list[str], *, methods, classes, block, B: int, seed: int,
+                ci: str) -> dict:
+    """Total and n-weighted segment rate error of every method / baseline column on the paired cluster bootstrap
+    of the ladder (same Orneklem: clusters, two-way blocks, seed). Lower is better; differences are ours − other."""
+    from scipy import sparse
+    from .cekirdek import _blok_kur
+    if rep.get("gorev") not in RATE_ERROR_TASKS:
+        raise ValueError(f"rate_error_by needs a binary or continuous task (sums of predictions are rates or totals), "
+                         f"not {TASK_TO_ENGLISH.get(rep.get('gorev'), rep.get('gorev'))!r}")
+    veri = hazirla(d, rep["gorev"], methods, classes)
+    _blok_kur(veri, block, False)
+    dd = veri.df
+    y = dd["gercek"].to_numpy(float)
+    w = dd["agirlik"].to_numpy(float) if "agirlik" in dd else np.ones(len(dd))
+    sonuc = rep.get("sonuclar") or {}
+    taban = {}
+    if any(str(c).startswith("taban_") for c in sonuc):    # same cross-fitted rungs (same function, summary, seed)
+        ozet_s = "median" if rep.get("birincil") in ("mae", "bir_eksi_mae", "wmape") else "mean"
+        taban = {f"taban_{ad}": deg for ad, (_, deg) in _merdiven.baselineler(veri, ozet_s, seed).items()}
+    kol, atlanan = {}, []
+    for c, v in sonuc.items():
+        if v.get("tur") not in ("baseline", "yontem"):
+            continue
+        p = taban.get(c, dd[c] if c in dd else None)
+        try:
+            p = np.asarray(p, float)
+        except (TypeError, ValueError):
+            p = None
+        if p is None or p.shape != y.shape or not np.isfinite(p).all():
+            atlanan.append(c)
+            continue
+        kol[c] = p
+    cols = list(kol)
+    if not cols:
+        return {"segmentler": segs, "n": int(len(dd)), "B": B, "ga_yontemi": ci, "bizim": None, "satirlar": [],
+                "farklar": [], "atlanan": atlanan}
+    orn = _boot.Orneklem(veri.kume, B=B, tohum=seed, iki_yon=veri.iki_yon)
+    G, C, k = orn.G, len(cols), orn.kume
+    E = np.column_stack([w * (kol[c] - y) for c in cols])                    # rows × C
+    Wn = np.bincount(k, w, minlength=G)
+    T = np.column_stack([np.bincount(k, E[:, j], minlength=G) for j in range(C)])   # G × C
+    S = {}
+    for s in segs:
+        kod, _ = pd.factorize(dd[s], use_na_sentinel=False)
+        K = int(kod.max()) + 1
+        satir = np.repeat(k, C)
+        sutun = (np.arange(C)[None, :] * K + kod[:, None]).reshape(-1)
+        S[s] = (sparse.csr_matrix((E.reshape(-1), (satir, sutun)), shape=(G, C * K)).T.tocsr(), K)   # (C·K) × G
+
+    def olc(c):
+        n = c @ Wn
+        out = {"toplam": np.abs(c @ T) / n}
+        for s, (M, K) in S.items():
+            out[s] = np.abs(M @ c).reshape(C, K).sum(1) / n
+        return out
+
+    nokta = olc(np.ones(G))
+    R = {o: np.empty((B, C)) for o in nokta}
+    for b in range(B):
+        for o, v in olc(orn.sayim(b)).items():
+            R[o][b] = v
+
+    def kutu(o, j):
+        a, u = (_finite(x) for x in _boot.ga(R[o][:, j], nokta=nokta[o][j], yontem=ci))
+        v = float(nokta[o][j])
+        return {"deger": v, "alt": a, "ust": u,
+                **({"nokta_ga_disi": True} if a is not None and u is not None and not a <= v <= u else {})}
+
+    satirlar = [{"sutun": c, "etiket": sonuc[c].get("etiket"), "tur": sonuc[c].get("tur"), "toplam": kutu("toplam", j),
+                 "segment": {s: {**kutu(s, j), "n_segment": S[s][1]} for s in segs}}
+                for j, c in enumerate(cols)]
+    bc = ((rep.get("manset") or {}).get("bizim") or {}).get("sutun")
+    farklar = []
+    if bc in cols:
+        i = cols.index(bc)
+        for j, c in enumerate(cols):
+            if j == i:
+                continue
+            for o in nokta:
+                f = R[o][:, i] - R[o][:, j]
+                fn = float(nokta[o][i] - nokta[o][j])
+                a, u = (_finite(x) for x in _boot.ga(f, nokta=fn, yontem=ci))
+                farklar.append({"a": bc, "b": c, "etiket": sonuc[c].get("etiket"), "olcu": o, "fark": fn,
+                                "alt": a, "ust": u, "p": _finite(_boot.p_degeri(f)),
+                                "a_iyi": True if u is not None and u < 0 else False if a is not None and a > 0 else None})
+    out = {"segmentler": segs, "n": int(len(dd)), "B": B, "ga_yontemi": ci, "bizim": bc, "satirlar": satirlar,
+           "farklar": farklar,
+           "tanim": "toplam = |Σtahmin − Σgerçek| / n; segment = Σ_s |Σ_s tahmin − Σ_s gerçek| / n (n ağırlıklı); küçük iyi. "
+                    "Mutlak değer her tekrarda ≥ 0: gerçek fark 0'a yakınken yüzdelik GA noktanın üstünde kalabilir; "
+                    "kollar arası karar eşleşik farktan (farklar) okunur"}
+    if atlanan:
+        out["atlanan"] = atlanan
+    return out
 
 
 L1_METRICS = ("mae", "wmape")
@@ -1112,6 +1249,19 @@ def _seals(report: dict) -> list[dict]:
             for r in report.get("onkayit") or [] if isinstance(r, dict)]
 
 
+def _ours_seal(report: dict) -> dict | None:
+    """report["bizim_muhur"] in English: the seal of ours (index, sha256, match class; "note" when ours matched no
+    seal and the chain's last record stands in)."""
+    b = report.get("bizim_muhur")
+    if not b:
+        return None
+    out = {"index": b.get("sira"), "sha256": b.get("sha256"), "match": b.get("eslesme"), "n_records": b.get("n_kayit")}
+    if b.get("not"):
+        m = re.search(r"\((ours not matched[^()]*(?:\([^()]*\)[^()]*)*)\)\s*$", str(b["not"]))
+        out["note"] = m.group(1) if m else _en_text(b["not"])
+    return out
+
+
 def _f3(x) -> str:
     if x is None or (isinstance(x, float) and not math.isfinite(x)):
         return "—"
@@ -1432,6 +1582,7 @@ _PHRASES_EN = [
      "; no block-equal-weighted value with aggregate='sum'"),
     (r"^split=('\w+') verildi: bütün satırlar değerlendirme satırı, .*?\((cross-fitted \(declared\): [^()]*)\)$",
      r"split=\1 given: every row is an evaluation row, \2"),
+    (r"^eksik \(missing\): ", "missing: "), (r"^yok \(none\)$", "none"),
     # generic fragments (last)
     (r"bizim − taban\b", "ours − baseline"), (r"\bkarıştırılmış tahmin\b", "shuffled prediction"),
     (r"\bkarıştırılmış\b", "shuffled"), (r"− marjinal\b", "− marginal"), (r"'bizim'", "'ours'"), (r"\bbizim\b", "ours"),
@@ -1573,8 +1724,14 @@ def _headline_en(s: dict) -> str | None:
     o, b = s.get("ours"), s.get("best_baseline")
     if s.get("awaiting_truth"):
         z = s.get("seals") or []
-        return (f"awaiting truth: predictions of {len(s.get('predictions') or {})} method(s)"
-                + (f", sealed ({len(z)} record(s), last sha256 {str(z[-1].get('sha256'))[:12]})" if z else ", NOT sealed")
+        bm = s.get("ours_seal")
+        if bm and bm.get("sha256"):   # the seal the Turkish card shows (cekirdek._bizim_muhuru), not the chain's last
+            ad = "last record" if bm.get("match") == "son" else "ours' seal"
+            muhur = (f", sealed ({len(z)} record(s), {ad} #{bm.get('index')} sha256 {str(bm['sha256'])[:12]}"
+                     + (f"; {bm['note']}" if bm.get("note") else "") + ")")
+        else:
+            muhur = f", sealed ({len(z)} record(s), last sha256 {str(z[-1].get('sha256'))[:12]})" if z else ", NOT sealed"
+        return (f"awaiting truth: predictions of {len(s.get('predictions') or {})} method(s)" + muhur
                 + "; no metric until the truth is opened")
     if not o or o.get("value") is None:
         return None
@@ -1628,6 +1785,7 @@ def summary(report: dict) -> dict:
                    for r in report.get("merdiven") or []],
         "headline": m.get("cumle"),
         "seals": _seals(report),
+        "ours_seal": _ours_seal(report),
         "ceiling_kind": SE_CEILING_LABEL if report.get("se_tavani") and m.get("tavan") else
         CEILING_KIND.get(report.get("tavan_turu") or ("insan_tekrar" if m.get("tavan") else None)),
         "declared_baselines": list((report.get("tabanlar") or {}).get("bildirilen") or []),
@@ -1665,6 +1823,8 @@ def summary(report: dict) -> dict:
     if report.get("tek_koken"):
         t = report["tek_koken"]
         out["single_origin"] = {"column": t.get("sutun"), "value": t.get("deger"), "note": t.get("not")}
+    if report.get("oran_hatasi"):
+        out["rate_error"] = _rate_error_en(report["oran_hatasi"])
     if report.get("ortalama_medyan"):
         out["mean_median"] = [{"mean": _method(r["ortalama"]), "median": _method(r["medyan"]),
                                "metric": METRIC_TO_ENGLISH.get(r["metrik"], r["metrik"]),
@@ -1672,6 +1832,54 @@ def summary(report: dict) -> dict:
                                "mean_bias": r["ortalama_yanlilik"], "median_bias": r["medyan_yanlilik"]}
                               for r in report["ortalama_medyan"]]
     out["headline_en"] = _headline_en(out)
+    return out
+
+
+def _rate_error_en(o: dict) -> dict:
+    """report["oran_hatasi"] -> summary()["rate_error"] (English keys, user column names)."""
+    box = lambda b: {"value": b.get("deger"), "lo": b.get("alt"), "hi": b.get("ust"),
+                     "point_outside_ci": bool(b.get("nokta_ga_disi"))}
+    return {"segment_columns": [column_en(s) for s in o.get("segmentler") or []], "n": o.get("n"), "B": o.get("B"),
+            "ours": column_en(o.get("bizim")),
+            "definition": "total = |sum pred − sum truth| / n; segment = sum over segments of |sum pred − sum truth| "
+                          "/ n (n-weighted mean of per-segment rate gaps); lower is better",
+            "rows": [{"column": column_en(r["sutun"]), "label": r.get("etiket"), "kind": _kind_en(r.get("tur")),
+                      "total": box(r["toplam"]),
+                      "segment": {column_en(s): {**box(v), "n_segments": v.get("n_segment")}
+                                  for s, v in (r.get("segment") or {}).items()}} for r in o.get("satirlar") or []],
+            "differences": [{"a": column_en(f["a"]), "b": column_en(f["b"]), "label": f.get("etiket"),
+                             "measure": "total" if f["olcu"] == "toplam" else column_en(f["olcu"]), "diff": f["fark"],
+                             "lo": f.get("alt"), "hi": f.get("ust"), "p": f.get("p"), "a_better": f.get("a_iyi")}
+                            for f in o.get("farklar") or []],
+            "skipped": [column_en(c) for c in o.get("atlanan") or []]}
+
+
+def _rate_error_md(re_: dict, en: bool) -> list[str]:
+    """Card table of summary()["rate_error"]: per-column total / segment rate error, then ours − other (paired)."""
+    segs = re_["segment_columns"]
+    out = ["", "## Rate error (lower is better)", "",
+           "| Method | Kind | Total abs(Σp − Σy)/n [95% CI] | "
+           + " | ".join(f"Segment `{_md(s)}` Σ abs(Σp − Σy)/n [95% CI]" for s in segs) + " |",
+           "|---|---|---|" + "---|" * len(segs)]
+    for r in re_["rows"]:
+        lab = _label_en(r.get("label")) if en else r.get("label")
+        cells = [r["total"]] + [r["segment"].get(s) or {} for s in segs]
+        out.append(f"| {_md(lab)} (`{r['column']}`) | {r['kind']} | "
+                   + " | ".join(f"{_num(c.get('value'))}{_ci(c.get('lo'), c.get('hi'))}" for c in cells) + " |")
+    if re_["differences"]:
+        out += ["", "| Ours − other | Measure | Difference [95% CI] | p | Verdict |", "|---|---|---|---|---|"]
+        for f in re_["differences"]:
+            ci_ = f" [{f['lo']:+.3f}, {f['hi']:+.3f}]" if f.get("lo") is not None and f.get("hi") is not None else ""
+            v = {True: "ours lower (CI below 0)", False: "ours higher (CI above 0)"}.get(f.get("a_better"),
+                                                                                       "unclear (CI includes 0)")
+            out.append(f"| `{f['a']}` − `{f['b']}` | {_md(f['measure'])} | {f['diff']:+.3f}{ci_} | "
+                       + ("—" if f.get("p") is None else f"{f['p']:.3f}") + f" | {v} |")
+    out += ["", f"Total = |sum pred − sum truth| / n (= |mean_bias|); segment = sum over segments of |sum pred − sum "
+                f"truth| / n, the n-weighted mean of per-segment rate gaps. Paired cluster bootstrap (B={re_['B']}, "
+                "the ladder's clusters and seed); abs(·) is ≥ 0 in every replicate, so near a zero gap the CI can lie above "
+                "the point: read the paired differences."]
+    if re_.get("skipped"):
+        out += ["", "Not scored (non-numeric or missing values): " + ", ".join(f"`{c}`" for c in re_["skipped"]) + "."]
     return out
 
 
@@ -1787,6 +1995,66 @@ def _se_ceiling_en(x: dict | None) -> dict | None:
             "label": x.get("etiket"), "draws": x.get("R"), "seed": x.get("tohum"), "n": x.get("n"),
             "analytic": x.get("analitik"), "value": x.get("deger"), "lo": x.get("alt"), "hi": x.get("ust"),
             "cells": x.get("n_hucre")}
+
+
+CARD_ITEM_ROWS = 30     # pending card: per-item prediction rows printed (constant items first); the rest stay in the report
+
+
+def _top_labels(p: dict, k: int | None = None) -> str:
+    return ", ".join(f"{_md(a)} {100 * b:.0f}%" for a, b in list((p.get("en_sik") or {}).items())[:k])
+
+
+def _item_cell(p: dict | None) -> str:
+    if not p:
+        return "—"
+    if p.get("tur") == "etiket":
+        return f"{_top_labels(p, 1)} ({p.get('n_farkli')} distinct)"
+    if p.get("tur") == "sayi":
+        return f"{_num(p.get('ortalama'))} ± {_num(p.get('sd'))}"
+    return "vector" if p.get("tur") == "vektor" else "—"
+
+
+def _predictions_md(preds: dict, en: bool) -> list[str]:
+    """Awaiting-truth prediction summary (cekirdek.bekleyen tahmin_ozeti): per column distribution or label counts
+    (distinct labels), item counts with constant items, and a per-item table (mean ± sd, or the top label)."""
+    col = {c: f"`{column_en(c) if en else c}`" for c in preds}
+    out = ["", "## Predictions (awaiting truth)", "",
+           "| Column | n | missing | mean | sd | min | median | max | top labels | distinct | items (constant) |",
+           "|---|---|---|---|---|---|---|---|---|---|---|"]
+    sabit = []
+    for c, p in preds.items():
+        items = "—" if p.get("n_madde") is None else f"{p['n_madde']} ({p.get('n_sabit_madde', 0)})"
+        out.append(f"| {_md(p.get('etiket'))} ({col[c]}) | {p.get('n')} | {p.get('eksik')} | {_num(p.get('ortalama'))} | "
+                   f"{_num(p.get('sd'))} | {_num(p.get('en_kucuk'))} | {_num(p.get('medyan'))} | "
+                   f"{_num(p.get('en_buyuk'))} | {_top_labels(p) or ('vector' if p.get('tur') == 'vektor' else '—')} | "
+                   f"{p.get('n_farkli', '—')} | {items} |")
+        if p.get("n_sabit_madde"):
+            ms = p.get("sabit_maddeler") or []
+            sabit.append(f"- {col[c]}: {p['n_sabit_madde']}/{p['n_madde']} items constant ("
+                         + ", ".join(_md(m) for m in ms) + (", …" if p["n_sabit_madde"] > len(ms) else "") + ")")
+        elif p.get("sabit"):
+            sabit.append(f"- {col[c]}: the whole column is constant")
+    if sabit:
+        out += ["", "Constant predictions (sd 0; rank / correlation metrics will be undefined there):", ""] + sabit
+    per = {c: p["maddeler"] for c, p in preds.items() if p.get("maddeler")}
+    if not per:
+        return out
+    sabit_m = {m for p in preds.values() for m in p.get("sabit_maddeler") or []}
+    maddeler = list(dict.fromkeys(m for d in per.values() for m in d))
+    maddeler = [m for m in maddeler if m in sabit_m] + [m for m in maddeler if m not in sabit_m]
+    n_madde = max((p.get("n_madde") or 0) for p in preds.values())
+    out += ["", "## Predictions per item (awaiting truth)", "",
+            "| Item | " + " | ".join(f"{_md(preds[c].get('etiket'))} ({col[c]})" for c in per) + " |",
+            "|---|" + "---|" * len(per)]
+    for m in maddeler[:CARD_ITEM_ROWS]:
+        out.append(f"| {_md(m)} | " + " | ".join(_item_cell(per[c].get(m)) for c in per) + " |")
+    kirpik = any(p.get("maddeler_kirpildi") for p in preds.values())
+    if len(maddeler) > CARD_ITEM_ROWS or kirpik:
+        out += ["", f"{min(len(maddeler), CARD_ITEM_ROWS)} of {n_madde} items shown (constant items first)"
+                + ("; over 100 items the report keeps per-item summaries for constant items only" if kirpik else "")
+                + "; the rest are in `report[\"tahmin_ozeti\"]`."]
+    out += ["", "Cell: mean ± sd of the predictions in the item; labels: the most frequent label and its share."]
+    return out
 
 
 def card_markdown(report: dict, lang: str = "mixed") -> str:
@@ -1913,6 +2181,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
                           else "") + " |")
         out += ["", "Signed (0 = the mean is right; binary: + over-predicts the rate). Diagnostic, not a primary metric; "
                     "`paired_ci(..., metric=\"mean_bias\")` compares two arms."]
+    if s.get("rate_error"):
+        out += _rate_error_md(s["rate_error"], en)
     if s.get("comparisons"):
         out += ["", "## Registered comparisons / drop conditions", "",
                 "| Comparison | Kind | Metric | A − B [95% CI] | p | n clusters | Verdict |", "|---|---|---|---|---|---|---|"]
@@ -1934,13 +2204,7 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
             out.append(f"| {_md(lab)} (`{col}`) | {kind} | "
                        f"{_num(r.get('deger'))}{_ci(r.get('alt'), r.get('ust'))} | {d} | {p} |")
     if s.get("predictions"):
-        out += ["", "## Predictions (awaiting truth)", "", "| Column | n | missing | mean | sd | min | median | max | top labels |",
-                "|---|---|---|---|---|---|---|---|---|"]
-        for c, p in s["predictions"].items():
-            top = ", ".join(f"{_md(a)} {100 * b:.0f}%" for a, b in (p.get("en_sik") or {}).items())
-            out.append(f"| {_md(p.get('etiket'))} (`{column_en(c) if en else c}`) | {p.get('n')} | {p.get('eksik')} | {_num(p.get('ortalama'))} | "
-                       f"{_num(p.get('sd'))} | {_num(p.get('en_kucuk'))} | {_num(p.get('medyan'))} | "
-                       f"{_num(p.get('en_buyuk'))} | {top or ('vector' if p.get('tur') == 'vektor' else '—')} |")
+        out += _predictions_md(s["predictions"], en)
     if s["audits"]:
         out += ["", "## Audits", "", "| Check | Status | Detail |", "|---|---|---|"]
         for a in s["audits"]:

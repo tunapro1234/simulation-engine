@@ -183,8 +183,8 @@ class AttachToEvaluatedReport(unittest.TestCase):
         out = sp.attach(rep, sp.field_report(people, df))
         self.assertIs(out, rep)
         md = ev.card(rep)
-        self.assertIn("| persona |", md)
-        self.assertIn("| dusen |", md)
+        self.assertIn("| Persona fields |", md)        # ROW_TO_ENGLISH names the persona / dusen rows (W8)
+        self.assertIn("| Dropped fields |", md)
         self.assertNotIn("4.000", md)                       # the count is not printed as a metric value
         self.assertIn("- Persona fields: 4 reached the prompt", md)
         k = rep["kanit_kart"]
