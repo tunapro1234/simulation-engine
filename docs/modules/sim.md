@@ -226,6 +226,13 @@ person_distribution_frame(p)  # pid x item: p, status, segment, one column per s
   its disk cache on `sample`, so repeat i is a new draw, not the stored reply; `repeats=1` passes no `sample` and
   keeps the old cache entry. Calls = framings × segments × questions × k. FakeLLM ignores `sample`, so offline
   repeats are identical.
+- **"Not sure" options (D6 #5).** The prompt says to estimate each option's share `(ignore "not sure" answers)`,
+  the measured wording. When the option list itself scores "Not sure / neither" or "Don't know", that line tells
+  the model to put ~0 there. `include_unsure=True` drops the parenthetical (`DIST_TEMPLATE` minus `UNSURE_NOTE`).
+  The default `None` leaves the prompt byte-identical, so cache keys and prompt hashes do not change, and warns
+  once per call, naming each option that looks like not sure / unsure / don't know / neither / no opinion /
+  undecided. `False` keeps the instruction and turns the warning off. `distribution_prompt(...,
+  include_unsure=)` takes the same flag, and `DistributionFake` parses both variants.
 - **Filled cells.** An invalid answer replaced by a uniform vector (`fallback="uniform"`) is marked in `cells`
   (`filled=True`) and counted: `filled` {segment: {question: share of the cell's answers}} and `filled_share`.
   `distribution_frame` writes it as the numeric `filled_<method>` column (NaN for a result without it), so an

@@ -18,6 +18,8 @@ llm may be passed positionally (legacy) or as llm= (as in survey / ab_test); nei
 from __future__ import annotations
 
 import json
+import re
+import warnings
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -53,6 +55,9 @@ Answer options:
 {options}
 Estimate the percentage of these respondents who would choose each option (ignore "not sure" answers). Percentages must sum to 100.
 Return ONLY a JSON object mapping option number to percentage, e.g. {example}"""
+# Dropped by include_unsure=True; with the default (None) the rendered prompt is unchanged (cache keys / hashes).
+UNSURE_NOTE = ' (ignore "not sure" answers)'
+_UNSURE_OPT = re.compile(r"not\s+sure|unsure|do(?:n['\u2019]?t| not)\s+know|\bneither\b|no\s+opinion|undecided", re.I)
 
 PERSON_PROB_TEMPLATE = """You are simulating {setting}.
 Below are {n} survey respondents. For EACH respondent and EACH question, estimate the probability (in percent) that this respondent gives each answer option. They answer independently.
@@ -87,12 +92,15 @@ def _segments(segments) -> dict[str, str]:
 
 
 def distribution_prompt(framing: str, group: str, question: dict, *, population: str = "adults",
-                        source: str | None = None, when: str | None = None) -> str:
-    """One measured-style prompt: framing head + question + numbered options + JSON percentage request."""
+                        source: str | None = None, when: str | None = None, include_unsure: bool | None = None) -> str:
+    """One measured-style prompt: framing head + question + numbered options + JSON percentage request.
+    include_unsure=True drops UNSURE_NOTE (for option lists that score "Not sure" / "Don't know"); None or False
+    keep the measured wording byte for byte."""
     k = len(question["options"])
     head = framing.format(group=group, population=population, source=source or "a large national survey",
                           when=when or "recent years")
-    return DIST_TEMPLATE.format(head=head, stem=question["text"],
+    template = DIST_TEMPLATE.replace(UNSURE_NOTE, "") if include_unsure else DIST_TEMPLATE
+    return template.format(head=head, stem=question["text"],
                                 options="\n".join(f"{j + 1}. {x}" for j, x in enumerate(question["options"])),
                                 example=json.dumps({str(j + 1): round(100 / k) for j in range(k)}))
 
@@ -100,7 +108,7 @@ def distribution_prompt(framing: str, group: str, question: dict, *, population:
 def segment_distribution(*args, llm=None, segments=MISSING, questions=MISSING, population: str = "adults",
                          source: str | None = None, when: str | None = None, framings: Mapping[str, str] | None = None,
                          max_tokens: int = 300, fallback: str = "uniform", ask_kw: dict | None = None,
-                         repeats: int = 1) -> dict:
+                         repeats: int = 1, include_unsure: bool | None = None) -> dict:
     """One call per segment x question x framing (x repeat); vectors averaged over framings and repeats.
 
     segments: {key: group description} or a list of descriptions. framings default: FRAMINGS_NAMED when
@@ -119,15 +127,24 @@ def segment_distribution(*args, llm=None, segments=MISSING, questions=MISSING, p
     still without a reply counts as invalid (usage refused_calls / empty_calls / error_calls). `ask_kw` passes
     options to ask_many (refusal_retry, cache_refusals, empty_retry, empty_retry_kw).
     llm may be passed positionally (legacy) or as llm=: `segment_distribution(llm, segs, qs)` ==
-    `segment_distribution(segs, qs, llm=llm)`."""
+    `segment_distribution(segs, qs, llm=llm)`.
+    include_unsure: the prompt says to ignore "not sure" answers (the measured wording). True drops that
+    parenthetical, for option lists that score "Not sure" / "Don't know" / "Neither"; None (default) keeps the
+    prompt byte-identical but warns once when an option looks like one; False keeps it silently."""
     llm, (segments, questions) = resolve_llm("segment_distribution", args, llm,
                                              {"segments": segments, "questions": questions})
     segs = _segments(segments)
     qs = _questions(questions)
+    if include_unsure is None:
+        unsure = list(dict.fromkeys(f"{q['id']}: {o!r}" for q in qs for o in q["options"] if _UNSURE_OPT.search(o)))
+        if unsure:
+            warnings.warn(f"segment_distribution: option(s) {', '.join(unsure)} look like 'not sure' answers, but the "
+                          "prompt says to ignore \"not sure\" answers, so they get ~0; pass include_unsure=True to "
+                          "drop that instruction (or include_unsure=False to keep it and silence this)", stacklevel=2)
     framings = dict(framings or (FRAMINGS_NAMED if source else FRAMINGS_HIDDEN))
     jobs = [(v, s, q) for v in framings for s in segs for q in qs]
-    prompts = [("", distribution_prompt(framings[v], segs[s], q, population=population, source=source, when=when))
-               for v, s, q in jobs]
+    prompts = [("", distribution_prompt(framings[v], segs[s], q, population=population, source=source, when=when,
+                                        include_unsure=include_unsure)) for v, s, q in jobs]
     usage = Usage()
     repeats = max(1, int(repeats))
     kw = dict(ask_kw or {})
@@ -345,4 +362,5 @@ def w1_ordinal(p: Any, q: Any) -> float:
 
 
 __all__ = ["segment_distribution", "persona_distribution", "distribution_prompt", "distribution_frame",
-           "person_distribution_frame", "w1_ordinal", "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE"]
+           "person_distribution_frame", "w1_ordinal", "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE",
+           "UNSURE_NOTE"]
