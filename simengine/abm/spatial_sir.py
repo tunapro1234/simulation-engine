@@ -458,8 +458,9 @@ def epi_personas(n: int, seed: int = 0) -> list[EpiAgent]:
 def isolation_prompt(agent: EpiAgent, health: str | None = None, news_pct: float | None = None,
                      message: str | None = None, town: str = "Dewberry Hollow",
                      virus: str = "Catasat") -> tuple[str, str]:
-    """(system, user) for one daily decision; structure follows Williams et al. 2023, Fig. S2 (persona and memories
-    in the system message, the question and reply format in the user message). health: 'normal' | 'cough' |
+    """(system, user) for one daily decision; text and order follow Williams et al. 2023 (methods, Fig. S2). The
+    paper sent the whole prompt as one system message; here persona and memories are the system message and the
+    question with the reply format is the user turn, which chat APIs require. health: 'normal' | 'cough' |
     'fever' | None (not told); news_pct: yesterday's new-case share in % or None (not told)."""
     nm = agent.name
     mem = []
@@ -485,7 +486,8 @@ def isolation_prompt(agent: EpiAgent, health: str | None = None, news_pct: float
     return system, user
 
 
-_RESP = re.compile(r"Response\s*\**\s*[:\-]\s*[*\[\s]*(yes|no)\b", re.I)      # also "**Response**: [Yes]"
+# also "**Response**: [Yes]"; the unfilled template "[Yes or No]" / "Yes/No" is non-conforming, not a Yes
+_RESP = re.compile(r"Response\s*\**\s*[:\-]\s*[*\[\s]*(yes|no)\b(?!\s*(?:or|/)\s*(?:yes|no)\b)", re.I)
 _REASON = re.compile(r"\**Reasoning\**\s*:\s*(.*?)(?:\n\s*\**\s*Response\s*\**\s*:|$)", re.I | re.S)
 
 
