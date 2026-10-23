@@ -28,6 +28,14 @@ target="logit", upper=100)`` predicts the change of logit(y / upper) and maps ba
                           target="logit", upper=100.0, origin_features=["cell", "internet", "pc"],
                           check_range=0.25)
     fr = fc.fit(panel, 1997).predict(panel, 1997)
+
+Pooled change target and per-series ceilings (G10: a hand-written pooled model because only a scalar ``upper``
+existed). ``target="diff"`` learns y[T+h] - y[T] and adds y[T] back (a level-free target for linear trends);
+``upper=`` takes a scalar, a dict ``{series_id: ceiling}`` or the name of a panel column constant per series::
+
+    fc = DirectForecaster("hgb", horizons=4, target="diff")                     # trend: y[T] + predicted change
+    fc = DirectForecaster("hgb", horizons=4, target="logit", upper="ceiling")  # panel column, one value per series
+    fc = DirectForecaster("hgb", horizons=4, target="logit", upper={"a": 30.0, "b": 100.0})
 """
 from __future__ import annotations
 
@@ -375,7 +383,7 @@ def _default_model(model, objective, y_nonneg: bool, seed: int):
     raise ValueError(f"unknown model {model!r}: 'lightgbm', 'hgb' or an sklearn estimator")
 
 
-TARGETS = ("level", "log_ratio", "logit")
+TARGETS = ("level", "log_ratio", "logit", "diff")
 
 
 def _logit(q):
@@ -401,7 +409,13 @@ class DirectForecaster:
     the logit scale for saturating adoption, mapped back as upper * sigmoid(logit(y[T] / upper) + z), so no
     prediction can pass ``upper`` (shares clipped to [logit_eps, 1 - logit_eps]). D7 rehearsal (one run): the
     log-growth pool model was best on dev but took high-level countries to 150 per 100 at the test origin; the
-    logit target fixed it (test MAE 3.73 -> 3.11).
+    logit target fixed it (test MAE 3.73 -> 3.11); "diff" = y[T+h] - y[T], mapped back as y[T] + z (same y[T] as
+    above): a pooled change target that carries a trend past the training levels (objective "regression").
+    ``upper`` (target="logit" only, ignored otherwise): a scalar ceiling for every series, a dict
+    ``{series_id: ceiling}``, or the name of a panel column holding each series' ceiling (constant per series).
+    There is no fallback: a series missing from the dict, or with no / NaN / non-constant column value, raises
+    (KeyError / ValueError naming the series), since a silently wrong ceiling caps or inflates its forecast.
+    Ceilings are resolved for the series of each panel passed to ``fit`` and ``predict``.
     ``origin_features``: columns read at the origin T (``{c}_at_origin``), e.g. another series' level; values
     after the fit / predict origin are masked, so they cannot leak. ``check_range``: margin (fraction of the
     training target range) for ``extrapolation_check`` on every ``predict``; None (default) skips it."""
@@ -412,13 +426,22 @@ class DirectForecaster:
                  objective: str | None = None, n_train_origins: int = 52, origin_step: int = 1,
                  min_history: int | None = None, clip_min: float | None = None, id_col: str = "id",
                  time_col: str = "time", y_col: str = "y", fill_value: float = 0.0, seed: int = 0,
-                 target: str = "level", upper: float | None = None, log_offset: float = 0.0,
+                 target: str = "level", upper: float | dict | str | None = None, log_offset: float = 0.0,
                  logit_eps: float = 1e-3, origin_features: Sequence[str] | None = None,
                  check_range: float | None = None):
         if target not in TARGETS:
             raise ValueError(f"unknown target {target!r}: one of {TARGETS}")
-        if target == "logit" and (upper is None or not upper > 0):
+        if target == "logit" and upper is None:
             raise ValueError("target='logit' needs upper > 0 (the saturation level, e.g. 100 per 100 people)")
+        if isinstance(upper, dict):
+            bad = [k for k, v in upper.items() if not (np.isfinite(float(v)) and float(v) > 0)]
+            if bad:
+                raise ValueError(f"upper must be > 0 for every series; not for {bad[:5]}")
+            upper = {k: float(v) for k, v in upper.items()}
+        elif upper is not None and not isinstance(upper, str):
+            if not float(upper) > 0:
+                raise ValueError("target='logit' needs upper > 0 (the saturation level, e.g. 100 per 100 people)")
+            upper = float(upper)
         if not 0 < logit_eps < 0.5:
             raise ValueError("logit_eps must be in (0, 0.5)")
         self.model, self.horizons = model, _horizons(horizons)
@@ -428,7 +451,7 @@ class DirectForecaster:
         self.min_history = min_history
         self.clip_min, self.seed = clip_min, seed
         self.id_col, self.time_col, self.y_col, self.fill_value = id_col, time_col, y_col, fill_value
-        self.target, self.upper = target, (None if upper is None else float(upper))
+        self.target, self.upper = target, upper
         self.log_offset, self.logit_eps = float(log_offset), float(logit_eps)
         self.origin_features = list(origin_features or [])
         self.check_range = check_range
@@ -451,18 +474,42 @@ class DirectForecaster:
     def _X(self, d: pd.DataFrame) -> pd.DataFrame:
         return d.drop(columns=[self.id_col, "h"])
 
-    def _share(self, y):
-        return np.clip(np.asarray(y, float) / self.upper, self.logit_eps, 1 - self.logit_eps)
+    def _ceiling(self, w) -> np.ndarray | float:
+        """``upper`` per series of ``w`` (aligned to ``w.ids``); a scalar stays a scalar."""
+        u = self.upper
+        if not isinstance(u, (dict, str)):
+            return u
+        if isinstance(u, dict):
+            miss = [i for i in w.ids if i not in u]
+            if miss:
+                raise KeyError(f"upper dict has no ceiling for {len(miss)} series, e.g. {miss[:5]}")
+            return np.array([u[i] for i in w.ids], float)
+        if u not in w.panel.columns:
+            raise KeyError(f"panel has no upper column {u!r}")
+        g = w.panel.groupby(w.id_col)[u]
+        if (g.nunique() > 1).any():
+            bad = g.nunique()[lambda s: s > 1].index.tolist()
+            raise ValueError(f"upper column {u!r} must be constant per series; not for {bad[:5]}")
+        c = g.first().reindex(w.ids).to_numpy(dtype=float)
+        bad = [i for i, v in zip(w.ids, c) if not (np.isfinite(v) and v > 0)]
+        if bad:
+            raise ValueError(f"upper column {u!r} has no ceiling > 0 for {len(bad)} series, e.g. {bad[:5]}")
+        return c
 
-    def _to_target(self, y, base):
+    def _share(self, y, upper):
+        return np.clip(np.asarray(y, float) / upper, self.logit_eps, 1 - self.logit_eps)
+
+    def _to_target(self, y, base, upper=None):
         """Level target y[T+h] -> model target, given the origin level y[T] (NaN where undefined)."""
         if self.target == "level":
             return y
+        if self.target == "diff":
+            return y - base
         with np.errstate(invalid="ignore", divide="ignore"):
             if self.target == "log_ratio":
                 c = self.log_offset
                 return np.where((y + c > 0) & (base + c > 0), np.log((y + c) / (base + c)), np.nan)
-            return _logit(self._share(y)) - _logit(self._share(base))
+            return _logit(self._share(y, upper)) - _logit(self._share(base, upper))
 
     def _base(self, w) -> np.ndarray:
         """Origin level y[T] for the growth / logit targets: last value observed at or before T (a missing cell
@@ -470,14 +517,16 @@ class DirectForecaster:
         b = pd.DataFrame(w.raw).ffill(axis=1).to_numpy(dtype=float)
         return np.where(np.isnan(b), self.fill_value, b)
 
-    def _from_target(self, z, base):
+    def _from_target(self, z, base, upper=None):
         if self.target == "level":
             return z
+        if self.target == "diff":
+            return base + z
         if self.target == "log_ratio":
             c = self.log_offset
             with np.errstate(over="ignore", invalid="ignore"):
                 return np.where(base + c > 0, (base + c) * np.exp(z) - c, base)
-        return self.upper / (1.0 + np.exp(-(_logit(self._share(base)) + z)))
+        return upper / (1.0 + np.exp(-(_logit(self._share(base, upper)) + z)))
 
     def fit(self, panel: pd.DataFrame, origin) -> "DirectForecaster":
         w = self._wide(panel, origin)
@@ -486,10 +535,14 @@ class DirectForecaster:
             [*self.lags, *self.windows, (self.season or 0) + 4, 1])
         hist = w.raw[:, :p + 1]
         y_nonneg = self.target == "level" and bool(np.nanmin(hist) >= 0)
+        U = self._ceiling(w) if self.target == "logit" else None
         if self.target == "logit":
-            n_over = int(np.sum(hist > self.upper))
+            over = hist > (U if np.isscalar(U) else U[:, None])
+            n_over = int(np.sum(over))
             if n_over:
-                warnings.warn(f"DirectForecaster: {n_over} observed y > upper={self.upper:g} (clipped to "
+                where = (f"upper={U:g}" if np.isscalar(U) else
+                         f"their series' upper ({int(over.any(1).sum())} series, e.g. {w.ids[over.any(1)][:3].tolist()})")
+                warnings.warn(f"DirectForecaster: {n_over} observed y > {where} (clipped to "
                               f"1 - logit_eps on the share scale); raise upper if the level can pass it",
                               UserWarning, stacklevel=2)
         self.models_ = {}
@@ -504,7 +557,7 @@ class DirectForecaster:
                 d = self._block(w, T, h)
                 yt = w.raw[:, T + h]
                 d["_lvl"] = yt
-                d["_y"] = self._to_target(yt, B[:, T])
+                d["_y"] = self._to_target(yt, B[:, T], U)
                 parts.append(d)
             tr = pd.concat(parts, ignore_index=True)
             tr = tr[~tr["_y"].isna()]
@@ -527,10 +580,11 @@ class DirectForecaster:
         w = self._wide(panel, origin)
         p = w.pos(origin)
         base = self._base(w)[:, p] if self.target != "level" else w.Y[:, p]
+        U = self._ceiling(w) if self.target == "logit" else None
         preds = np.zeros((len(w.ids), len(self.horizons)))
         for j, h in enumerate(self.horizons):
             z = self.models_[h].predict(self._X(self._block(w, p, h)))
-            preds[:, j] = self._from_target(np.asarray(z, float), base)
+            preds[:, j] = self._from_target(np.asarray(z, float), base, U)
         if self.clip_min is not None:
             preds = np.maximum(preds, self.clip_min)
         if self.check_range is not None:
