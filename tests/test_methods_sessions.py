@@ -137,6 +137,25 @@ class TestCutoffWindows(unittest.TestCase):
         with self.assertRaises(ValueError):
             cutoff_windows(self.ev, self.cuts[-2:], "21D", label="transaction", kind_col="event", eval_gap="0D")
 
+    def test_window_past_log_end_warns(self):
+        # a cutoff 5 days before the last event: 16 of 21 days have no data, labels censored -> warn
+        late = self.ev["time"].max() - pd.Timedelta("5D")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cutoff_windows(self.ev, [late], "21D", label="transaction", kind_col="event")
+            n_late = sum("censored" in str(x.message) for x in w)
+            self._rows()                                       # the regular cutoffs end inside the log
+        self.assertEqual(n_late, 1)
+        self.assertEqual(sum("censored" in str(x.message) for x in w), 1)
+
+    def test_empty_cutoff_keeps_dtypes(self):
+        before = T0 - pd.Timedelta("100D")                     # no session in this window
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)      # empty-frame concat is deprecated in pandas
+            r = cutoff_windows(self.ev, [before, self.cuts[0]], "21D", label="transaction", kind_col="event")
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(r["cutoff"]))
+        self.assertTrue((r["cutoff"] == self.cuts[0]).all())
+
     def test_needs_sessionized_events(self):
         with self.assertRaises(ValueError):
             cutoff_windows(_log(), self.cuts, "21D", label="transaction", kind_col="event")
@@ -181,6 +200,18 @@ class TestHistoryFeatures(unittest.TestCase):
         self.assertTrue(np.isnan(unseen["user_days_since_last"]))
         self.assertEqual(r.iloc[1]["item_n_view_item1"], 0)
         self.assertGreater(r.iloc[1]["item_rate_transaction_item1"], 0)          # unseen item -> prior rate
+
+    def test_key_dtype_mismatch_warns(self):
+        rows = pd.DataFrame({"user": ["0", "1"], "item": ["1", "2"]})          # str keys, int history
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            r = history_features(self.ev, self.at, rows, kinds=self.kinds)
+        self.assertEqual(r["user_seen"].tolist(), [0, 0])
+        self.assertEqual(sum("dtype" in str(x.message) for x in w), 2)           # user and item
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            history_features(self.ev, self.at, rows.astype(int), kinds=self.kinds)
+        self.assertFalse([x for x in w if "dtype" in str(x.message)])
 
     def test_no_future_leak(self):
         rows = pd.DataFrame({"user": range(60), "item0": np.arange(60) % 15})
@@ -244,6 +275,15 @@ class TestRescale(unittest.TestCase):
         self.assertAlmostEqual(q2[2:].mean(), 0.07)
         with self.assertRaises(TypeError):
             rescale_to_rates(p, seg, 0.1)                                         # scalar target with segments
+
+    def test_series_segment_matched_by_index(self):
+        p = pd.Series([0.1, 0.2, 0.3, 0.4], index=[10, 11, 12, 13])
+        seg = pd.Series(["a", "a", "b", "b"], index=[10, 11, 12, 13])
+        q = rescale_to_rates(p, seg.iloc[::-1], {"a": 0.3, "b": 0.7})            # reversed order: same answer
+        pd.testing.assert_series_equal(q, rescale_to_rates(p, seg, {"a": 0.3, "b": 0.7}))
+        np.testing.assert_allclose(q.to_numpy(), [0.2, 0.4, 0.6, 0.8])
+        with self.assertRaises(ValueError):
+            rescale_to_rates(p, seg.set_axis([0, 1, 2, 3]), {"a": 0.3, "b": 0.7})
 
 
 if __name__ == "__main__":

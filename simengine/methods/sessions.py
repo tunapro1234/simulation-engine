@@ -127,7 +127,8 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
     keeps sessions starting at or before T + horizon - offset (a test set cut "at least 3 h before the log ends").
     The user's selected session is then kept only when its first ``prefix_len`` events exist (and, with
     ``prefix_kinds``, are all of those kinds); the user does not fall through to a later session. With ``truncate``
-    (default) events at or after T + horizon are not seen, as in a test log that ends there.
+    (default) events at or after T + horizon are not seen, as in a test log that ends there. A window ending more
+    than horizon / 10 after the last event warns (censored labels).
 
     Columns: cutoff, ``user_col``, session_id, session_start, ``<time_col>k`` / ``<kind_col>k`` / ``<item_col>k``
     for prefix event k, prefix_span (last - first prefix time, seconds), prefix_items (distinct items), n_rest
@@ -166,8 +167,15 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
         if not keep:
             raise ValueError(f"eval_gap: no cutoff ends {eval_gap} before the eval cutoff {te}; add earlier cutoffs")
         cuts = keep + [te]
+    # a window running past the log's last event censors its labels (late sessions lose their rest, y biased low)
+    tmax = times.max()
+    late = [T for T in cuts if T + h - tmax > h / 10]
+    if late:
+        warnings.warn(f"cutoff_windows: {len(late)} window(s) end more than a tenth of the horizon after the last "
+                      f"event ({tmax}), e.g. cutoff {late[0]}: their labels are censored; use earlier cutoffs",
+                      stacklevel=2)
 
-    heads = events.loc[events["seq"] == 0, ["session_id", user_col, "session_start"]]
+    heads =events.loc[events["seq"] == 0, ["session_id", user_col, "session_start"]]
     heads = heads.sort_values(["session_start", "session_id"], kind="mergesort")
     L = prefix_len
     frames = []
@@ -219,7 +227,7 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
             new = [col for col in extra.columns if col not in rows.columns]
             rows = pd.concat([rows, extra[new]], axis=1)
         frames.append(rows)
-    out = pd.concat(frames, ignore_index=True)
+    out = pd.concat([f for f in frames if len(f)] or frames[:1], ignore_index=True)   # empty frames: dtype drift
     if gap is None:
         return out
     te = cuts[-1]
@@ -358,6 +366,9 @@ def _lookup(frame, fill, keys, sfx, index, seen_col):
             x[col] = x[col].astype(np.int64)
     x.index = index
     x.columns = [f"{c}{sfx}" for c in x.columns]
+    if seen_col is not None and len(frame) and len(x) and not seen.any():
+        warnings.warn(f"history_features: {seen_col} is 0 for every row (rows key dtype {keys[0].dtype} vs history "
+                      f"{frame.index.dtype}?); every feature is the unseen fill", stacklevel=3)
     if seen_col is not None:
         x[seen_col] = seen.astype(np.int64)
     return x
@@ -395,7 +406,8 @@ def rescale_to_rates(p, segment=None, target=None, *, method: str = "scale", def
     on the scored set) or, with ``segment=None`` (the total version), one rate. ``method="scale"`` multiplies
     (p * target / mean(p), D13 K arms; values that would pass 1 are clipped with a warning, so the mean then falls
     short); ``"logit"`` shifts log-odds by one constant per segment, staying inside (0, 1). Segments with no target
-    use ``default`` or stay unchanged (warning). Returns an array, or a Series with ``p``'s index.
+    use ``default`` or stay unchanged (warning). ``p`` and ``segment`` both Series: matched by index. Returns an
+    array, or a Series with ``p``'s index.
     """
     if method not in ("scale", "logit"):
         raise ValueError(f"method={method!r}: 'scale' or 'logit'")
@@ -410,6 +422,11 @@ def rescale_to_rates(p, segment=None, target=None, *, method: str = "scale", def
     else:
         if scalar or target is None:
             raise TypeError("with segment=, target is {segment: rate}; use segment=None for one total rate")
+        if isinstance(p, pd.Series) and isinstance(segment, pd.Series) and not segment.index.equals(p.index):
+            # two Series: match by index, never silently by position
+            if not (segment.index.is_unique and len(segment) == len(p) and segment.index.isin(p.index).all()):
+                raise ValueError("rescale_to_rates: p and segment are Series with different indexes")
+            segment = segment.reindex(p.index)
         seg = pd.Series(np.asarray(segment, dtype=object))
         if len(seg) != len(a):
             raise ValueError(f"segment has {len(seg)} values, p has {len(a)}")
