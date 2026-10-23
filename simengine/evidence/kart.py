@@ -22,7 +22,10 @@ Gerçek yokken (bekleyen kart) taban satırı `oz["bildirilen_tabanlar"]` (bildi
 "declared, scored when truth arrives: T0, T1" yazar, yoksa "taban yok". `yanilgi` sınır notlarının HEPSİNİ taşır
 (tekrarlar atılır, sıra korunur; eskiden ilk 3'ü kalıyordu, ön kayıt / baskın blok notları düşüyordu).
 `oz["persona_alanlari"]` ({"n_fields", "dropped": [...]}, ör. `persona.field_report`) varsa SIRA'dan sonra iki satır
-eklenir: "persona" (prompta ulaşan alan sayısı, kısmen eksik alanlar notta) ve "dusen" (düşen alanlar).
+eklenir: "persona" (prompta ulaşan alan sayısı, kısmen eksik alanlar notta) ve "dusen" (düşen alanlar). Sayı
+etikette ve "sayi"da durur, "deger" None (değer sütunu GA'lı metrik içindir: sayı "6.000" basılıyordu).
+Hazır bir karta (evaluate() sonrası report["kanit_kart"]) `persona_ekle(k, pa)` ekler; kartı yeniden kurmak mührü
+ve sonradan eklenen notları kaybeder (`persona.attach` bunu kullanır).
 """
 from __future__ import annotations
 
@@ -137,19 +140,41 @@ def _bedel_satiri(oz: dict, bizim: str | None = None, ham: str | None = None) ->
 
 def _bildirilen(oz: dict) -> str | None:
     """Bildirilen taban etiketleri (cekirdek: ozet["bildirilen_tabanlar"]; str ya da {"etiket", "sutun"})."""
-    et = [str((x.get("etiket") or x.get("sutun")) if isinstance(x, dict) else x)
-          for x in oz.get("bildirilen_tabanlar") or [] if x is not None]
+    et = [str(e) for x in oz.get("bildirilen_tabanlar") or []
+          if (e := (x.get("etiket") or x.get("sutun")) if isinstance(x, dict) else x) is not None]
     return BILDIRILEN_NOT.format(", ".join(dict.fromkeys(et))) if et else None
 
 
 def _persona_satirlari(pa: dict) -> list[dict]:
-    """persona_alanlari -> [persona, dusen] satırları (G5#12: alanlar sessizce düşüyordu, kart sayı vermiyordu)."""
+    """persona_alanlari -> [persona, dusen] satırları (G5#12: alanlar sessizce düşüyordu, kart sayı vermiyordu).
+    Sayı etikette ve "sayi"da; "deger" None (değer sütunu metrik biçiminde basılır: 6 alan "6.000" görünürdü)."""
     n_k = pa.get("n_people")
     eks = [f"{a} {m}/{n_k}" if n_k else f"{a} {m}" for a, m in (pa.get("per_field_missing") or {}).items() if m]
     dus = [str(x) for x in pa.get("dropped") or []]
-    return [satir("persona", "Persona alanları: prompta ulaşan (persona fields)", pa.get("n_fields"),
-                  not_="eksik (missing): " + ", ".join(eks) if eks else None),
-            satir("dusen", "Düşen alanlar (dropped fields)", len(dus), not_=", ".join(dus) or "yok (none)")]
+    n_f = pa.get("n_fields")
+    kim, who = (f", {n_k} kişi", f", {n_k} people") if n_k is not None else ("", "")
+    p = satir("persona", f"Persona alanları: {n_f} prompta ulaştı{kim} ({n_f} persona fields reached the prompt{who})",
+              not_="eksik (missing): " + ", ".join(eks) if eks else None)
+    d = satir("dusen", f"Düşen alanlar: {len(dus)} ({len(dus)} dropped fields)", not_=", ".join(dus) or "yok (none)")
+    p["sayi"], d["sayi"] = n_f, len(dus)
+    return [p, d]
+
+
+def persona_ekle(k: dict, pa: dict) -> dict:
+    """Hazır karta persona / dusen satırlarını ekler (varsa yenisiyle değiştirir); kartı yerinde günceller."""
+    k["satirlar"] = [r for r in k.get("satirlar") or [] if r.get("tur") not in EK_SIRA] + _persona_satirlari(pa)
+    return k
+
+
+def _tekil(xs) -> list:
+    """Sırayı koruyarak tekrarları atar; hashlenemeyen öğe metniyle karşılaştırılır."""
+    gor, out = set(), []
+    for x in xs:
+        a = x if isinstance(x, (str, int, float, tuple)) else repr(x)
+        if a not in gor:
+            gor.add(a)
+            out.append(x)
+    return out
 
 
 TAVAN_ETIKET = {"model": "Model/oracle tavanı", "orneklem_gurultusu": "Örneklem gürültüsü tavanı (varyans bileşenleri)"}
@@ -261,7 +286,7 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     out = {"baslik": oz.get("baslik"), "alt_baslik": f"metrik: {birincil}", "metrik": birincil,
             "n": (oz.get("kart") or {}).get("n_kume"), "kaynak": oz.get("girdi_kaynagi") or oz.get("veri_adi"),
             "satirlar": S, "fark": fark, "rejimler": rejimler or [],
-            "yanilgi": list(dict.fromkeys(list(yanilgi or []) + list(oz.get("sinirlar") or []))), "muhur": muhur,
+            "yanilgi": _tekil(list(yanilgi or []) + list(oz.get("sinirlar") or [])), "muhur": muhur,
             "rozet": r, "rozet_gerekce": g, "etiketler": et, "dil": "tr"}
     if oz.get("kayitli_karsilastirmalar"):   # kayıtlı karşılaştırmalar / düşme koşulları (evaluate(compare=, blind_col=))
         out["kayitli"] = oz["kayitli_karsilastirmalar"]

@@ -67,6 +67,19 @@ class DeclaredBaselinesPending(unittest.TestCase):
         oz["bildirilen_tabanlar"] = [{"etiket": "T0", "sutun": "tahmin_t0"}, {"sutun": "tahmin_t1"}]
         self.assertEqual(_taban(kart.kart(oz))["not"], "declared, scored when truth arrives: T0, tahmin_t1")
 
+    def test_none_label_skipped(self):
+        oz = _pending()
+        oz["bildirilen_tabanlar"] = [{"etiket": None}, {}, "T1"]
+        self.assertEqual(_taban(kart.kart(oz))["not"], "declared, scored when truth arrives: T1")
+
+    def test_evaluate_pending_prints_declared(self):
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"unit": np.arange(40), "pred_ours": rng.uniform(0, 1, 40), "pred_t0": rng.uniform(0, 1, 40)})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rep = ev.evaluate(df, task="binary", ours="ours", unlabeled_baselines=["pred_t0"], multiplier=False)
+        self.assertIn("declared, scored when truth arrives: t0", ev.card(rep, lang="en"))
+
     def test_absent_key_unchanged(self):
         self.assertEqual(_taban(_pending()["kanit_kart"])["not"], "taban yok")
         self.assertEqual(kart.kart(_pending())["rozet"], "bekliyor")
@@ -84,16 +97,17 @@ class PersonaFieldRows(unittest.TestCase):
         self.assertEqual(turs[:len(kart.SIRA)], list(kart.SIRA))
         self.assertEqual(turs[len(kart.SIRA):], ["persona", "dusen"])
         p, d = k["satirlar"][-2:]
-        self.assertEqual(p["deger"], 6)
+        self.assertEqual((p["sayi"], p["deger"]), (6, None))   # a count, not a metric value printed as 6.000
+        self.assertIn("6 persona fields reached the prompt, 801 people", p["etiket"])
         self.assertIn("age_band 46/801", p["not"])
-        self.assertEqual(d["deger"], 2)
+        self.assertEqual((d["sayi"], d["deger"]), (2, None))
         self.assertIn("Age, region", d["not"])
 
     def test_no_drop(self):
         oz = _pending()
         oz["persona_alanlari"] = {"n_fields": 3, "dropped": []}
         d = kart.kart(oz)["satirlar"][-1]
-        self.assertEqual((d["tur"], d["deger"]), ("dusen", 0))
+        self.assertEqual((d["tur"], d["sayi"]), ("dusen", 0))
 
     def test_absent_key_six_rows(self):
         self.assertEqual([r["tur"] for r in kart.kart(_pending())["satirlar"]], list(kart.SIRA))
@@ -148,8 +162,50 @@ class FieldReport(unittest.TestCase):
         oz = _pending(sinirlar=[sp.as_limit(sp.field_report(people, df))])
         oz["persona_alanlari"] = sp.field_report(people, df)
         k = kart.kart(oz)
-        self.assertEqual(k["satirlar"][-2]["deger"], 4)
+        self.assertEqual(k["satirlar"][-2]["sayi"], 4)
         self.assertTrue(any(x.startswith("Persona fields:") for x in k["yanilgi"]))
+
+
+class AttachToEvaluatedReport(unittest.TestCase):
+    """The documented path (report["persona_alanlari"] = rep) never reached se.card(report): the card is the stored
+    report["kanit_kart"]; rebuilding it with kart.kart(report) dropped the seal record (badge reason said 'seal()')."""
+
+    def _rep(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return ev.evaluate(_binary(), task="binary", ours="ours", B=100, B_aggregate=50, multiplier=False)
+
+    def test_rows_and_limit_reach_markdown(self):
+        df = _table()
+        people = sp.from_table(df, id_col="rid", forbidden=["target"])
+        rep = self._rep()
+        before = dict(rep["kanit_kart"], satirlar=list(rep["kanit_kart"]["satirlar"]))
+        out = sp.attach(rep, sp.field_report(people, df))
+        self.assertIs(out, rep)
+        md = ev.card(rep)
+        self.assertIn("| persona |", md)
+        self.assertIn("| dusen |", md)
+        self.assertNotIn("4.000", md)                       # the count is not printed as a metric value
+        self.assertIn("- Persona fields: 4 reached the prompt", md)
+        k = rep["kanit_kart"]
+        self.assertEqual(k["satirlar"][:len(before["satirlar"])], before["satirlar"])
+        self.assertEqual((k["rozet"], k["rozet_gerekce"]), (before["rozet"], before["rozet_gerekce"]))
+
+    def test_idempotent(self):
+        df = _table()
+        people = sp.from_table(df, id_col="rid", forbidden=["target"])
+        rep = self._rep()
+        sp.attach(rep, sp.field_report(people, df))
+        sp.attach(rep, sp.field_report(people[:2], df))
+        k = rep["kanit_kart"]
+        self.assertEqual([r["tur"] for r in k["satirlar"]].count("persona"), 1)
+        self.assertEqual(sum(str(x).startswith("Persona fields:") for x in k["yanilgi"]), 1)
+        self.assertEqual(sum(str(x).startswith("Persona fields:") for x in rep["sinirlar"]), 1)
+        self.assertIn("for 2 people", k["yanilgi"][-1])
+
+    def test_unhashable_limit_does_not_crash(self):
+        k = kart.kart({"sinirlar": ["a", {"x": 1}, {"x": 1}, "a"], "birincil": "accuracy"})
+        self.assertEqual(k["yanilgi"], ["a", {"x": 1}])
 
 
 if __name__ == "__main__":

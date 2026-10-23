@@ -10,7 +10,7 @@
     texts = sp.sample_texts("homo_silicus", n=4, seed=1)                      # persona method zoo (methods/)
     people = sp.sample_bigfive(50, seed=0); res = sp.validate_bigfive(llm)    # Big Five + Mini-IPIP fidelity
     res = sp.compare_injectors(llm, people, qs, "answers", ["plain_fields"])   # persona injection zoo (inject/)
-    rep = sp.field_report(personas, df, mapping); limit = sp.as_limit(rep)     # fields that reached the prompt
+    rep = sp.field_report(personas, df, mapping); sp.attach(report, rep)       # fields that reached the prompt
 """
 from . import inject, methods
 from .bigfive import (DOMAINS as BIGFIVE_DOMAINS, PROFILES, SOTO_JOHN_2017_CORR, SOTO_JOHN_2017_NORMS,
@@ -18,7 +18,7 @@ from .bigfive import (DOMAINS as BIGFIVE_DOMAINS, PROFILES, SOTO_JOHN_2017_CORR,
 from .builders import (POOL_METHODS, TALP_FIELDS, Mapping, age_band, apply_value_labels, auto_mapping, from_row,
                        from_table, gender_value, narrate, pool_curve, pool_select, read_codebook, to_frames,
                        warn_unlabelled)
-from .fields import as_limit, field_report
+from .fields import as_limit, attach, field_report
 from .history import (LEVELS, from_history, purchase_history_text, summarize_purchases,
                       survey_profile_text)
 from .inject import (CompareResult, Injector, MissingPersonField, Prompt, compare_injectors, get_injector,
@@ -49,7 +49,7 @@ __all__ = [
     "TALP_FIELDS", "apply_value_labels", "read_codebook", "warn_unlabelled", "pool_select", "pool_curve",
     "POOL_METHODS",
     # field report
-    "field_report", "as_limit",
+    "field_report", "as_limit", "attach",
     # history
     "from_history", "survey_profile_text", "summarize_purchases", "purchase_history_text", "LEVELS",
     # persona method zoo

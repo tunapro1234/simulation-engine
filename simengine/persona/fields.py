@@ -8,8 +8,13 @@ report counts it so the evidence card and the limits can say so.
     import simengine.persona as sp
     people = sp.from_table(df, m)
     rep = sp.field_report(people, df, m)     # {"n_fields", "used", "dropped", "per_field_missing", "why", "n_people"}
-    report = se.evaluate(..., limits=[sp.as_limit(rep)])   # one line on the card's limits
-    report["persona_alanlari"] = rep                       # kart.kart(report): "persona" + "dusen" rows
+    report = se.evaluate(..., limits=[sp.as_limit(rep)])   # one line on the card's limits, or:
+    sp.attach(report, rep)                     # "persona" + "dusen" rows (+ the limit line) on report["kanit_kart"]
+    se.card(report)                            # the Markdown card now shows them
+
+Setting `report["persona_alanlari"]` alone does not reach `se.card(report)`: the card is the stored
+`report["kanit_kart"]`, built inside evaluate(); rebuilding it with `kart.kart(report)` loses the seal record and the
+notes added after it. `attach` edits the stored card in place (idempotent: a second call replaces the rows).
 
 "used" are the field names present in at least one persona (identity age_band/gender, traits, facets; the
 names `Persona.text()` renders), in that order. "per_field_missing" counts, per used field, the personas without
@@ -74,10 +79,11 @@ def field_report(people, source_df: pd.DataFrame | None = None, mapping: Mapping
             else:
                 why[name] = "empty or unmapped in every row"
         skip = named | set(mapping.forbidden) | ({mapping.id_col} if mapping.id_col is not None else set())
-        callables = any(_source(s) is None for s in list(mapping.fields.values()) + list(mapping.facets.values()))
+        callables = bool(mapping.text) or any(_source(s) is None
+                                               for s in list(mapping.fields.values()) + list(mapping.facets.values()))
         for c in cols:
             if c not in skip and str(c) not in why and not (_aliases(c) & set(used)):
-                why[str(c)] = ("not in the mapping by name (a callable field may still read it)" if callables
+                why[str(c)] = ("not in the mapping by name (a callable field or text may still read it)" if callables
                                else "not in the mapping")
     elif source_df is not None:
         pids = {p.pid for p in people}
@@ -107,3 +113,21 @@ def as_limit(report: dict) -> str:
     parts.append("dropped: " + (", ".join(f"{d} ({why[d]})" if d in why else str(d) for d in dropped)
                                 if dropped else "none"))
     return "; ".join(parts) + "."
+
+
+def attach(report: dict, field_rep: dict, limit: bool = True) -> dict:
+    """Put a `field_report` on an evaluate() report: report["persona_alanlari"], the "persona" / "dusen" rows on the
+    stored card (report["kanit_kart"], edited in place, so the seal and later notes stay) and, with `limit`, the
+    `as_limit` line in the limits (report["sinirlar"] and the card's). Idempotent. Returns the report."""
+    from ..evidence import kart as _kart         # lazy: persona does not import evidence at module load
+    report["persona_alanlari"] = field_rep
+    k = report.get("kanit_kart")
+    if k is None:
+        report["kanit_kart"] = k = _kart.kart(report)
+    _kart.persona_ekle(k, field_rep)
+    if limit:
+        old = [x for x in report.get("sinirlar") or [] if not str(x).startswith("Persona fields:")]
+        line = as_limit(field_rep)
+        report["sinirlar"] = old + [line]
+        k["yanilgi"] = [x for x in k.get("yanilgi") or [] if not str(x).startswith("Persona fields:")] + [line]
+    return report
