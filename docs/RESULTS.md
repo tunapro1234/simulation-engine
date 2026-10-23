@@ -266,6 +266,51 @@ What carried over: every team built its LLM-free ladder first and sealed before 
 "passed on dev", not "passed". What did not: the LLM arm never beat the strongest LLM-free arm on test by a clear
 margin, and D4's bias expectation (< 3%) failed (−4.0%).
 
+## 10. New units: bench tasks, grid ABMs, search modules (new, 22-23 Oct 2026)
+
+Every row is **(new)**: computed by this library, copied from the unit page named in the row, where the full table,
+the run date, wall time and caveats are. No row involves a real LLM call; LLM arms of these units have not been run.
+
+**Bench tasks: best LLM-free baseline on test** (local data copies). Command, from the repository root with the data
+under `$SIMENGINE_DATA` (task options per page):
+`python -c "from simengine import bench; t = bench.get('<task>'); print(t.score_all(t.run(), B=1000))"`.
+
+| task | metric | best baseline, test | page |
+|---|---|---|---|
+| `instacart` | mean per-user F1 ↑ | lgbm 0.3811 [0.3797, 0.3825] | bench/instacart.md |
+| `m5` | WRMSSE ↓ | lightgbm 0.675 [0.653, 0.710] | bench/m5.md |
+| `movielens` | RMSE ↓ / hit@10 ↑ | item_knn 0.8825 [0.8744, 0.8899] / 0.6689 [0.6569, 0.6811] | bench/movielens.md |
+| `retailrocket_purchase` / `_next` | PR-AUC ↑ / recall@20 ↑ | lgbm 0.5727 [0.4936, 0.6402] / cooc 0.2973 [0.2906, 0.3038] | bench/retailrocket.md |
+| `choices13k` / `cpc18` | MSE ↓ | gbdt_objective 0.01224 [0.01102, 0.01354] (seed 0) / beast_sd 0.00703 [0.00539, 0.00900] | bench/risky_choice.md |
+| `socsci210` | W1 ↓ | scale_marginal 0.1473 [0.1251, 0.1710] (study split) | bench/socsci.md |
+| `subpop_opinionqa` / `global_opinionqa` | ordinal WD ↓ / TVD ↓ | nearest_group 0.0506 [0.0480, 0.0531] / 0.1602 [0.1564, 0.1639] (setting B) | bench/opinion_dist.md |
+| `swissmetro` | loglik ↑ | gbdt −0.6752 [−0.7602, −0.5981] | bench/mode_choice.md |
+| `hillstrom_uplift` / `x5_uplift` | Qini ↑ | s_gbdt 0.049 [0.013, 0.083] (womens e-mail) / t_logistic 0.012 [0.006, 0.019] | bench/uplift.md |
+| `criteo_uplift` (pre-review run, B = 200) | Qini ↑ | s_gbdt 0.088 [0.082, 0.094] | bench/uplift.md |
+| `webshop_next_action` / `webshop_buy` | loglik ↑ / AUC ↑ | logistic −0.933 [−0.952, −0.915] / 0.808 [0.793, 0.823] | bench/web_behaviour.md |
+
+**Grid and spatial ABMs** (`simengine.abm`; pages under docs/modules/abm/).
+
+| unit | result | command (page) |
+|---|---|---|
+| mobility, 2,000 YJMob100K users, days 0-59 → 60-74 | GEO-BLEU: slot mode 0.298, Markov 0.21-0.23, EPR 0.14, global slot mode 0.004 | mobility.md |
+| placement, YJMob100K 4,000 users, k = 50, 500 m cells | test-day reach: lazy greedy 0.739 vs top-50 visited 0.597, diff [+0.126, +0.157] | placement.md |
+| spatial SEIR, well mixed vs ODE (n = 10,000, 30 reps) | attack rate and peak height within 0.004; peak 1.7-2.7 days later | `nice -n 19 python measure.py mixed` (epidemic.md) |
+| Schelling tipping curve (50 × 50, 10 seeds) | like share 0.75 at threshold 1/3 (NetLogo "about 70%"), 0.87 at 0.5 | `nice -n 19 python olc.py <experiment>` (schelling.md) |
+| Sugarscape wealth (250 agents, 10 seeds) | Gini 0.236 at t = 0, 0.475 mean over steps 200-500 | `python examples/sugarscape_measure.py` (sugarscape.md, ~17 min) |
+
+**Search and method modules** (`simengine.research`; pages under docs/modules/research/). Synthetic unless a data set
+is named.
+
+| module | result | command (page) |
+|---|---|---|
+| bandits, Audibert-Bubeck exp1 (2000 runs) | P(wrong arm): uniform 0.446, successive rejects 0.187 | `<scratch>/bandits_measure.py` (bandits.md) |
+| bayesopt, Branin, 30 calls, 20 seeds | median regret GP-UCB 0.008, GP-EI 0.036, random 1.31; inside `Loop` on the mixed toy random wins (0.015 vs 0.30) | `examples/bayesopt_bench.py --seeds 20 --loop-seeds 10` (bayesopt.md) |
+| hyperband, 200 seeds | unbiased low budget: ASHA beats Hyperband by 0.0165 regret [0.0092, 0.0242]; late bloomers: ASHA about 2x worse | `examples/hyperband_vs_halving.py --seeds 200` (hyperband.md) |
+| tree_search, Bank Marketing, row Brier, 3 seeds | every search lowered dev Brier; 11 of 12 winners worse than sklearn defaults on test (base rate 11% dev, 31% test) | `examples/tree_search_bank.py --budget 20 --seeds 0 1 2` (tree_search.md) |
+| hypotheses, SocSci210 one-outcome draw | non-LLM forecasters at chance: random r −0.033, TF-IDF ridge r 0.038 | `examples/auto_social_science_measure.py` (auto_social_science.md) |
+| prompt_evolution, keyword toy, FakeLLM, 5 seeds | every winner beats the seed text in 5/5; pipeline check only | `measure.py` (prompt_evolution.md) |
+
 ## Measurement facts that shape the defaults
 
 - Haiku/Sonnet 5.5 reject a non-default `temperature` with HTTP 400; the Claude backend never sends one
