@@ -14,8 +14,8 @@ with expected improvement or GP-UCB. The second is TPE-lite, the tree-structured
 - **`minimize(objective, space, method="gp" | "tpe" | "random")`** is plain sequential optimisation where every key
   moves. This is the setting of the BO literature; use it when the objective is a cheap function and not a Loop turn.
 
-The module is not registered in `simengine.research.__init__` yet. Import it directly:
-`from simengine.research.bayesopt import GPProposer`.
+`GPProposer`, `TPEProposer` and the GP / TPE helpers are exported from `simengine.research`; `minimize` is reached
+through the module: `from simengine.research.bayesopt import minimize`.
 
 ## API
 

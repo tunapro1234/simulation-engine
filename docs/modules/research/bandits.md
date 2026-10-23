@@ -9,8 +9,8 @@ and costs budget, so which one is best? It has three parts.
 - **Tools around them:** a simulator that runs thousands of replications as numpy arrays, and `RacingProposer`, which
   plugs a race into `simengine.research.Loop`.
 
-Until the integrator registers it in `simengine.research`, import the module directly:
-`from simengine.research.bandits import ...`.
+The main names (`SimulatedArms`, `identify_best`, `RacingProposer`, ...) are exported from `simengine.research`;
+`simulate` and `compare` are reached through the module: `from simengine.research.bandits import ...`.
 
 ```python
 from simengine.research.bandits import SimulatedArms, identify_best, simulate, compare, RacingProposer

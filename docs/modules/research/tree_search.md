@@ -195,4 +195,5 @@ are indices into the grid. The test-split reference (the space defaults) costs o
   call if the search never visited it. Wall-clock budgets are not supported, only runner-call budgets.
 - Code payloads are hashed by their exact text, so a whitespace edit counts as a new solution. The test-reference
   regex is off by default in code mode, because it also matches names such as `train_test_split`.
-- Not yet registered in `simengine.research.__init__`. Import it from `simengine.research.tree_search`.
+- `TreeSearch`, `MCTSSearch`, `ConfigOperators`, `LLMOperators` and `summarize_tree` are exported from
+  `simengine.research`; the rest (`Node`, `best_node`, the reply parsers) is in `simengine.research.tree_search`.

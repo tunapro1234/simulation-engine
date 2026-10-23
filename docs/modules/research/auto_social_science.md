@@ -1,8 +1,8 @@
 # `simengine.research.hypotheses`: automated social science loop and experiment outcome predictor
 
 Module: `simengine/research/hypotheses.py`. Tests: `tests/test_research_auto_social_science.py` (28 tests, FakeLLM
-only; one real-data check runs only with `$SIMENGINE_DATA`). The tests need pandas: run them with the project venv. Not yet exported from `simengine.research`; import the
-module directly:
+only; one real-data check runs only with `$SIMENGINE_DATA`). The tests need pandas: run them with the project venv. The main names are exported from
+`simengine.research` (`AutoSocialScience`, `forecast_experiment`, ...); the helpers are in the module:
 
 ```python
 from simengine.research import hypotheses as H
