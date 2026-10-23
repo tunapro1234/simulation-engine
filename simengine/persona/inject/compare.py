@@ -77,8 +77,9 @@ def estimate_cost(llm, prompts: Sequence[Prompt], max_tokens: int) -> dict:
     tins = [(len(p.system) + len(p.flatten())) // CHARS_PER_TOKEN for p in prompts]
     usd = per_call = None
     try:
-        from ...llm.pricing import cost_usd
+        from ...llm.pricing import cost_usd, price_for
         model = getattr(llm, "model", "-")
+        price_for(model)                     # KeyError up front: an unpriced model is None even with no prompts
         costs = [cost_usd(model, t, mt) for t in tins]
         usd, per_call = round(sum(costs), 4), round(max(costs, default=0.0), 6)
     except KeyError:

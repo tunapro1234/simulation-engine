@@ -61,6 +61,16 @@ class TestEstimateCostPerCall(unittest.TestCase):
         self.assertEqual((est["calls"], est["input_tokens_est"], est["output_tokens_max"], est["usd_max"]),
                          (0, 0, 0, 0.0))
 
+    def test_unpriced_model_with_no_prompts_is_still_none(self):
+        # an empty list must not turn "no price" into a $0 estimate
+        est = pi.estimate_cost(FakeLLM(), [], 16)
+        self.assertIsNone(est["usd_max"])
+        self.assertIsNone(est["usd_per_call_max"])
+
+    def test_prefixed_model_id_is_priced(self):
+        est = pi.estimate_cost(FakeLLM(model="anthropic/" + HAIKU), short_prompts(3), 8)
+        self.assertAlmostEqual(est["usd_max"], round(3 * cost_usd(HAIKU, 500, 8), 4))
+
     def test_max_usd_guard_lets_a_fitting_run_through(self):
         # 40 people x 2 questions x 3 arms = 240 calls with ~600-token personas: summed input > 100k, so the old
         # one-call pricing hit the long price (~5x) and refused a run that fits max_usd.
