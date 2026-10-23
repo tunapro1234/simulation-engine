@@ -36,6 +36,7 @@ from ..types import PRED_PREFIX, normalize_frame
 from . import bootstrap as _boot
 from . import metrik as _metrik
 from .api import (FORECAST_TASKS, METRIC_TO_ENGLISH, _method, _metric, _task, prepare)
+from .cekirdek import AZ_KUME
 from .sema import ON_EK
 
 ABS_CI_NOTE = ("a single-arm bootstrap CI of an absolute-value metric is biased: |mean error| of a resample is "
@@ -116,6 +117,15 @@ def _report_values(rep: dict, metric: str | None) -> tuple[str, int, dict[str, f
         col = (man.get(key) or {}).get("sutun")
         if col in vals:
             vals[alias] = vals[col]
+    if ad != rep.get("birincil"):
+        # the headline's best baseline is picked on the primary; on another metric it can be the weakest one
+        # (pearson-best "random" vs mae-best "marginal"): pick the strongest baseline on this metric instead
+        tab = [(c, vals[c]) for c, r in (rep.get("sonuclar") or {}).items()
+               if r.get("tur") == "baseline" and c in vals and np.isfinite(vals[c])]
+        vals.pop(BEST_BASELINE, None)
+        if tab:
+            key = (lambda cv: abs(cv[1])) if ad in _metrik.ISARETLI_METRIKLER else (lambda cv: -yon * cv[1])
+            vals[BEST_BASELINE] = min(tab, key=key)[1]
     return ad, int(yon), vals
 
 
@@ -166,7 +176,8 @@ def split_summary(reports_or_frames, metric: str | None = None, pairs: Sequence[
     metric: English or internal name; default the report's primary (frames: the task's primary, wmape for
         task="forecast").
     pairs: [(a, b), ...] method names (with or without `pred_`; reports also take baseline columns such as
-        "taban_marjinal", "ours", "raw" and "best_baseline" = that split's strongest baseline). Default: reports with
+        "taban_marjinal", "ours", "raw" and "best_baseline" = that split's strongest baseline on `metric`, which is
+        the headline's best baseline when metric is the report's primary). Default: reports with
         an ours column -> [("ours", "best_baseline")]; frames -> none.
     Returns a SplitSummary: `table` has, per column and per pair a − b, the median and the 2.5 / 97.5 % quantiles over
     splits and, for pairs, the share of splits in which a is better (ties count half; signed metrics compare |value|).
@@ -301,7 +312,7 @@ def counts_frame(rows: pd.DataFrame, pred_cols, by: Sequence[str] | str, *, trut
     pred_cols: column, list (a `pred_` / `p_` prefix is dropped from the arm name) or {arm: source}. A label arm counts
         persons per predicted class. A probability arm (probs=True for all arms, or a list of arm names) sums the
         probabilities: expected counts. Probability source: a column of vectors (with classes=), a column of
-        {class: p} dicts, or {class: column}.
+        {class: p} dicts, or {class: column}. Rows that do not sum to 1 warn.
     by: cell columns (e.g. ["area"] or ["area", "week"]); cells are the observed by-combinations x every class, zeros
         included (a class predicted where none occurred counts).
     cluster: bootstrap cluster written to `group` (a by column, or any column constant within cells); default the
@@ -339,6 +350,12 @@ def counts_frame(rows: pd.DataFrame, pred_cols, by: Sequence[str] | str, *, trut
     for arm, src in arms.items():
         if arm in prob_arms:
             M, cl = _prob_matrix(d, src, None if classes is None else list(classes))
+            rs = M[np.isfinite(M).all(1)].sum(1)
+            if len(rs) and not np.allclose(rs, 1.0, atol=1e-3):
+                # percentages, scores or a partial class list: the expected counts no longer add up to the persons
+                warnings.warn(f"counts_frame: probabilities of arm {arm!r} do not sum to 1 per person (range "
+                              f"{rs.min():.3g} to {rs.max():.3g}); expected counts are off by that factor",
+                              UserWarning, stacklevel=2)
             for c in cl:
                 if c not in cl_set:
                     cl_set.append(c)
@@ -412,12 +429,14 @@ def counts_frame(rows: pd.DataFrame, pred_cols, by: Sequence[str] | str, *, trut
 
 
 # ------------------------------------------------------------------ long_frame
-def _read(x, what: str) -> pd.DataFrame:
+def _read(x, what: str, id_col: str | None = None) -> pd.DataFrame:
     if isinstance(x, pd.DataFrame):
         return x
     if isinstance(x, (str, Path)):
         p = Path(x)
-        return pd.read_parquet(p) if p.suffix == ".parquet" else pd.read_csv(p)
+        if p.suffix == ".parquet":
+            return pd.read_parquet(p)
+        return pd.read_csv(p, dtype={id_col: str} if id_col else None)     # ids as text: "007" stays "007"
     raise TypeError(f"long_frame: {what} must be a DataFrame or a CSV / parquet path")
 
 
@@ -431,19 +450,29 @@ def long_frame(pred_wide, truth_wide, id_col: str, scale: None | str | Mapping[s
     scale: None (raw units), {target: s} / Series, or "sd_train": every target's truth and predictions are divided by
         the sample sd (ddof=1) of that target in `train=` (wide training truth), so MAE becomes zMAE (sd units) and
         targets on different scales weigh alike. A zero or missing scale raises.
-    targets: default the non-id columns present in the truth and in every prediction frame.
-    Units of the truth without a prediction are dropped with a warning; the scale used is in `frame.attrs["scale"]`.
+    targets: default the numeric non-id truth columns present in every prediction frame.
+    Ids are read as text from CSV; when one side has numeric ids and the other text, they are matched as text.
+    Units of the truth without a prediction are dropped with a warning (no shared unit raises); the scale used is in
+    `frame.attrs["scale"]`.
     """
-    truth = _read(truth_wide, "truth_wide")
-    arms = ({str(k): _read(v, f"pred_wide[{k!r}]") for k, v in pred_wide.items()} if isinstance(pred_wide, Mapping)
-            else {arm: _read(pred_wide, "pred_wide")})
+    truth = _read(truth_wide, "truth_wide", id_col)
+    arms = ({str(k): _read(v, f"pred_wide[{k!r}]", id_col) for k, v in pred_wide.items()}
+            if isinstance(pred_wide, Mapping) else {arm: _read(pred_wide, "pred_wide", id_col)})
     for nm, f in {"truth_wide": truth, **arms}.items():
         if id_col not in f.columns:
             raise ValueError(f"long_frame: id column {id_col!r} not in {nm}")
+    back = None
+    if len({pd.api.types.is_numeric_dtype(f[id_col]) for f in (truth, *arms.values())}) > 1:
+        # numeric ids on one side, text on the other (a CSV read back): match on the text form, keep truth's ids
+        back = dict(zip(truth[id_col].astype(str), truth[id_col]))
+        truth = truth.assign(**{id_col: truth[id_col].astype(str)})
+        arms = {k: f.assign(**{id_col: f[id_col].astype(str)}) for k, f in arms.items()}
+    for nm, f in {"truth_wide": truth, **arms}.items():
         if f[id_col].duplicated().any():
             raise ValueError(f"long_frame: duplicate ids in {nm}")
     if targets is None:
-        targets = [c for c in truth.columns if c != id_col and all(c in f.columns for f in arms.values())]
+        targets = [c for c in truth.columns if c != id_col and all(c in f.columns for f in arms.values())
+                   and (pd.api.types.is_numeric_dtype(truth[c]) or pd.api.types.is_bool_dtype(truth[c]))]
         if not targets:
             raise ValueError("long_frame: no target column is shared by the truth and the predictions")
     else:
@@ -477,6 +506,10 @@ def long_frame(pred_wide, truth_wide, id_col: str, scale: None | str | Mapping[s
             warnings.warn(f"long_frame: {len(lost)} of {len(ids)} truth units have no prediction in arm {nm!r}; "
                           "they are dropped", UserWarning, stacklevel=2)
         ids &= set(f[id_col])
+    if not ids:
+        raise ValueError(f"long_frame: no unit id is shared by the truth and the predictions (id dtypes: truth "
+                         f"{truth[id_col].dtype}, " + ", ".join(f"{k} {f[id_col].dtype}" for k, f in arms.items()) +
+                         "); check the id column and its format")
     base = base[base[id_col].isin(ids)]
     out = base.melt(id_vars=id_col, value_vars=targets, var_name="item", value_name="truth")
     for nm, f in arms.items():
@@ -486,6 +519,8 @@ def long_frame(pred_wide, truth_wide, id_col: str, scale: None | str | Mapping[s
     s = out["item"].map(sc).to_numpy(float)
     for c in ["truth"] + [PRED_PREFIX + nm for nm in arms]:
         out[c] = pd.to_numeric(out[c], errors="raise").to_numpy(float) / s
+    if back is not None:
+        out[id_col] = out[id_col].map(back)
     out = out.rename(columns={id_col: "group"}) if id_col != "group" else out
     out = out[["group", "item", "truth"] + [PRED_PREFIX + nm for nm in arms]]
     out.attrs["scale"] = dict(sc)
@@ -519,7 +554,9 @@ def segment_bias(frame: pd.DataFrame, seg: str | Sequence[str], arms: Sequence[s
     weight: None -> segments weighted by row count n_s; "equal" -> every segment alike; a column name -> row weights
         (weighted means, segment weight = its weight sum).
     cluster: bootstrap cluster column (default group > item > row); every arm and the truth are resampled together.
-    min_n: segments with fewer rows are left out (listed in `dropped`).
+        Fewer than 10 clusters warns; a single cluster leaves the CIs and p empty (NaN).
+    min_n: segments with fewer rows are left out (listed in `dropped`). Rows missing the truth or any arm are dropped
+        for every arm (paired).
     Returns {"metric", "arms": {arm: {"value", "lo", "hi", "point_outside_ci"}}, "diff": [{"a", "b", "diff", "lo",
     "hi", "p", "a_better"}], "segments": DataFrame (segment, n, weight, mean truth, mean and |error| per arm),
     "cluster", "n_clusters", "B", "dropped", "note"}. The single-arm CI is shown for completeness only: for an
@@ -575,6 +612,12 @@ def segment_bias(frame: pd.DataFrame, seg: str | Sequence[str], arms: Sequence[s
     rng = np.random.default_rng(seed)
     cnt = rng.multinomial(C, np.full(C, 1.0 / C), size=B).astype(float)
     reps = _seg_stats(cnt, Sw, Sy, Sp, equal)
+    if C < 2:
+        # one cluster: every resample is the sample itself, the CI collapses on the point and p would read 1/B
+        reps = {a: np.full(B, np.nan) for a in reps}
+    if C < AZ_KUME:
+        warnings.warn(f"segment_bias: only {C} bootstrap clusters ({clu_name or 'row'}); the CI is not meaningful "
+                      f"below {AZ_KUME}" + ("; CI and p are left empty" if C < 2 else ""), UserWarning, stacklevel=2)
     res = {}
     for a in cols:
         lo, hi = _boot.ga(reps[a], nokta=point[a], yontem=ci)

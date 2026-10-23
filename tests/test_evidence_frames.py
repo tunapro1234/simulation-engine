@@ -53,6 +53,26 @@ class SplitSummaryTest(unittest.TestCase):
         rep = ev.evaluate(_split_frame(9), "T", ours="t1", B=50, multiplier=False, limits=ss2.limits)
         self.assertTrue(any("repeated splits" in s for s in rep["sinirlar"]))
 
+    def test_best_baseline_follows_the_summarised_metric(self):
+        # the headline's best baseline is picked on the primary (pearson: random); on mae the strongest baseline is
+        # the marginal one, and ours - best_baseline must not compare against the mae-weakest baseline
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reps = [ev.evaluate(_split_frame(s), "T", ours="t1", B=20, multiplier=False) for s in range(3)]
+        ss = ev.split_summary(reps, metric="mae")
+        diff = ss.per_split.query("kind == 'diff'")["value"].to_numpy()
+        for r, dv in zip(reps, diff):
+            res = r["sonuclar"]
+            best = min(v["metrikler"]["mae"]["deger"] for v in res.values() if v.get("tur") == "baseline")
+            ours = res[r["manset"]["bizim"]["sutun"]]["metrikler"]["mae"]["deger"]
+            self.assertAlmostEqual(dv, ours - best)
+        # on the primary it stays the headline's best baseline
+        ss = ev.split_summary(reps)
+        for r, dv in zip(reps, ss.per_split.query("kind == 'diff'")["value"]):
+            res, m = r["sonuclar"], r["manset"]
+            self.assertAlmostEqual(dv, res[m["bizim"]["sutun"]]["metrikler"]["pearson"]["deger"]
+                                   - res[m["en_iyi_baseline"]["sutun"]]["metrikler"]["pearson"]["deger"])
+
     def test_errors(self):
         with self.assertRaises(ValueError):
             ev.split_summary(_split_frame)                                     # callable without seeds
@@ -115,6 +135,13 @@ class CountsFrameTest(unittest.TestCase):
         self.assertAlmostEqual(cf.loc[("u", "a"), "pred_m"], 2 * 0.9 + 0.2)
         self.assertAlmostEqual(cf.loc[("v", "b"), "pred_m"], 0.0)
 
+    def test_probabilities_not_summing_to_one_warn(self):
+        p = pd.DataFrame({"cell": ["u", "u"], "truth": ["a", "b"], "pv": [np.array([60.0, 40.0]), np.array([30.0, 70.0])]})
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ev.counts_frame(p, {"m": "pv"}, by="cell", probs=True, classes=["a", "b"])
+        self.assertTrue(any("do not sum to 1" in str(x.message) for x in w))
+
 
 class LongFrameTest(unittest.TestCase):
     def test_sd_train_scaling_gives_zmae(self):
@@ -158,6 +185,26 @@ class LongFrameTest(unittest.TestCase):
             ev.long_frame(p1, truth, "id", scale={"a": 0.0, "b": 1.0})
         with self.assertRaises(ValueError):
             ev.long_frame(p1, truth, "id", targets=["a", "zz"])
+
+    def test_csv_text_ids_and_label_columns(self):
+        import tempfile, os
+        # text ids with leading zeros survive the CSV round trip; numeric vs text ids match as text and keep the
+        # truth's ids; a non-numeric column is not a default target; no shared unit raises instead of an empty frame
+        truth = pd.DataFrame({"id": ["001", "002"], "name": ["u", "v"], "a": [1.0, 2.0]})
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "sealed.csv")
+            truth.assign(a=[1.5, 2.5]).to_csv(path, index=False)
+            lf = ev.long_frame(path, truth, "id")
+            self.assertEqual(sorted(lf.group), ["001", "002"])
+            self.assertEqual(list(lf["item"].unique()), ["a"])
+            num = pd.DataFrame({"id": [1, 2], "a": [1.0, 2.0]})
+            num.assign(a=[0.0, 0.0]).to_csv(path, index=False)
+            lf = ev.long_frame(path, num, "id")
+            self.assertEqual(sorted(lf.group), [1, 2])
+            self.assertAlmostEqual((lf.truth - lf.pred_ours).abs().mean(), 1.5)
+        with self.assertRaises(ValueError), warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ev.long_frame(pd.DataFrame({"id": [7, 8], "a": [1.0, 2.0]}), num, "id")
 
 
 class SegmentBiasTest(unittest.TestCase):
@@ -207,6 +254,23 @@ class SegmentBiasTest(unittest.TestCase):
         self.assertEqual((d["a"], d["b"]), ("ours", "base"))
         self.assertTrue(d["a_better"])
         self.assertLess(d["hi"], 0)
+
+    def test_one_cluster_has_no_ci_and_few_clusters_warn(self):
+        # one cluster: every resample is the sample, so the CI collapsed on the point and p read 1/B = 0.005
+        f = self._frame(n_seg=4, per=5).assign(group=1)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            r = ev.segment_bias(f, "seg", ["ours", "base"], B=200)
+        self.assertTrue(any("bootstrap clusters" in str(x.message) for x in w))
+        self.assertTrue(np.isnan(r["diff"][0]["p"]))
+        self.assertTrue(np.isnan(r["arms"]["ours"]["lo"]))
+        self.assertFalse(r["arms"]["ours"]["point_outside_ci"])
+        f = self._frame(n_seg=4, per=5).assign(group=lambda x: x.index % 5)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            r = ev.segment_bias(f, "seg", ["ours", "base"], B=200)
+        self.assertTrue(any("only 5 bootstrap clusters" in str(x.message) for x in w))
+        self.assertTrue(np.isfinite(r["diff"][0]["p"]))
 
     def test_errors(self):
         f = self._frame()
