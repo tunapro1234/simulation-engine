@@ -1,6 +1,7 @@
 """examples/recipes/segment_survey.py end to end in a subprocess: offline default run (FakeLLM + synthetic survey)
-writes the card and prints the ladder, W1 and PPI++ blocks; --data with the documented columns; --live without
---max-usd refuses; --live with a zero budget stops before any call and never prints the key."""
+writes the card and prints the ladder, W1 and PPI++ blocks; --data with the documented columns; a split column that
+puts one respondent on both sides is refused; --live without --max-usd refuses; --live with a zero budget stops
+before any call and never prints the key; --live without any key exits with a message, not a traceback."""
 import os
 import subprocess
 import sys
@@ -53,6 +54,15 @@ class TestSegmentSurveyRecipe(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("missing columns", r.stderr)
 
+    def test_user_csv_split_by_row_refused(self):
+        rows = ["respondent_id,segment,segment_desc,question_id,question_text,options,answer,split",
+                "r1,a,group a,q1,Agree?,Yes|No,Yes,train", "r1,a,group a,q2,Agree?,Yes|No,No,holdout",
+                "r2,b,group b,q1,Agree?,Yes|No,No,holdout"]
+        (self.d / "rows.csv").write_text("\n".join(rows) + "\n")
+        r = run("--data", str(self.d / "rows.csv"), "--out", str(self.d / "run"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("both splits", r.stderr)
+
     def test_live_needs_budget(self):
         r = run("--live", "--out", str(self.d / "run"))
         self.assertNotEqual(r.returncode, 0)
@@ -66,6 +76,13 @@ class TestSegmentSurveyRecipe(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("stopped by the budget", r.stderr)
         self.assertNotIn("test-key-value-123", r.stdout + r.stderr)
+
+    def test_live_without_key_exits_cleanly(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "SIMENGINE_KEY_FILE")}
+        r = run("--live", "--max-usd", "1", "--out", str(self.d / "run"), env=env)   # key lookup fails before any call
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("AuthError", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

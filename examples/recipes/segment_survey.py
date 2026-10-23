@@ -3,7 +3,7 @@ population-level share? The LLM states each segment's answer shares directly (ve
 averaged); a small real survey gives the baselines; a held-out survey is the truth; a prediction-powered (PPI++)
 estimate combines both for the population; the evidence card decides.
 
-    python3 examples/recipes/segment_survey.py                        # offline: FakeLLM + synthetic survey, ~10 s
+    python3 examples/recipes/segment_survey.py                        # offline: FakeLLM + synthetic survey, ~3 s
     python3 examples/recipes/segment_survey.py --data data/survey.csv --out runs/survey
     python3 examples/recipes/segment_survey.py --live --max-usd 1     # Claude Haiku, key from $ANTHROPIC_API_KEY
     python3 examples/recipes/segment_survey.py --live --key-file <path> --max-usd 1
@@ -99,6 +99,8 @@ if need - set(df.columns):
 if "split" not in df:                                                # respondent-disjoint split, stable by id
     df["split"] = ["train" if zlib.crc32(str(r).encode()) % 100 < 100 * TRAIN_SHARE else "holdout"
                    for r in df.respondent_id]
+elif mixed := int(df.groupby("respondent_id").split.nunique(dropna=False).gt(1).sum()):
+    sys.exit(f"{mixed} respondents have rows in both splits; split by respondent, not by row (leakage)")
 qs = [{"id": q, "text": g.question_text.iloc[0], "options": g.options.iloc[0].split("|")}
       for q, g in df.groupby("question_id", sort=False)]
 opts = {q["id"]: q["options"] for q in qs}
@@ -116,6 +118,8 @@ if a.live:
                         budget_usd=a.max_usd, api_key=key, tag="segment_survey")
 else:
     llm = se.FakeLLM(fake_llm)
+    if a.data:
+        print("note: the offline FakeLLM knows nothing about your segments; this checks the pipeline, --live scores")
 
 # 3. Ask: verbalised shares per segment x question (3 framings averaged) + the no-segment control (population only).
 try:
@@ -123,6 +127,8 @@ try:
     ctrl = se.sim.segment_distribution({"all": POPULATION}, qs, llm=llm, population=POPULATION)
 except se.llm.BudgetExceeded as e:
     sys.exit(f"stopped by the budget: {e}")
+except se.llm.StopError as e:                                       # no / bad key, account spend limit
+    sys.exit(f"stopped: {type(e).__name__}: {e}")
 print(f"LLM calls: {pred['calls']} + {ctrl['calls']} control | invalid replies (filled uniform): {pred['invalid']}")
 
 # 4. Baselines from the TRAIN survey only: overall marginal (segment ignored), segment shares shrunk toward it.
@@ -195,5 +201,5 @@ else:
 # 10. Write the card + dashboard; spend line for --live.
 se.evidence.card(report, out / "card.md", lang="en")
 se.evidence.dashboard([report], out / "dashboard.html")
-cost = f" | spend ${llm.ledger.total():.4f} of ${a.max_usd}" if a.live else ""
+cost = f" | spend this run ${llm.spent_usd:.4f}, ledger ${llm.ledger.total():.4f} of ${a.max_usd}" if a.live else ""
 print(f"written: {out / 'card.md'}, {out / 'dashboard.html'}{cost}")
