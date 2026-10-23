@@ -39,7 +39,7 @@ class SingleRowItemsTest(unittest.TestCase):
         self.assertFalse(any("demeaned_r2" in k or "madde_ici_kor" in k for k in den))
         for r in rep["sonuclar"].values():
             self.assertNotIn("demeaned_r2", r["metrikler"])
-        self.assertEqual(rep["sonuclar"]["taban_marjinal"]["etiket"], "Genel medyan (madde başına tek satır)")  # mae → median
+        self.assertEqual(rep["sonuclar"]["taban_marjinal"]["etiket"], "Genel medyan (madde başına tek satır) (cross-fitted, 5-fold by row)")  # mae → median; no split column
 
     def test_two_row_items_keep_within_item_audits(self):
         df = _one_row_frame()
@@ -47,7 +47,7 @@ class SingleRowItemsTest(unittest.TestCase):
         rep = ev.evaluate(df, task="continuous", primary="mae", ours="ours", raw="raw")
         self.assertIn("kontrol_karistir_ours", rep["sonuclar"])
         self.assertIn("demeaned_r2", rep["sonuclar"]["tahmin_ours"]["metrikler"])
-        self.assertEqual(rep["sonuclar"]["taban_marjinal"]["etiket"], "Madde medyanı")
+        self.assertEqual(rep["sonuclar"]["taban_marjinal"]["etiket"], "Madde medyanı (cross-fitted, 5-fold by row)")
 
     def test_mixed_frame_single_rows_draw_from_other_items(self):
         df = pd.DataFrame({"madde": ["a", "a", "a", "b", "c", "d"],

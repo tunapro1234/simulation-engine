@@ -199,21 +199,49 @@ def _logloss_cs(y, p):
     return -np.log(np.clip(p[np.arange(len(y)), y], EPS, 1))
 
 
-def _f1_cs(y, p, madde=None):
-    tah = p.argmax(1) if _olasilik_mi(p) else p
-    return f1_score(y, tah, average="macro", zero_division=0)
-
-
 def _etiket(p):
     return p.argmax(1) if _olasilik_mi(p) else p
 
 
+def _sayimlar(y, p):
+    """Sert etiketlerin sınıf sayımları, yalnız görülen etiketler üzerinde (np.unique + ters kodlar): (gerçek_n, tahmin_n,
+    doğru_n), her biri L uzunlukta, L = y ∪ tahmin etiket sayısı. K × K karışıklık matrisi kurulmaz: bootstrap
+    tekrarı başına O(n log n), sınıf sayısından bağımsız (D9 #3: 800 sınıfta süre sklearn confusion_matrix'teydi)."""
+    y, t = np.asarray(y).reshape(-1), np.asarray(_etiket(p)).reshape(-1)
+    n = len(y)
+    _, kod = np.unique(np.concatenate([y, t]), return_inverse=True)
+    kod = kod.reshape(-1)
+    ky, kt = kod[:n], kod[n:]
+    L = int(kod.max()) + 1 if len(kod) else 0
+    return (np.bincount(ky, minlength=L).astype(float), np.bincount(kt, minlength=L).astype(float),
+            np.bincount(ky[ky == kt], minlength=L).astype(float))
+
+
+def _f1_cs(y, p, madde=None):
+    """Macro-F1 (sklearn average="macro", zero_division=0): y ∪ tahmin etiketleri üzerinde 2·TP / (2·TP + FP + FN)."""
+    gy, gt, tp = _sayimlar(y, p)
+    if not len(gy):
+        return 0.0
+    payda = gy + gt                                   # 2·TP + FP + FN
+    return float(np.mean(np.where(payda > 0, 2 * tp / np.where(payda > 0, payda, 1), 0.0)))
+
+
 def _kappa_cs(y, p, madde=None):
-    return cohen_kappa_score(y, _etiket(p))
+    """Cohen kappa (sklearn cohen_kappa_score ile aynı): 1 − (1 − p_o) / (1 − p_e); p_e = 1 ise tanımsız (nan)."""
+    gy, gt, tp = _sayimlar(y, p)
+    n = gy.sum()
+    if n <= 0:
+        return np.nan
+    uyumsuz = 1 - tp.sum() / n
+    beklenen = 1 - (gy @ gt) / n ** 2
+    return float(1 - uyumsuz / beklenen) if beklenen > 0 else np.nan
 
 
 def _dengeli_cs(y, p, madde=None):
-    return balanced_accuracy_score(y, _etiket(p))
+    """Dengeli doğruluk (sklearn balanced_accuracy_score): gerçekte görülen sınıfların duyarlılık ortalaması."""
+    gy, _, tp = _sayimlar(y, p)
+    v = gy > 0
+    return float(np.mean(tp[v] / gy[v])) if v.any() else np.nan
 
 
 def _ece_cs(y, p, madde=None):
