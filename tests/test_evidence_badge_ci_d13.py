@@ -73,7 +73,8 @@ class TestBadgeCi(unittest.TestCase):
             self.assertIsNotNone(m, g)
             cols = {biz["etiket"]: biz["sutun"], tb["etiket"]: tb["sutun"]}
             self.assertEqual(set(m.group(1, 2)), set(cols), g)
-            pd_ = api.paired_diff(rep, cols[m.group(1)].removeprefix("tahmin_"), cols[m.group(2)].removeprefix("tahmin_"))
+            x, y = (cols[m.group(i)].removeprefix("tahmin_") for i in (1, 2))
+            pd_ = api.paired_diff(rep, x, y)
             self.assertEqual(m.group(3, 4, 5), (f"{pd_['diff']:+.3f}", f"{pd_['lo']:+.3f}", f"{pd_['hi']:+.3f}"),
                              (ev_.__name__, g, pd_))
 
