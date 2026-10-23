@@ -10,10 +10,10 @@ that combine an LLM prediction with a model learned from data.
 | `uniform_distribution`, `weighted_distribution`, `overall_copy`, `segment_distributions`, `segment_empirical`, `select_m` | distribution baselines for group-level opinion; `mode="shrunk"` is segment empirical shrunk toward the population, `m` picked by K-fold cross-validation (`select_m`) | `overall_copy` wins against the uniform distribution and against neighbour transfer; with segment training data, report shrunk segment empirical next to `overall_copy`: they are the LLM-free arms to beat |
 | `PersistenceBaseline`, `persistence` | "tomorrow = yesterday" from the unit's own history | strongest single signal wherever history exists |
 | `basket_tensor`, `popularity`, `personal_frequency`, `decayed_frequency`, `tifu_knn` | next-basket / repeat-purchase scorers | decayed frequency beats P-TopFreq; TIFU-KNN adds nothing |
-| `LogisticBaseline`, `LightGBMBaseline`, `KNNBaseline`, `TextKNNRegressor` | supervised tabular / text baselines | GBDT ties persistence when history is available; text kNN on effect sizes is weak |
-| `LengthAB`, `TfidfAB`, `TfidfWordAB`, `LLMDirectAB`, `LogitAverageAB`, `ABStack` | A/B winner of two texts | stack (TF-IDF + LLM) is the best measured arm, at **0.817** on Upworthy |
+| `LogisticBaseline`, `LightGBMBaseline`, `KNNBaseline`, `TextKNNRegressor` | supervised tabular / text baselines; both GBDT and logistic take `sample_weight`; LightGBM warns on rare positives, an `eval_set` overlapping training rows and class reweighting, `calibrate="platt"` | GBDT ties persistence when history is available; text kNN on effect sizes is weak |
+| `LengthAB`, `ItemMajority`, `TfidfAB`, `TfidfWordAB`, `LLMDirectAB`, `LogitAverageAB`, `ABStack` | A/B winner of two texts; `ItemMajority` = the item's past direction when the same item repeats | stack (TF-IDF + LLM) is the best measured arm, at **0.817** on Upworthy; with repeated items `ItemMajority` was the strongest arm in G3 (0.837) |
 | `EarlyTestBayes`, `simulate_saving_calibrated`, ... | LLM prior + small early test, normal-normal Bayes on the log-odds ratio | **about 2.3x** impression saving at 100 impressions/arm, no gain at 800+ |
-| `ShrunkDeviation`, `ridge_to_prior`, `select_lambda`, `LLMFeatureGBDT`, `DevStack`, `BinaryCalibrator` | ways of letting an LLM prediction into a data model, tuned on dev | the LLM term mostly adds ~0 once a strong data baseline exists; tuning keeps it from hurting |
+| `ShrunkDeviation`, `ridge_to_prior`, `select_lambda`, `LLMFeatureGBDT`, `DevStack`, `BinaryCalibrator` | ways of letting an LLM prediction into a data model, tuned on dev (`ShrunkDeviation(cv_groups=)` cross-fits its alpha) | the LLM term mostly adds ~0 once a strong data baseline exists; tuning keeps it from hurting |
 | `TwinStack`, `pooled_logistic_oof`, `column_correlation`, ... | person-level digital twin: matrix completion + kNN + optional LLM column, ridge-stacked per column | Twin-2K-500 fair LLM-free baseline **0.342** corr; LLM adds +0.006 |
 | `MNL`, `evaluate_mnl`, `null_scores`, `person_holdout`; `conjoint.wtp`, `conjoint.simulate_shares`, `conjoint.elasticity`; `conjoint_hb.HBMNL`, `conjoint_hb.MixedLogit` | conditional multinomial logit for conjoint / discrete choice with Hessian standard errors, WTP (delta / person-cluster bootstrap CI), share simulation and price elasticities; hierarchical Bayes MNL (person posterior for known persons, population mixture for new ones) and an xlogit mixed-logit wrapper | 0.509 new-person accuracy on camera conjoint (HB 0.519); same person, new task MNL 0.482 vs **HB 0.715** |
 | `Markov2Baseline`, `NextActionRanker`, `hit_at_k`, `top1`, `next_action.sessions` / `funnel`, ... | next-action ranking: Markov-2 with backoff, LightGBM lambdarank; step table -> session table (first-k prefix, outcome) and per-step funnel | 26.94 vs **31.60** exact next action on OPeRA |
@@ -23,7 +23,7 @@ that combine an LLM prediction with a model learned from data.
 | `rct_effects`, `rct_transfer` | RCT condition (x segment) effects vs control within blocks, averaged over blocks, with SE; "same test in another market" transfer baseline | G1 rehearsal (11 messages, 32 -> 31 countries) transfer Spearman **0.845** [0.43, 1.00], noise ceiling 0.908; one country alone median 0.28 |
 | `heterogeneity_test`, `segment_uplift`, `shrink_effects`, `split_half_effects`, `TLearner`, `SLearner`, `qini`, `auuc`, `uplift_at_k` (`uplift.py`) | uplift / CATE for randomised experiments: is the effect heterogeneous at all (treatment x feature test + Cochran Q), segment effects with Neyman SE shrunk by Fay-Herriot (REML tau^2), a split-half dev rig that splits units before bootstrapping, T-/S-learners and the Qini / AUUC / uplift@k metrics the bench uplift tasks use | D11 rehearsal (SMS pilot -> rollout, 26 segments): pilot ATE to every segment tied the strongest baseline (MAE 1.538 vs 1.526); the hand T-learner did not finish in 14 min and the test said it was not needed |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
-| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature`; `forecast.panel_from_long`, `forecast.extrapolation_check` | multi-series forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon (level, log-ratio or logit-with-ceiling target; origin-time features), rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls, long `id, time, variable, value` table -> panel, extrapolation warning | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
+| `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature`; `forecast.panel_from_long`, `forecast.extrapolation_check` | multi-series forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon (level, log-ratio, `diff` or logit-with-ceiling target, per-series `upper=`; origin-time features), rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls, long `id, time, variable, value` table -> panel, extrapolation warning | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 | `wave_persistence`, `pooled_shrunk`, `same_regime`, `subgroup_mixture`, `mixture_reweight`, `role_swap`, `transition_backtest`, `merge_frames` (`waves.py`) | repeated surveys: past waves -> next wave's segment x question distributions; last-wave copy, k-wave pool shrunk to the population, same-regime pool, party-ID mixture with role swap across a regime switch, per-year backtest over past switch years | D6 rehearsal (yearly opinion survey, D -> R president, one run): copying last year 0.1315 test TVD (approval 0.295), role-mirror baseline 0.0839, team 0.0788; on dev the same-regime 4-wave pool beat the preregistered method, 0.0990 vs 0.1007 |
 | `sessionize`, `cutoff_windows`, `history_features`, `rescale_to_rates` (`sessions.py`) | event log -> sessions (gap rule, same-time events ordered view < addtocart < transaction); one row per (cutoff, user) for the first session after each cutoff with prefix columns and the label from the rest of the session; `eval_gap=` gives a train / eval split whose time ranges do not overlap; per user / item / user x item counts, smoothed conversion rates and days since last event, all strictly before the cutoff; segment means moved to training rates with the within-segment ranking kept | D13 rehearsal wrote these by hand (~10 min). Overlapping 21-day windows every 7 days put the same sessions in the early-stopping eval set: LightGBM grew to 1300-2200 trees, dev AP 0.026 vs logistic 0.044 |
 
@@ -157,6 +157,30 @@ LightGBM defaults), the persona kit (`Medyan`), the deney kit (`KomsuDeney`), ka
   `TextKNNRegressor` (TF-IDF neighbours from other groups) predicts SocSci210 effect sizes at r 0.080
   [-0.024, 0.232] **[deney 1.4]**, which is weak. Ridge scored 0.017; an Opus direct estimate scored r 0.509 but
   was judged not presentation-ready.
+- **Safety of the baselines** (`SIMENGINE-EKSIK.md` D13 #8 / #9, D5 #3; each a silent failure in a rehearsal):
+  - `ConstantBaseline` / `MajorityBaseline` / `MedianConstant` are `fit(y, X=None)`, but the sklearn order
+    `fit(X, y)` (what `oof_predict` calls) is detected by shape (first argument 2-D and second 1-D, or first with
+    several columns) and turned around. Two 1-D arguments of equal length are read as `(y, X)`; pass `y=` by
+    keyword when in doubt. `MedianConstant` takes `sample_weight=` as an alias of `weight=`.
+  - `LogisticBaseline.fit(X, y, sample_weight=None)`: weights go to the final estimator (the scaler stays
+    unweighted) and are subsampled with the rows above `max_rows`. `LightGBMBaseline.fit(X, y, eval_set=None,
+    sample_weight=None, calibrate_set=None)` passes them to LightGBM. Both work with `oof_predict(weight=)`.
+  - `LightGBMBaseline` warns (`UserWarning`) when the binary minority share is below `RARE_SHARE` (2%) with
+    `min_child_samples` left at 50 (D13: ~1% positives, ~6 min per fit, over-fit; try 200+, `learning_rate=0.02`,
+    `reg_lambda=5`, or `LogisticBaseline` first).
+  - It warns when `eval_set` holds training rows, since early stopping then follows rows the trees were fit on.
+    A row counts only when its index label AND its feature values match a training row (a dev frame from a
+    separate file shares labels 0..m with the train file but not the rows); with both indexes 0..n-1, identical
+    feature rows are compared (if the training rows are mostly distinct).
+  - It warns when `scale_pos_weight`, `is_unbalance` or `class_weight` (multiclass too) is set, or when a binary
+    `sample_weight` moves the positive odds by more than `REWEIGHT_ODDS` (1.5x): `predict_proba` is then a
+    ranking score, not a probability. On synthetic 8% positives, `scale_pos_weight=19` gave mean prediction 0.35
+    against a rate of 0.083. `calibrate="platt"` (binary only) fits `BinaryCalibrator(method="platt")` on
+    `calibrate_set=(X, y)`, else on `eval_set` (which early stopping also used, mildly optimistic); that brought
+    the mean to 0.068. `predict_proba(X, raw=True)` keeps the raw score; neither set given raises `ValueError`.
+  - Copy-on-write: `ItemMarginal` / `SegmentRate` (multiclass) and `PersistenceBaseline` used to fill unseen rows
+    in a read-only `to_numpy()` view; they now write to copies, so they run with
+    `pd.options.mode.copy_on_write = True` (the default in pandas 3).
 
 ## A/B winner (`ab.py`)
 
@@ -187,6 +211,14 @@ In the kit rehearsal the stack scored 0.813, TF-IDF 0.780, `TfidfWordAB` 0.760 a
   **[deney 4.1]**.
 - Over all unselected pairs (not only significant ones), content-based prediction reaches 0.618. The noise
   ceiling there is about 0.74, the repeat-winner rate reported by Hagar et al. 2022 **[deney 4]**.
+
+**Repeated items.** When the same item (e.g. question x amount) repeats across tests or countries, check the
+LLM-free "same item, same direction" rung first. `ItemMajority(item=["question", "amount"]).fit(train)` predicts
+P(A) = `(k + shrink * 0.5) / (n + shrink)` from the item's k A-wins in n training rows (`shrink=2`); an unseen
+item gets 0.5, or the training rate with `unseen="global"`, and `coverage_` is the share of predicted rows whose
+item was seen. `item=None` keys on the unordered text pair, so a pair seen as (x, y) and later as (y, x) is one
+item with y flipped. `table_` holds n, k and p per item. In the G3 rehearsal (`SIMENGINE-EKSIK.md` G3 #13) this
+rung, written by hand, was the strongest arm at 0.837.
 
 `ABStack` gets its dev set from the `dev` frame you pass, or else holds out `dev_n=200` groups from training.
 If neither is possible it falls back, with a warning, to the stored Upworthy dev300 weights (1.3, 2.75). Invalid
@@ -301,6 +333,13 @@ dev stack. PPI++ lives in `simengine.evidence`.
   `ShrunkDeviation(distribution=True).fit(base=pop, llm=llm_seg[train], y=true_seg[train], ref=llm_pop)`, with
   `base` the known overall distribution, `ref` the LLM's own overall distribution and beta = `alpha_` chosen on
   the train cells (pass `alphas=np.linspace(0, 1.5, 16)` to allow beta > 1).
+  The default grid is 0, 0.01, 0.02, 0.03, 0.05, 0.07, then 0.1 to 1 by 0.1 (D5 always picked 0.1-0.2 on the
+  older 0..1 by 0.1 grid, so the low end was never tried); `alphas=` replaces it. `losses_[alpha_]` is in-sample:
+  alpha is picked and scored on the same rows. `fit(..., cv_groups=country)` also picks alpha on the other groups
+  for each held-out group (`cv_alphas_`), applies it to that group (`cv_pred_`) and scores the result
+  (`cv_loss_`). Report `cv_loss_` as the dev score; the D5 team wrote this loop by hand (~3 min). `alpha_` and
+  `predict` still use the all-rows choice. With one group nothing can be held out: it warns and returns the
+  in-sample numbers.
 - **`ridge_to_prior` / `select_lambda`**: ridge toward a prior coefficient vector, with lambda chosen on held-out
   rows from (0.3, 1, 3, 10, 30, 100, 1e9). This is the makro "+data" step. The best M2 test WAPE was 0.469
   (LLM expert prior + data), against 0.477 for category + data. A shuffled-LLM placebo reproduced about 85% of
@@ -659,10 +698,10 @@ weight=None, n_repeats=1)`
   `1/(se^2 + tau^2)` when the noise of the rows differs 30-fold, as in the D5 rehearsal). Each fold's training rows
   go to `fit(..., sample_weight=w)`. An sklearn `Pipeline` (nested too) gets `<last step>__sample_weight`, so
   `make_pipeline(StandardScaler(), Ridge())` works; the scaler itself stays unweighted (`TabularRidge` below
-  weights it). If the model's `fit` has no `sample_weight` parameter (`GroupTransfer`, `RandomEffectsMean`, and
-  for now `LogisticBaseline` / `LightGBMBaseline`), `TypeError` names the model. Missing, infinite or negative
-  weights on rows with a target raise `ValueError`. Predictions are not weighted: report a weighted metric
-  separately.
+  weights it). `LogisticBaseline` and `LightGBMBaseline` take `sample_weight`. If the model's `fit` has no
+  `sample_weight` parameter (`GroupTransfer`, `RandomEffectsMean`), `TypeError` names the model. Missing, infinite
+  or negative weights on rows with a target raise `ValueError`. Predictions are not weighted: report a weighted
+  metric separately.
 - Group-level scores of pooled group-held-out predictions are biased **negative** when there is no real group
   signal. This is pessimistic, not leakage: a held-out group's prediction leans on the other groups' mean, which
   is lower when the held-out groups' own mean is higher. With a few dozen groups, the group-level Spearman of the
@@ -1130,6 +1169,22 @@ F.extrapolation_check(fr, dev_backtest["truth"], margin=0.25)        # or agains
   upper * sigmoid(logit(y[T] / upper) + z), so no prediction can pass `upper`. Observed y above `upper` raises
   a warning (D7: mobile subscriptions can exceed 100 per 100; pick the ceiling from origin-time knowledge).
   Non-level targets train with the "regression" objective (Tweedie needs a non-negative target).
+- `target="diff"` (G10 #1): y[T+h] - y[T], mapped back as y[T] + z, with the same y[T] (last value observed at
+  or before T) as `log_ratio` / `logit`. A pooled change target for linear trends: unlike a level tree it carries
+  a trend past the training levels (a synthetic linear trend is recovered exactly with `LinearRegression`).
+- Per-series ceilings for `target="logit"` (G10 #1): `upper=` takes a finite scalar, a dict
+  `{series_id: ceiling}`, a `Series` indexed by series id (e.g. `panel.groupby("series").ceiling.first()`, read
+  as a dict), or the name of a panel column constant per series. There is no fallback: a series missing from the
+  dict, a NaN / non-positive ceiling or a column value that changes within a series raises (`KeyError` /
+  `ValueError` naming the series), and `upper=inf` raises `ValueError`. `upper` is validated and used only for
+  `target="logit"`; other targets ignore it. Ceilings are resolved for the series of each panel passed to `fit`
+  and `predict`; a scalar `upper` gives the same output as before.
+
+  ```python
+  fc = F.DirectForecaster("hgb", horizons=4, target="diff")                     # trend: y[T] + predicted change
+  fc = F.DirectForecaster("hgb", horizons=4, target="logit", upper="ceiling")  # panel column, one per series
+  fc = F.DirectForecaster("hgb", horizons=4, target="logit", upper={"a": 30.0, "b": 100.0})
+  ```
 - `origin_features` columns are read at the origin T as `{c}_at_origin` (another technology's level, an
   income group), unlike `exog`, which is read at the target time and so needs known-in-advance values. In
   `fit` / `predict` their values after the origin are masked, so they cannot leak (a column also listed in
