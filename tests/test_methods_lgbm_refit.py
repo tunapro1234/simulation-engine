@@ -96,6 +96,26 @@ class TestLightGBMRefitFull(unittest.TestCase):
         with self.assertRaises(ValueError):
             LightGBMBaseline(refit_full=True, refit_scale=0)
 
+    def test_param_aliases_dropped_in_refit(self):
+        # a tree-count alias used to override n_estimators_ in the refit (400 trees, n_estimators_ said ~10), and an
+        # early-stopping alias made the refit raise (no validation set left)
+        for prm in ({"num_iterations": 400}, {"num_boost_round": 400}, {"early_stopping_round": 5}):
+            m = LightGBMBaseline(refit_full=True, **prm, **FAST).fit(self.tr, self.ytr, eval_set=(self.dv, self.ydv))
+            self.assertEqual(trees(m), m.n_estimators_, prm)
+            self.assertLess(m.best_iteration_, 400, prm)
+
+    def test_continuous_int_train_float_eval(self):
+        # int train labels: the float eval labels were cast to int (0.4 -> 0) before the refit
+        rs = np.random.default_rng(4)
+        X = pd.DataFrame({"x": rs.normal(size=1500)})
+        yi = np.round(X.x.to_numpy() * 3).astype(int)
+        yf = np.full(500, 0.4)
+        m = LightGBMBaseline(kind="continuous", refit_full=True, refit_scale=3.0, **FAST).fit(
+            X.iloc[:1000], yi[:1000], eval_set=(X.iloc[1000:], yf))
+        hand = LightGBMBaseline(kind="continuous", n_estimators=m.n_estimators_, **FAST).fit(
+            X, np.concatenate([yi[:1000], yf]))
+        np.testing.assert_allclose(m.predict(X.iloc[1000:]), hand.predict(X.iloc[1000:]), atol=1e-9)
+
     def test_calibrate_set_ok(self):
         X, y = data(seed=2)
         m = LightGBMBaseline(refit_full=True, calibrate="platt", **FAST).fit(

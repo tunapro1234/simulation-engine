@@ -934,6 +934,11 @@ def _eval_kw(Model, Xv, yv) -> dict:
 
 RARE_SHARE = 0.02           # LightGBMBaseline: minority class share below this with default min_child_samples warns
 _MIN_CHILD_KEYS = ("min_child_samples", "min_data_in_leaf", "min_data_per_leaf", "min_data")
+# LightGBMBaseline(refit_full=True): params the refit drops (a tree-count alias would override n_estimators_, an
+# early-stopping one needs a validation set the refit no longer has)
+_REFIT_DROP_KEYS = ("num_iterations", "num_iteration", "n_iter", "num_tree", "num_trees", "num_round", "num_rounds",
+                    "nrounds", "num_boost_round", "max_iter", "early_stopping_round", "early_stopping_rounds",
+                    "early_stopping", "n_iter_no_change")
 
 
 REWEIGHT_ODDS = 1.5        # LightGBMBaseline: sample_weight moving the positive odds by more than this is a reweighting
@@ -1119,9 +1124,11 @@ class LightGBMBaseline:
             self.best_iteration_ = int(self.model_.best_iteration_ or prm["n_estimators"])
             self.n_estimators_ = max(1, int(round(self.best_iteration_ * self.refit_scale)))
             X = pd.concat([X, pd.DataFrame(eval_set[0])[self.columns_]], ignore_index=True)
-            y = np.concatenate([y, yv.astype(y.dtype)])
+            # continuous: let numpy promote (int train labels must not truncate float eval labels)
+            y = np.concatenate([y, yv if self.kind_ == "continuous" else yv.astype(y.dtype)])
             self.categories_ = {c: sorted(X[c].astype(str).unique()) for c in self.cat_}
-            self.model_ = Model(**{**prm, "n_estimators": self.n_estimators_}).fit(self._frame(X), y)
+            rp = {k: v for k, v in prm.items() if k not in _REFIT_DROP_KEYS}
+            self.model_ = Model(**{**rp, "n_estimators": self.n_estimators_}).fit(self._frame(X), y)
         if self.kind_ == "multiclass":
             self.classes_ = list(self.model_.classes_)
         self.calibrator_ = None
