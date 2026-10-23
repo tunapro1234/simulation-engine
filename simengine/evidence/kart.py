@@ -265,8 +265,11 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
         # api'nin İngilizce görünümü bu parantezi olduğu gibi taşır.
         be = (biz or {}).get("etiket") or "ours"
         ci = lambda d: f"{d['fark']:+.3f} [{d['alt']:+.3f}; {d['ust']:+.3f}]"
-        enk = ", ".join(f"{be} − {e}" for e in (tb_bel or {}).get("esitler") or [])
-        olcu = f"min({enk}) = {ci(fark_r)}; {be} − {tb.get('etiket')} = {ci(fark)}"
+        # fark metrik yönünde (+ = bizim iyi): düşük-iyi metrikte (mae, brier, wasserstein...) bu taban − bizim'dir;
+        # "bizim − taban" yazmak kayıtlı karşılaştırmanın (ham a − b) işaretini ters gösterirdi
+        ad = (lambda e: f"{be} − {e}") if yon > 0 else (lambda e: f"{e} − {be}")
+        enk = ", ".join(ad(e) for e in (tb_bel or {}).get("esitler") or [])
+        olcu = f"min({enk}) = {ci(fark_r)}; {ad(tb.get('etiket'))} = {ci(fark)}"
         g = f"{g} (Rozet eşit tabanların en kötüsüne karşı: {esit}: {olcu}; badge against the worst tied baseline.)"
     atl = [d.get("kontrol") for d in oz.get("denetim") or [] if d.get("durum") == "atlandi" and not d.get("uygulanamaz")
            and any(k in (d.get("kontrol") or "") for k in ("bölme", "grup", "zaman", "kontaminasyon", "ezber"))]
