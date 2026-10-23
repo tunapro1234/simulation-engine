@@ -3,13 +3,17 @@ L2 (L1 + the person's past behaviour in the same items), and an SSR variant (one
 item, mapped to a probability by embedding similarity). Port of talp73/kod/llm/{istem.py, kos.py, ssr.py,
 kalibre.py, tekrar.py}.
 
-Output for every person x item: probability (0-1) that the event happens in the target window.
+Output for every person x item: probability (0-1) that the event happens in the target window; with
+kind="numeric", a number per person x field inside that field's range (else None / NaN).
 
     spec = PredictionSpec()                                    # generic wording; AMAZON = the measured prompts
     res = predict_people(llm, people, ["BOOKS", "COFFEE"], level="L1", spec=spec)
     res = predict_people(people, ["BOOKS", "COFFEE"], llm=llm, level="L1")   # same, keyword form
     frame = prediction_frame(res, truth={"u1": {"BOOKS": 1, "COFFEE": 0}, ...})
     frame = batch_calibrate(frame, prior_rates={"BOOKS": 0.3, "COFFEE": 0.1}, col="pred_L1", out_col="pred_L1_cal")
+    fields = [NumericField("log_rate", -5, 1), NumericField("spend", 0, 200, unit="USD")]
+    res = predict_people(people, llm=llm, kind="numeric", fields=fields)   # one JSON reply per person, all fields
+    frame = prediction_frame(res)        # person x field; out of range / unparsed -> NaN, counted in res["invalid"]
 
 `people` (accepted types):
   * list[Persona] (e.g. simengine.persona.from_history(level="L1")) or other persona-like items
@@ -41,9 +45,10 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from ..llm.jsonx import json_extract
 from ._stats import to_jsonable
 from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many
-from .parse import parse_item_probs, parse_text_fields
+from .parse import _num, parse_item_probs, parse_text_fields, unwrap
 from .personas import PersonaView, as_persona
 from .ssr import SCALES, SSR
 
@@ -80,6 +85,14 @@ class PredictionSpec:
                      "event described happened at least once during that period.\n\n"
                      "Items (key: description):\n{items}\n\n"
                      "Return a JSON object with exactly these {n} keys and one sentence (a string) as each value.")
+    system_numeric: str = ("You simulate the behavior of one specific real person. "
+                           "Give your best numeric estimates. Reply with a JSON object only.")
+    system_numeric_l0: str = ("You simulate the behavior of people from the target population. "
+                              "Give your best numeric estimates. Reply with a JSON object only.")
+    task_numeric: str = ("Task: consider {subject} during {period}. For each quantity below, give your best "
+                         "estimate as a number inside the stated range.\n\n"
+                         "Quantities (key: description (range)):\n{items}\n\n"
+                         "Return a JSON object with exactly these {n} keys and a number as each value.")
     ssr_anchors: list = field(default_factory=lambda: SCALES["purchased"][0])
     labels: dict = field(default_factory=dict)          # item key -> description
     questions: dict | None = None                       # profile column -> question label (profile_text)
@@ -212,6 +225,101 @@ def history_text(summary: Mapping[str, Any], items: Sequence[str], *, recent_per
                        f"last purchase {r.get('last', 'unknown')}, {int(r.get('count_recent', 0))} items in "
                        f"{recent_period}")
     return "\n".join(out)
+
+
+@dataclass(frozen=True)
+class NumericField:
+    """One numeric target of predict_people(kind="numeric"): inclusive range [lo, hi], optional unit (shown after
+    the range) and label (default spec.label(name))."""
+    name: str
+    lo: float
+    hi: float
+    unit: str = ""
+    label: str = ""
+
+    def __post_init__(self):
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("NumericField.name must be a non-empty string")
+        lo, hi = float(self.lo), float(self.hi)
+        if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
+            raise ValueError(f"field {self.name!r}: need finite lo < hi, got {self.lo}..{self.hi}")
+        object.__setattr__(self, "lo", lo)
+        object.__setattr__(self, "hi", hi)
+
+
+def numeric_fields(fields) -> list[NumericField]:
+    """NumericField, (name, lo, hi[, unit]) tuples, {name, lo, hi, unit?, label?} dicts, or sim.FieldSpec with
+    kind int/float and min/max -> validated list (non-empty, unique names)."""
+    out: list[NumericField] = []
+    for f in fields or []:
+        if isinstance(f, NumericField):
+            out.append(f)
+        elif isinstance(f, Mapping):
+            out.append(NumericField(**f))
+        elif isinstance(f, (tuple, list)):
+            out.append(NumericField(*f))
+        elif getattr(f, "kind", None) in ("int", "float"):      # sim.constrained.FieldSpec
+            if f.min is None or f.max is None:
+                raise ValueError(f"field {f.name!r}: numeric prediction needs both min and max")
+            out.append(NumericField(f.name, f.min, f.max, label=getattr(f, "label", "") or ""))
+        else:
+            raise ValueError(f"not a numeric field: {f!r} (NumericField, (name, lo, hi), dict, or int/float FieldSpec)")
+    if not out:
+        raise ValueError("kind='numeric' needs fields=[NumericField(name, lo, hi), ...]")
+    names = [f.name for f in out]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise ValueError(f"duplicate field names {dup}")
+    return out
+
+
+def _fmt(x: float) -> str:
+    return str(int(x)) if float(x).is_integer() else repr(float(x))
+
+
+def _fields_block(fields: Sequence[NumericField], spec: PredictionSpec) -> str:
+    return "\n".join(f"{f.name}: {f.label or spec.label(f.name)} (number from {_fmt(f.lo)} to {_fmt(f.hi)}"
+                     f"{' ' + f.unit if f.unit else ''})" for f in fields)
+
+
+def prompt_numeric(profile: str | None, fields: Sequence[NumericField], spec: PredictionSpec | None = None,
+                   history: str | None = None) -> tuple[str, str]:
+    """(system, user) asking for every numeric field in one JSON object. profile None: the L0 population prior;
+    history: the L2 past-behaviour block."""
+    spec = spec or PredictionSpec()
+    task = spec.task_numeric.format(subject=spec.subject if profile is not None else spec.subject_l0,
+                                    period=spec.period, items=_fields_block(fields, spec), n=len(fields))
+    if profile is None:
+        return spec.system_numeric_l0, task
+    head = f"{spec.profile_intro}\n{profile}\n\n"
+    if history is not None:
+        head += f"{spec.history_intro.format(history_period=spec.history_period)}\n{history}\n\n"
+    return spec.system_numeric, head + task
+
+
+def _parse_numeric(text) -> dict:
+    """Reply -> the raw JSON object (ValueError when there is none, so _call_all re-asks); values are checked
+    per field afterwards."""
+    d = unwrap(json_extract(text) if text else None, None)
+    if not isinstance(d, dict) or not d:
+        raise ValueError("no JSON object in the reply")
+    return d
+
+
+def _check_numeric(d: Mapping, fields: Sequence[NumericField]) -> dict[str, tuple[float | None, str]]:
+    """{field: (value or None, status)}; status ok | out_of_range | unparsed (key absent or not a number)."""
+    dn = {str(k).strip().lower(): v for k, v in d.items()}
+    out = {}
+    for f in fields:
+        v = dn.get(f.name.lower())
+        x = None if v is None else _num(v)
+        if x is None or not math.isfinite(x):
+            out[f.name] = (None, "unparsed")
+        elif not f.lo <= x <= f.hi:
+            out[f.name] = (None, "out_of_range")
+        else:
+            out[f.name] = (x, "ok")
+    return out
 
 
 def _items_block(items: Sequence[str], spec: PredictionSpec) -> str:
@@ -388,9 +496,19 @@ def predict_people(*args, llm=None, people=None, items: Sequence[str] | None = N
                    spec: PredictionSpec | None = None, histories: Mapping[str, Any] | pd.DataFrame | None = None,
                    questions: Mapping[str, str] | None = None, samples: int = 1, l0_samples: int = 10,
                    max_tokens: int = 2000, retries: int = 1, sample_kw: str | None = "sample",
-                   ssr: SSR | None = None, ask_kw: dict | None = None) -> dict:
+                   ssr: SSR | None = None, ask_kw: dict | None = None, kind: str = "probability",
+                   fields: Sequence[Any] | None = None) -> dict:
     """Run one prediction arm. level: 'L0' (people optional; l0_samples independent samples, averaged, one
     prior for everyone), 'L1', 'L2' (needs `histories`), 'SSR'.
+
+    kind="numeric" (levels L0/L1/L2): `fields` = [NumericField(name, lo, hi, unit?, label?)] (or tuples / dicts /
+    int-float sim.FieldSpec, see `numeric_fields`) replaces `items`. One prompt per person asks for every field
+    in one JSON object; all prompts go out in one `ask_many` batch (llm.map, return_exceptions=True). A value
+    outside [lo, hi], absent or not a number is None (NaN in prediction_frame), never clipped or re-asked; a
+    reply with no JSON object is re-asked like the probability arm. The result adds "kind", "fields" and
+    "invalid" {field: {ok, out_of_range, unparsed, no_reply}} counted over replies (persons x samples) plus
+    "n_invalid"; "p" holds the mean of the valid samples per person and field (None if none was valid) and
+    "samples" rows carry "status". prediction_frame(result) gives one row per person x field with lo, hi, status.
 
     Call forms: predict_people(llm, people, items, ...) (legacy, llm first) or predict_people(people, items,
     llm=llm, ...) like survey / ab_test; giving the llm both ways raises TypeError.
@@ -431,6 +549,14 @@ def predict_people(*args, llm=None, people=None, items: Sequence[str] | None = N
     level = level.upper()
     if level not in ("L0", "L1", "L2", "SSR"):
         raise ValueError("level must be L0, L1, L2 or SSR")
+    if kind not in ("probability", "numeric"):
+        raise ValueError(f"kind must be 'probability' or 'numeric', got {kind!r}")
+    if kind == "numeric":
+        return _predict_numeric(llm, people, items, fields, level=level, spec=spec or PredictionSpec(),
+                                histories=histories, questions=questions, samples=samples, l0_samples=l0_samples,
+                                max_tokens=max_tokens, retries=retries, sample_kw=sample_kw, ask_kw=ask_kw)
+    if fields is not None:
+        raise ValueError("fields= is for kind='numeric'; probability items go in items=")
     items = [] if items is None else [str(k) for k in items]     # arrays / Index / Series as before
     if not items:
         raise ValueError("items is empty")
@@ -490,7 +616,8 @@ def predict_people(*args, llm=None, people=None, items: Sequence[str] | None = N
         p[k] = {it: float(np.mean([d[it] for d in by.values() if it in d])) for it in items
                 if any(it in d for d in by.values())}
     fail_units = sorted({k for k, _, _ in failed} - set(p))
-    out = {"method": f"predict_{level}", "level": level, "items": items, "p": p, "samples": rows,
+    out = {"method": f"predict_{level}", "level": level, "kind": "probability", "items": items, "p": p,
+           "samples": rows,
            "n_samples": max(1, l0_samples if level == "L0" else samples),
            "failed": fail_units, "failed_samples": [{"unit": k, "sample": s, "error": e} for k, s, e in failed],
            "retried": retried, "calls": len(jobs) + retried, "usage": usage.as_dict()}
@@ -499,30 +626,102 @@ def predict_people(*args, llm=None, people=None, items: Sequence[str] | None = N
     return to_jsonable(out)
 
 
+def _predict_numeric(llm, people, items, fields, *, level, spec, histories, questions, samples, l0_samples,
+                     max_tokens, retries, sample_kw, ask_kw) -> dict:
+    """predict_people(kind="numeric"): one JSON object per person with every field (see predict_people)."""
+    if level == "SSR":
+        raise ValueError("kind='numeric' supports levels L0, L1, L2 (SSR maps sentences to probabilities)")
+    if items is not None:
+        raise ValueError("kind='numeric' takes fields=[NumericField(...)], not items")
+    fs = numeric_fields(fields)
+    names = [f.name for f in fs]
+    if isinstance(histories, pd.DataFrame):
+        histories = histories_from_summary(histories)
+    jobs = []
+    if level == "L0":
+        pr = prompt_numeric(None, fs, spec)
+        jobs = [("_all", j, pr) for j in range(max(1, l0_samples))]
+    else:
+        prof = _profiles(people if people is not None else {}, spec, questions)
+        if not prof:
+            raise ValueError("people is empty")
+        if level == "L2":
+            if histories is None:
+                raise ValueError("L2 needs histories")
+            missing = [p for p in prof if p not in histories]
+            if missing:
+                raise ValueError(f"no history for {len(missing)} people (e.g. {missing[0]})")
+        for pid, pf in prof.items():
+            h = None
+            if level == "L2":
+                h = histories[pid]
+                h = h if isinstance(h, str) else history_text(h, names)
+            jobs += [(pid, j, prompt_numeric(pf, fs, spec, h)) for j in range(max(1, samples))]
+    usage = Usage()
+    got, failed, retried = _call_all(llm, jobs, _parse_numeric, max_tokens=max_tokens, retries=retries,
+                                     sample_kw=sample_kw, usage=usage, tag=f"predict:numeric:{level}", ask_kw=ask_kw)
+    inv = {n: {"ok": 0, "out_of_range": 0, "unparsed": 0, "no_reply": 0} for n in names}
+    rows, p = [], {}
+    for k, by in got.items():
+        vals: dict[str, list] = {n: [] for n in names}
+        for s, d in sorted(by.items()):
+            for n, (x, st) in _check_numeric(d, fs).items():
+                inv[n][st] += 1
+                rows.append({"unit": k, "sample": s, "item": n, "p": x, "status": st})
+                if x is not None:
+                    vals[n].append(x)
+        p[k] = {n: float(np.mean(v)) if v else None for n, v in vals.items()}
+    for _ in failed:
+        for n in names:
+            inv[n]["no_reply"] += 1
+    fail_units = sorted({k for k, _, _ in failed} - set(p))
+    out = {"method": f"predict_numeric_{level}", "level": level, "kind": "numeric", "items": names,
+           "fields": [{"name": f.name, "lo": f.lo, "hi": f.hi, "unit": f.unit, "label": f.label} for f in fs],
+           "p": p, "samples": rows, "n_samples": max(1, l0_samples if level == "L0" else samples),
+           "invalid": inv, "n_invalid": sum(c[s] for c in inv.values() for s in ("out_of_range", "unparsed",
+                                                                                  "no_reply")),
+           "failed": fail_units, "failed_samples": [{"unit": k, "sample": s, "error": e} for k, s, e in failed],
+           "retried": retried, "calls": len(jobs) + retried, "usage": usage.as_dict()}
+    return to_jsonable(out)
+
+
 def prediction_frame(result: dict, truth: Mapping[str, Mapping[str, Any]] | None = None,
                      units: Sequence[str] | None = None, method: str | None = None,
                      segments: Mapping[str, str] | None = None) -> pd.DataFrame:
     """EvalFrame (kind 'binary'), one row per person x item: unit, item, truth, pred_<method> (default the
-    level), segment, group (= item). An L0 result is broadcast to `units` (or to the persons in `truth`)."""
+    level), segment, group (= item). An L0 result is broadcast to `units` (or to the persons in `truth`).
+    A kind="numeric" result (EvalFrame kind 'numeric') adds lo, hi and status (ok | out_of_range | unparsed |
+    no_reply; with several samples "ok" when any sample was valid, else the first sample's status)."""
     method = method or result.get("level", "llm")
     p = result.get("p") or {}
     truth = truth or {}
+    numeric = result.get("kind") == "numeric"
+    status: dict = {}
+    if numeric:
+        for r in sorted(result.get("samples") or [], key=lambda r: r.get("status") != "ok"):
+            status.setdefault((r["unit"], r["item"]), r.get("status"))
     if "_all" in p and len(p) == 1:
         us = list(units or truth)
         if not us:
             us = ["_all"]
+        status = {(u, it): st for u in us for (_, it), st in status.items()}
         p = {u: p["_all"] for u in us}
     elif units is not None:
         p = {u: p.get(u, {}) for u in units}
     segments = segments or {}
+    rng = {f["name"]: f for f in result.get("fields") or []}
     rows = []
     for u, d in p.items():
         for it in result.get("items", list(d)):
             t = (truth.get(u) or {}).get(it)
             v = d.get(it)
-            rows.append({"unit": u, "item": it, "truth": np.nan if t is None else float(t),
-                         f"pred_{method}": np.nan if v is None else float(v),
-                         "segment": segments.get(u, "all"), "group": it})
+            row = {"unit": u, "item": it, "truth": np.nan if t is None else float(t),
+                   f"pred_{method}": np.nan if v is None else float(v),
+                   "segment": segments.get(u, "all"), "group": it}
+            if numeric:
+                row.update(lo=rng.get(it, {}).get("lo"), hi=rng.get(it, {}).get("hi"),
+                           status=status.get((u, it), "no_reply"))
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -645,6 +844,7 @@ def retest_stats(samples, *, unit: str = "unit", item: str = "item", sample: str
     return out
 
 
-__all__ = ["PredictionSpec", "AMAZON", "AMAZON_QUESTIONS", "AMAZON_NONE_FIELDS", "AMAZON_COMMA_FIELDS",
+__all__ = ["PredictionSpec", "NumericField", "numeric_fields", "prompt_numeric", "AMAZON", "AMAZON_QUESTIONS",
+           "AMAZON_NONE_FIELDS", "AMAZON_COMMA_FIELDS",
            "profile_text", "history_text", "histories_from_summary", "prompt_l0", "prompt_l1", "prompt_l2", "prompt_ssr",
            "predict_people", "prediction_frame", "batch_calibrate", "retest_stats"]
