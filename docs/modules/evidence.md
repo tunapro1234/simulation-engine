@@ -622,11 +622,15 @@ routed through the `ceiling_col` machinery as "Model/oracle ceiling (sampling no
 and the gap closed. The analytic floor on the scored rows (test rows, `weight` honoured) sits next to it: mae
 sum(w·sqrt(2/π)·se)/sum(w), rmse sqrt(sum(w·se²)/sum(w)), wmape sum(w·sqrt(2/π)·se)/sum(w·|y|).
 `report["se_tavani"]` / `summary()["se_ceiling"]` (`analytic`, `value`, `lo`, `hi`, `draws`, `seed`, `n`),
-`summary()["ceiling_kind"] == "sampling noise (SE column)"`, a card line. No `aggregate_by` needed (with it the
-oracle column is averaged per group and `analytic` is None). NaN or negative SEs on rows with truth, a correlation
-primary, or combining it with `ceiling_col` / `noise_ceiling` raise `ValueError`. Clearly beating this floor points
-to leakage or an SE column that overstates the noise. Measured on a synthetic 800-row frame (se uniform 0.2-1.0):
-rmse ceiling 0.643 [0.627, 0.662] against the analytic 0.644.
+`summary()["ceiling_kind"] == "sampling noise (SE column)"`, a card line. No `aggregate_by` needed. With it the
+noise is drawn per aggregated cell (the `aggregate_by` keys): the cell mean carries sd sqrt(Σse²)/n, so every row of
+the cell gets the same offset and `analytic` is computed on the cells (`n_hucre` / `cells`). Per-row offsets with
+random signs would average to a mae floor shrunk by about sqrt(2/π) (synthetic 200 groups x 40 rows: 0.123 against the
+true 0.167; now 0.168). NaN or negative SEs on scored rows (train rows may leave it empty), a correlation primary, or
+combining it with `ceiling_col` / `noise_ceiling` raise `ValueError`. Clearly beating this floor points to leakage or
+an SE column that overstates the noise; the card limit says so in place of the model/oracle "exceeding it does not
+mean leakage". Measured on a synthetic 800-row frame (se uniform 0.2-1.0): rmse ceiling 0.643 [0.627, 0.662] against
+the analytic 0.644.
 ```python
 rep = ev.evaluate(df, ours="model", primary="mae", se_col="se", split="test")
 ev.summary(rep)["se_ceiling"]["analytic"], ev.summary(rep)["ceiling"]
@@ -713,9 +717,11 @@ ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipp
   into the chain record and appends `[ön kayıt belgesi <name> sha256:<hash>]` to the description. `evaluate(prereg=
   <registry>)` then picks the document up from the registry's parent directory on its own.
 - **Declared vs scored primary metric (D10 metric trap).** The primary metric declared in the documents is read by
-  `api.declared_primary(text)`: the `research.Prereg` JSON block (`metrics` as `{"primary": ...}`, a list whose
-  first entry is the primary, or text), a `Primary metric: ...` / `Birincil metrik: ...` line, or the first line of
-  a `## Metrics` section; the first known metric name wins, and the latest declaring document (an addendum) counts.
+  `api.declared_primary(text)`: the `research.Prereg` JSON block or a `Prereg.write("x.json")` file (`metrics` as
+  `{"primary": ...}`, a list (the entry that says "primary", else the first), or text), a `Primary metric: ...` /
+  `Birincil metrik: ...` line, or the `## Metrics` section line that says "primary" (else its first line); a bare
+  JSON file counts only with Prereg's `title` / `question` fields (a results file does not); the first known metric
+  name wins, and the latest declaring document (an addendum) counts.
   When it differs from the scored primary (`mae` and `1-mae` count as the same), `evaluate` raises a `UserWarning`,
   adds an audit warning row "birincil metrik beyanı (ön kayıt)" (English: "declared primary metric
   (pre-registration)") and puts the card limit "primary metric differs from the declared one: ..." first; a match

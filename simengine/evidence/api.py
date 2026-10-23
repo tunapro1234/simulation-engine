@@ -94,6 +94,11 @@ NOISE_CEILING_REPEATS = 200     # random half splits (the D3 rehearsal tavan.py 
 SE_CEILING_METRICS = ("mae", "rmse", "wmape")
 SE_CEILING_DRAWS = 400
 SE_CEILING_LABEL = "sampling noise (SE column)"
+MODEL_CEILING_LIMIT_HEAD = "Tavan bir model/oracle tahminidir"     # cekirdek's limit for a ceiling_col
+SE_CEILING_LIMIT = ("Tavan örneklem gürültüsü tavanıdır (SE sütunu): gerçek değeri bilen bir oracle'ın gözlenen gerçeğe "
+                    "hatası N(0, se); gürültülü gerçeğe bundan anlamlı yakın bir tahmin sızıntıya ya da SE sütununun "
+                    "gürültüyü abarttığına işaret eder.")
+SE_CEILING_NOTE = "tavan türü: örneklem gürültüsü (SE sütunu)"
 DECLARED_PRIMARY_CHECK = "birincil metrik beyanı (ön kayıt)"
 DECLARED_PRIMARY_LIMIT = "primary metric differs from the declared one"
 METRIC_EQUIVALENT = {"bir_eksi_mae": "mae"}     # same ranking, different scale: not a different metric
@@ -268,6 +273,7 @@ def _metric(name: str | None) -> str | None:
 _JSON_BLOCK = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
 _PRIMARY_LINE = re.compile(r"^\W*(?:primary(?:\s+metric)?|birincil(?:\s+metrik)?)\W*?\s*[:=]\s*(.+)$", re.I | re.M)
 _METRICS_SECTION = re.compile(r"^#+\s*(?:metrics?|metrikler?)\s*$\n+(.+?)(?:\n\s*\n|\n#|\Z)", re.I | re.M | re.S)
+_PRIMARY_WORD = re.compile(r"\b(?:primary|birincil)\b", re.I)
 _METRIC_NAMES = sorted(set(METRIC_TO_INTERNAL) | set(METRIC_TO_INTERNAL.values()) | {"wape"}, key=len, reverse=True)
 _METRIC_TOKEN = re.compile(r"(?<![\w-])(" + "|".join(re.escape(m) for m in _METRIC_NAMES) + r")(?![\w-])", re.I)
 
@@ -277,27 +283,41 @@ def _first_metric(text) -> str | None:
     return None if m is None else _metric(m.group(1).lower())
 
 
+def _marked_primary(items) -> object:
+    """The entry that says "primary" / "birincil", else the first one (Prereg: primary first)."""
+    items = list(items)
+    return next((v for v in items if _PRIMARY_WORD.search(str(v))), items[0] if items else None)
+
+
 def declared_primary(text: str) -> str | None:
     """Primary metric declared in a pre-registration text -> internal metric name, or None.
 
-    Order: the machine-readable JSON block of research.Prereg ("metrics": {"primary": ..} / first list entry /
-    text), a "Primary metric: ..." / "Birincil metrik: ..." line, then the first line of a "## Metrics" section
-    (Prereg writes the primary first). The first known metric name in that text wins."""
-    for m in _JSON_BLOCK.finditer(text):
+    Order: the machine-readable copy of research.Prereg (the ```json block of the markdown, or the whole file when
+    Prereg.write wrote .json): "metrics": {"primary": ..} / the list entry that says "primary" (else the first) /
+    text; a "Primary metric: ..." / "Birincil metrik: ..." line; then the "## Metrics" section's line that says
+    "primary" (else its first line: Prereg writes the primary first). The first known metric name in that text
+    wins."""
+    blocks = [m.group(1) for m in _JSON_BLOCK.finditer(text)]
+    if text.lstrip().startswith("{"):
+        blocks.insert(0, text)
+    for b in blocks:
         try:
-            mt = json.loads(m.group(1)).get("metrics")
-        except (ValueError, AttributeError):
+            doc = json.loads(b)
+        except ValueError:
             continue
+        if not isinstance(doc, dict) or (b is text and not ({"question", "title"} & set(doc))):
+            continue                     # a bare .json is a prereg only with Prereg's fields (not a results file)
+        mt = doc.get("metrics")
         if isinstance(mt, dict):
             mt = next((v for k, v in mt.items() if str(k).lower() in ("primary", "birincil")), None) or \
                 next(iter(mt), None)
         elif isinstance(mt, (list, tuple)):
-            mt = mt[0] if mt else None
+            mt = _marked_primary(mt)
         if mt and (x := _first_metric(mt)):
             return x
     for rx in (_PRIMARY_LINE, _METRICS_SECTION):
         m = rx.search(text)
-        if m and (x := _first_metric(m.group(1).strip().splitlines()[0])):
+        if m and (x := _first_metric(_marked_primary(m.group(1).strip().splitlines()))):
             return x
     return None
 
@@ -428,9 +448,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         wmape; primary= required, or task="forecast" for its default wmape): a seeded oracle column truth + N(0, se)
         (SE_CEILING_DRAWS draws averaged in the metric) becomes the model ceiling labelled "sampling noise (SE
         column)"; the analytic value (mae: sum(w sqrt(2/pi) se) / sum(w)) is in `report["se_tavani"]`,
-        `summary()["se_ceiling"]` and on the card. No aggregate_by needed (with it the oracle column is averaged per
-        group and the analytic value is not given). NaN or negative SEs raise ValueError; not with ceiling_col /
-        noise_ceiling.
+        `summary()["se_ceiling"]` and on the card. No aggregate_by needed; with it the noise is drawn per
+        aggregated cell with sd sqrt(sum se^2)/n (the cell mean's SE), the same offset on every row of the cell.
+        Clearly beating this floor is a leakage sign (the card limit says so). NaN or negative SEs on scored rows
+        raise ValueError (train rows may leave it empty); not with ceiling_col / noise_ceiling.
     blind_col: the blind (no names / titles) twin of ours, e.g. "pred_ours_blind": adds a paired row ours − blind
         and flags when the blind arm keeps less than half of ours' gain over the strongest baseline.
     compare: registered comparisons / drop conditions, [("P1", "L1"), ("P2", None, "P2 ≈ 0"), ...]: each (a, b)
@@ -534,7 +555,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     tavan_sutun = tavan_etiket = None
     se_info = None
     if se_metric is not None:
-        d, se_info = _se_ceiling(d, se_col, se_metric, seed, grouped=aggregate_by is not None)
+        d, se_info = _se_ceiling(d, se_col, se_metric, seed, by=aggregate_by, how=aggregate)
         tavan_sutun, tavan_etiket = "tavan_model", SE_CEILING_LABEL
         if methods_i:
             methods_i = [m for m in methods_i if m != _method(se_col)]
@@ -600,6 +621,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         c = (rep.get("manset") or {}).get("tavan") or {}
         se_info.update(deger=c.get("deger"), alt=c.get("alt"), ust=c.get("ust"))
         rep["se_tavani"] = se_info
+        _se_ceiling_wording(rep)
     if prereg_texts:
         _declared_primary_check(rep, prereg_texts)
     if denge is not None and rep.get("sonuclar"):
@@ -747,13 +769,17 @@ def _ceiling_column(d: pd.DataFrame, col: str, label, labels: dict, ours, raw):
     return d, "tavan_model", label or labels.get(name, name)
 
 
-def _se_ceiling(d: pd.DataFrame, se_col: str, metric: str, seed: int, grouped: bool,
+def _se_ceiling(d: pd.DataFrame, se_col: str, metric: str, seed: int, by: str | None = None, how: str = "mean",
                 draws: int = SE_CEILING_DRAWS) -> tuple[pd.DataFrame, dict]:
     """se_col -> (frame with the oracle column "tavan_model", info). The oracle's error against the observed truth is
     N(0, se_i); its column is truth + sign * se * a with a = |z| averaged over `draws` seeded draws (mae / wmape) or
-    sqrt(mean z^2) (rmse), so the metric of the column is the draw-averaged metric. Analytic value on the scored
-    rows (test rows when a split column exists, weight column honoured): mae sum(w sqrt(2/pi) se) / sum(w), rmse
-    sqrt(sum(w se^2) / sum(w)), wmape sum(w sqrt(2/pi) se) / sum(w |y|); None with aggregate_by (group means)."""
+    sqrt(mean z^2) (rmse), so the metric of the column is the draw-averaged metric. With `by` (aggregate_by) the
+    noise is drawn per aggregated cell (the `_aggregate` keys): the cell mean of the truth carries sd sqrt(sum se^2)/n
+    (the cell total sqrt(sum se^2)), so every row of the cell gets the same offset sign * a * sqrt(sum se^2) / n;
+    per-row offsets with random signs would average to a (2/pi)-shrunk mae ceiling. Analytic value on the scored
+    rows / cells (test rows when a split column exists; the row weight column honoured without `by`): mae
+    sum(w sqrt(2/pi) sd) / sum(w), rmse sqrt(sum(w sd^2) / sum(w)), wmape sum(w sqrt(2/pi) sd) / sum(w |y|).
+    The SE must be present and >= 0 on the scored rows; rows outside the test split may leave it empty."""
     col = COLUMN_TO_INTERNAL.get(se_col, se_col)
     if col not in d.columns:
         raise ValueError(f"se_col {se_col!r} is not a column of the frame")
@@ -761,33 +787,71 @@ def _se_ceiling(d: pd.DataFrame, se_col: str, metric: str, seed: int, grouped: b
         raise ValueError("se_col needs a truth column")
     y = pd.to_numeric(d["gercek"], errors="coerce").to_numpy(float)
     se = pd.to_numeric(d[col], errors="coerce").to_numpy(float)
-    has_y = np.isfinite(y)
-    if not np.isfinite(se[has_y]).all():
-        raise ValueError(f"se_col {se_col!r} has missing or non-numeric values on rows with a truth")
-    if (se[has_y] < 0).any():
+    test = (d["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy() if "bolum" in d.columns
+            else np.ones(len(d), bool))
+    scored = np.isfinite(y) & test
+    if not np.isfinite(se[scored]).all():
+        raise ValueError(f"se_col {se_col!r} has missing or non-numeric values on scored rows with a truth")
+    if (se[np.isfinite(se)] < 0).any():
         raise ValueError(f"se_col {se_col!r} has negative standard errors")
+    if by is None:
+        codes, G = np.arange(len(d)), len(d)
+    else:
+        bc = COLUMN_TO_INTERNAL.get(by, by)
+        if bc not in d.columns:
+            raise ValueError(f"aggregate_by {by!r} is not a column of the frame")
+        keys = [bc] + [k for k in (("bolum",) if how == "sum" else ("madde", "bolum")) if k in d.columns and k != bc]
+        codes = d.groupby(keys, sort=True, dropna=False).ngroup().to_numpy()
+        G = int(codes.max()) + 1 if len(codes) else 0
+    ok = np.isfinite(y) & np.isfinite(se)
+    n_c = np.bincount(codes[ok], minlength=G).astype(float)
+    ss = np.bincount(codes[ok], weights=se[ok] ** 2, minlength=G)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sd = np.sqrt(ss) / n_c               # sd of the cell mean (the cell total's sd / n): per-row offset
     rng = np.random.default_rng([abs(int(seed or 0)), 5113])
-    acc = np.zeros(len(d))
-    for _ in range(int(draws)):          # one row vector per draw: memory stays O(rows)
-        z = rng.standard_normal(len(d))
+    acc = np.zeros(G)
+    for _ in range(int(draws)):          # one vector per draw: memory stays O(rows)
+        z = rng.standard_normal(G)
         acc += z * z if metric == "rmse" else np.abs(z)
     a = np.sqrt(acc / draws) if metric == "rmse" else acc / draws
-    sign = np.where(rng.random(len(d)) < 0.5, -1.0, 1.0)
-    out = d.drop(columns=[col]).assign(tavan_model=y + sign * np.nan_to_num(se) * a)
-    scored = has_y.copy()
-    if "bolum" in d.columns:
-        scored &= d["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()
-    w = (pd.to_numeric(d["agirlik"], errors="coerce").to_numpy(float) if "agirlik" in d.columns
-         else np.ones(len(d)))[scored]
-    s, k = se[scored], math.sqrt(2 / math.pi)
+    sign = np.where(rng.random(G) < 0.5, -1.0, 1.0)
+    off = (sign * sd * a)[codes]
+    out = d.drop(columns=[col]).assign(tavan_model=np.where(ok, y + off, np.nan))
+    k = math.sqrt(2 / math.pi)
+    if by is None:
+        w = (pd.to_numeric(d["agirlik"], errors="coerce").to_numpy(float) if "agirlik" in d.columns
+             else np.ones(len(d)))[scored]
+        s, yy = se[scored], y[scored]
+    else:                                # cells of scored rows, equal cell weight (as `_aggregate`)
+        cs = np.unique(codes[scored])
+        s = sd[cs]
+        ysum = np.bincount(codes[ok], weights=y[ok], minlength=G)[cs]
+        yy = ysum if how == "sum" else ysum / n_c[cs]
+        if how == "sum":
+            s = s * n_c[cs]              # the cell total's sd
+        w = np.ones(len(cs))
     analytic = None
-    if not grouped and len(s) and w.sum() > 0:
+    if len(s) and w.sum() > 0:
+        den = (w * np.abs(yy)).sum() if metric == "wmape" else w.sum()
         analytic = (float(np.sqrt((w * s * s).sum() / w.sum())) if metric == "rmse"
-                    else float((w * k * s).sum() / (w * np.abs(y[scored])).sum()) if metric == "wmape"
-                    else float((w * k * s).sum() / w.sum()))
+                    else float((w * k * s).sum() / den) if den > 0 else None)
     info = {"sutun": se_col, "metrik": metric, "R": int(draws), "tohum": seed, "analitik": analytic,
-            "n": int(scored.sum()), "etiket": SE_CEILING_LABEL}
+            "n": int(scored.sum()), "etiket": SE_CEILING_LABEL, **({"n_hucre": int(len(s))} if by is not None else {})}
     return out, info
+
+
+def _se_ceiling_wording(rep: dict) -> None:
+    """The core labels any ceiling_col as a model/oracle reference ("exceeding it does not mean leakage"); an SE
+    ceiling is a sampling-noise floor, where clearly beating it is a leakage sign: swap the limit and the card note."""
+    def swap(xs):
+        return [SE_CEILING_LIMIT if str(x).startswith(MODEL_CEILING_LIMIT_HEAD) else x for x in xs or []]
+    rep["sinirlar"] = swap(rep.get("sinirlar"))
+    k = rep.get("kanit_kart")
+    if isinstance(k, dict):
+        k["yanilgi"] = swap(k.get("yanilgi"))
+        for r in k.get("satirlar") or []:
+            if r.get("tur") == "tavan" and r.get("deger") is not None:
+                r["not"] = SE_CEILING_NOTE
 
 
 def _split_halves(y: np.ndarray, codes: np.ndarray, G: int, R: int, seed: int):
@@ -1186,6 +1250,7 @@ _PHRASES_EN = [
     (r"tavan yok: hesaplanamaz", "no ceiling: not computable"),
     (r"^taban yok$", "no baseline"), (r"^ham kol yok$", "no raw arm"),
     (r"tür: model/oracle \(insan test-retest değil\)", "type: model/oracle (not a human test-retest)"),
+    (r"^tavan türü: örneklem gürültüsü \(SE sütunu\)$", "ceiling type: sampling noise (SE column)"),
     (r"tavan türü: örneklem gürültüsü \(varyans bileşenleri, tüm gruplar\)",
      "ceiling type: sampling noise (variance components, all groups)"),
     (r"≈ (\S+) gerçek yanıt \(PPI\+\+, sonlu kitle\)", r"≈ \1 real answers (PPI++, finite population)"),
@@ -1238,6 +1303,10 @@ _PHRASES_EN = [
      "group size) / var(group means) over all scored groups; ceiling = √reliability (Spearman: (6/π)·asin(√reliability/2) "
      "under normal theory; r2: reliability). Only the within-group sample separates a noisy group mean from the true "
      "group value; clearly exceeding the ceiling points to leakage."),
+    (r"Tavan örneklem gürültüsü tavanıdır \(SE sütunu\): .*? işaret eder\.",
+     "The ceiling is a sampling-noise floor (SE column): an oracle that knows the true value misses the observed truth "
+     "by N(0, se); a prediction clearly closer than that to the noisy truth points to leakage or to an SE column that "
+     "overstates the noise."),
     (r"Tavan bir model/oracle tahminidir .*? sızıntı anlamına gelmez\.",
      "The ceiling is a model/oracle prediction (not a human test-retest): a reference point, not an attainable upper "
      "bound; the gap closed is relative to it, and exceeding it does not mean leakage."),
@@ -1295,6 +1364,11 @@ _PHRASES_EN = [
     (r"^sütun yok$", "column missing"),
     (r"^tekrar ölçümü yok$", "no retest measurement"),
     (r"hiçbir yöntem test-retest tavanını anlamlı aşmıyor", "no method is significantly above the test-retest ceiling"),
+    (r"hiçbir yöntem model/oracle tavanını anlamlı aşmıyor", "no method is significantly above the model/oracle ceiling"),
+    (r"model/oracle tavanını anlamlı aşan: (.*?); tavan zayıf ya da yöntem tavanın görmediği bilgiyi kullanıyor "
+     r"\(sızıntıya bakın\)",
+     r"significantly above the model/oracle ceiling: \1; the ceiling is weak or the method uses information the "
+     r"ceiling does not see (check for leakage)"),
     (r"insan tekrar ölçümünü anlamlı aşan: (.*?)\. Gürültüsüz gerçek tahmini tavanı aşabilir ama önce sızıntıyı ele",
      r"significantly above the human retest: \1. A noise-free estimate can exceed the ceiling, but rule out leakage first"),
     (r": olasılık tahmini, ", ": probability forecast, "),
@@ -1711,7 +1785,8 @@ def _se_ceiling_en(x: dict | None) -> dict | None:
         return None
     return {"column": x.get("sutun"), "metric": METRIC_TO_ENGLISH.get(x.get("metrik"), x.get("metrik")),
             "label": x.get("etiket"), "draws": x.get("R"), "seed": x.get("tohum"), "n": x.get("n"),
-            "analytic": x.get("analitik"), "value": x.get("deger"), "lo": x.get("alt"), "hi": x.get("ust")}
+            "analytic": x.get("analitik"), "value": x.get("deger"), "lo": x.get("alt"), "hi": x.get("ust"),
+            "cells": x.get("n_hucre")}
 
 
 def card_markdown(report: dict, lang: str = "mixed") -> str:
@@ -1797,11 +1872,13 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     se_c = s.get("se_ceiling")
     if se_c:
         out += ["", f"Ceiling type: {SE_CEILING_LABEL}: oracle column truth + N(0, `{_md(se_c['column'])}`) over "
-                    f"{se_c['n']} scored rows, {se_c['draws']} seeded draws averaged in {se_c['metric']} -> "
+                    f"{se_c['n']} scored rows" + (f" ({se_c['cells']} aggregated cells, cell sd sqrt(sum se²)/n)"
+                                                  if se_c.get("cells") is not None else "")
+                    + f", {se_c['draws']} seeded draws averaged in {se_c['metric']} -> "
                     f"{_num(se_c.get('value'))}{_ci(se_c.get('lo'), se_c.get('hi'))}; analytic "
-                    + (f"{_num(se_c['analytic'])}" if se_c.get("analytic") is not None else
-                       "not given (aggregate_by: group means)")
-                    + (" (sum(w·sqrt(2/pi)·se)/sum(w))" if se_c["metric"] == "mae" else "")
+                    + (f"{_num(se_c['analytic'])}" if se_c.get("analytic") is not None else "not given")
+                    + (" (sum(w·sqrt(2/pi)·se)/sum(w))" if se_c["metric"] == "mae" and se_c.get("cells") is None
+                       else "")
                     + ". Unlike a model/oracle reference, clearly beating this floor points to leakage or an SE column "
                       "that overstates the noise."]
     if s.get("noise_ceiling") and s["noise_ceiling"].get("tavan") is not None:

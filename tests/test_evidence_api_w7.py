@@ -87,6 +87,48 @@ class TestSeCeiling(unittest.TestCase):
             _quiet(ev.evaluate, df.assign(pred_c=0.0), ours="good", primary="mae", se_col="se", ceiling_col="pred_c", **FAST)
 
 
+class TestSeCeilingReview(unittest.TestCase):
+    """Review fixes: the grouped ceiling was shrunk by ~sqrt(2/pi) (per-row random-sign offsets averaged inside the
+    group), the card limit said "exceeding it does not mean leakage", and train rows had to carry an SE."""
+
+    def test_grouped_mae_ceiling_uses_cell_sd(self):
+        rng = np.random.default_rng(1)
+        G, m = 200, 40
+        g = np.repeat(np.arange(G), m)
+        theta = rng.normal(0, 1, G)[g]
+        se = rng.uniform(0.5, 2.0, G * m)
+        df = pd.DataFrame({"unit": np.arange(G * m), "group": g, "truth": theta + rng.normal(0, 1, G * m) * se,
+                           "se": se, "pred_good": theta + rng.normal(0, 0.05, G * m)})
+        sd_g = pd.Series(se ** 2).groupby(g).sum().pow(0.5).to_numpy() / m
+        want = float(np.mean(math.sqrt(2 / math.pi) * sd_g))
+        rep = _quiet(ev.evaluate, df, ours="good", primary="mae", se_col="se", split="test", aggregate_by="group",
+                     **FAST)
+        self.assertAlmostEqual(rep["se_tavani"]["analitik"], want, places=9)
+        self.assertLess(abs(rep["manset"]["tavan"]["deger"] - want) / want, 0.05)   # was 0.123 vs 0.167
+        self.assertEqual(rep["se_tavani"]["n_hucre"], G)
+
+    def test_card_says_beating_the_floor_is_a_leakage_sign(self):
+        rep = _quiet(ev.evaluate, _se_frame(n=300), ours="good", primary="mae", se_col="se", split="test", **FAST)
+        md = ev.card(rep, lang="en")
+        self.assertNotIn("does not mean leakage", md)
+        self.assertNotIn("sızıntı anlamına gelmez", " ".join(rep["sinirlar"]))
+        self.assertIn("sampling-noise floor (SE column)", md)
+        row = next(r for r in rep["kanit_kart"]["satirlar"] if r["tur"] == "tavan")
+        self.assertEqual(row["not"], api.SE_CEILING_NOTE)
+        plain = _quiet(ev.evaluate, _se_frame(n=300).assign(pred_c=lambda f: f["truth"]), ours="good",
+                       primary="mae", ceiling_col="pred_c", split="test", **FAST)
+        self.assertIn("does not mean leakage", ev.card(plain, lang="en"))      # ceiling_col wording unchanged
+
+    def test_train_rows_may_lack_se(self):
+        df = _se_frame(n=300).assign(split=lambda f: np.where(f.index < 100, "train", "test"))
+        df.loc[df.index < 100, "se"] = np.nan
+        rep = _quiet(ev.evaluate, df, ours="good", primary="mae", se_col="se", **FAST)
+        self.assertEqual(rep["se_tavani"]["n"], 200)
+        df.loc[150, "se"] = np.nan
+        with self.assertRaises(ValueError):
+            _quiet(ev.evaluate, df, ours="good", primary="mae", se_col="se", **FAST)
+
+
 class TestDeclaredPrimary(unittest.TestCase):
     def _doc(self, d, **kw):
         return Prereg(title="t", question="q", **kw).write(Path(d) / "ONKAYIT.md")
@@ -117,6 +159,21 @@ class TestDeclaredPrimary(unittest.TestCase):
             self.assertEqual(api.declared_primary(h.read_text(encoding="utf-8")), "spearman")
             self.assertEqual(api.declared_primary(p.read_text(encoding="utf-8")), "mae")
             self.assertIsNone(api.declared_primary("# Notes\n\nno metric here\n"))
+
+    def test_marked_entry_and_json_prereg(self):
+        import json
+        doc = Prereg(title="t", question="q", metrics=["RMSE", "MAE (primary)"])
+        self.assertEqual(api.declared_primary(doc.to_markdown()), "mae")
+        self.assertEqual(api.declared_primary(json.dumps(doc.to_dict(), indent=1)), "mae")   # Prereg.write(.json)
+        self.assertEqual(api.declared_primary("# P\n\n## Metrics\n- RMSE\n- MAE (primary)\n"), "mae")
+        self.assertIsNone(api.declared_primary(json.dumps({"metrics": {"mae": 0.4, "rmse": 0.5}})))  # results file
+        df = _se_frame(n=300)
+        with tempfile.TemporaryDirectory() as d:
+            p = Prereg(title="t", question="q", metrics=["Spearman (primary)", "MAE"]).write(Path(d) / "pre.json")
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                ev.evaluate(df, ours="good", primary="mae", prereg_doc=p, split="test", **FAST)
+            self.assertTrue(any(api.DECLARED_PRIMARY_LIMIT in str(x.message) for x in w))
 
     def test_no_document_no_row(self):
         rep = _quiet(ev.evaluate, _se_frame(n=200), ours="good", primary="mae", split="test", **FAST)
