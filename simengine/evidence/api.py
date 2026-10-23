@@ -489,8 +489,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     multiplier: the PPI++ "worth N humans" effective-sample multiplier. None (default) computes it, except on a
         binary task without a human panel (no LLM arm: no raw= and ours_uses_llm=False, no blind_col, no item
         column or a single item, no retest column), e.g. an event log: there is no human answer to stand in for, so it
-        is skipped and the card / `report["carpan_uygulanamaz"]` say "not applicable". True always computes it,
-        False always skips it (no note).
+        is skipped and the card / `report["carpan_uygulanamaz"]` say "not applicable" (multiplier_methods= counts as
+        a request: computed). True always computes it, False always skips it (no note).
     multiplier_max_rows: single-item frames larger than this compute the PPI++ multiplier on a fixed-seed
         subsample of this many rows (None: whole table, slow). A warning is raised for large frames.
     offset_col: a per-row offset column (e.g. the member's training mean): subtracted from truth, retest, the
@@ -680,9 +680,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     oran_seg = _rate_error_columns(d, rate_error_by, aggregated=toplama is not None)
     carpan_na = None
     if multiplier is None:
-        # D13-W8 #7: binary task without a human panel (event log): PPI++ 'worth N humans' has nothing to stand in for
+        # D13-W8 #7: binary task without a human panel (event log): PPI++ 'worth N humans' has nothing to stand in for;
+        # multiplier_methods= is an explicit request for it
         multiplier = True
-        na = _orneklem.panel_yok(d, _multiplier_task(d, task), ham_var=raw is not None or blind_col is not None,
+        na = None if multiplier_methods else _orneklem.panel_yok(d, _multiplier_task(d, task), ham_var=raw is not None or blind_col is not None,
                                  llm_yok=ours_uses_llm is False)
         if na:
             multiplier = False
@@ -718,6 +719,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         if tmp:
             os.unlink(tmp)
     if carpan_na and rep.get("orneklem") is None and "carpan_uygulanamaz" not in rep:
+        if rep.get("toplu_duzey"):   # segment / study / effect / choice rows: degerlendir's reason, as with True
+            t = rep["toplu_duzey"]
+            carpan_na = (f"uygulanamaz: {t['neden']}; PPI++ 'kaç insana bedel' atlandı (not applicable: {t['reason']}; "
+                         "PPI++ 'worth N humans' skipped)")
         _multiplier_not_applicable(rep, carpan_na)
     if min_effect is not None:
         rep["min_effect"] = min_effect

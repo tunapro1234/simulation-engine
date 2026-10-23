@@ -112,6 +112,34 @@ class HumanPanelSignalsUnchangedTest(unittest.TestCase):
         self.assertIsNotNone(rep["orneklem"])
         self.assertNotIn("carpan_uygulanamaz", rep)
 
+    def test_retest_column_keeps_multiplier(self):
+        df = _sparse_binary()
+        df["retest"] = df["truth"]
+        rep, _ = _ev(df, ours_uses_llm=False)
+        self.assertIsNotNone(rep["orneklem"])
+
+    def test_multiplier_methods_is_a_request(self):
+        rep, _ = _ev(_sparse_binary(), multiplier_methods=["ours", "T1"], ours_uses_llm=False)
+        self.assertIsNotNone(rep["orneklem"])
+        self.assertNotIn("carpan_uygulanamaz", rep)
+
+
+class ReviewEdgesTest(unittest.TestCase):
+    def test_auto_detected_binary_task_skips(self):
+        rep, _ = _ev(_sparse_binary(), task=None, ours_uses_llm=False)
+        self.assertIsNone(rep["orneklem"])
+        self.assertIn("binary task without a human panel", rep["carpan_uygulanamaz"])
+
+    def test_segment_level_keeps_its_own_reason(self):
+        df = _sparse_binary()
+        rep, _ = _ev(df, level="segment", ours_uses_llm=False)
+        ref, _ = _ev(df, level="segment", ours_uses_llm=False, multiplier=True)
+        self.assertEqual(rep["carpan_uygulanamaz"], ref["carpan_uygulanamaz"])
+        self.assertIn("level=segment", rep["carpan_uygulanamaz"])
+        self.assertNotIn("multiplier=True", rep["carpan_uygulanamaz"])
+        self.assertEqual(_bedel(rep)["not"], _bedel(ref)["not"])
+        self.assertEqual(sum(d["kontrol"] == CARPAN for d in rep["denetim"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
