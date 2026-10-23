@@ -585,7 +585,7 @@ gt.predict_groups(test[feats + ["country"]])   # stage A level per new country (
 ```
 
 `oof_predict(model, df, *, features, target, group=None, n_splits=None, seed=0, method="predict", folds=None,
-weight=None)`
+weight=None, n_repeats=1)`
 - `model`: any object with `fit(X, y)` / `predict(X)` (sklearn estimator, simengine baseline, `GroupTransfer`) or a
   zero-argument factory. It is cloned (or deep-copied) per fold. If `fit` / `predict` accept `groups=`, the fold's
   group labels are passed, which is how `GroupTransfer` gets the groups.
@@ -615,6 +615,19 @@ weight=None)`
 - It returns a float Series aligned with `df.index`. Rows with a missing target (or group) are not trained on and
   stay NaN. `.attrs["fold"]` holds each row's fold number, -1 when the row was not predicted. The Series can go
   straight into an EvalFrame `pred_<method>` column.
+- `n_repeats=`: one 5-fold split of ~300 people is noisy, so the split is redrawn `n_repeats` times and the
+  predictions are averaged. Repeat `r` uses `seed + r`. Without `group` that is `KFold(shuffle=True,
+  random_state=seed + r)`, so repeat 0 is the single run. With `group` it is a seeded shuffle of the group labels
+  dealt into `n_splits` folds of near-equal group counts, still group-disjoint; `n_repeats=1` keeps the
+  deterministic `GroupKFold`. `.attrs`: `repeats`, `repeat_pred` (rows x repeats), `repeat_fold` (rows x
+  repeats, -1 = not predicted), `repeat_sd` (per-row SD over repeats); `fold` / `fold_ids` are repeat 0's. Score
+  each `repeat_pred` column to see how much a metric moves between splits. `folds=` together with `n_repeats > 1`
+  raises `ValueError`.
+- `target=["y1", "y2", ...]`: returns a DataFrame with one column `oof_<target>` per target, each fitted
+  separately (its own missing rows) with the same split settings, so it equals one call per target. Frame
+  `.attrs`: `targets`, `repeats`, and the other keys as `{target: value}` dicts.
+- Inputs are copied where pandas returns a read-only view (copy-on-write, the default in pandas 3), so it also
+  runs with `pd.options.mode.copy_on_write = True`.
 - `weight=`: per-row training weights, a column name of `df` or an array / Series aligned with `df` (e.g.
   `1/(se^2 + tau^2)` when the noise of the rows differs 30-fold, as in the D5 rehearsal). Each fold's training rows
   go to `fit(..., sample_weight=w)`. An sklearn `Pipeline` (nested too) gets `<last step>__sample_weight`, so
