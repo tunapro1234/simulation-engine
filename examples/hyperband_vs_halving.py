@@ -7,16 +7,19 @@ Two fidelity types, both with max_budget R = 81 and eta = 3 (Hyperband budget 19
   larger for configs near the optimum, so low budgets mislead (late bloomers); small noise on top.
 Regret = true full-budget loss of the returned config (the optimum is 0). Lower is better.
 
-    PYTHONPATH=. python examples/hyperband_vs_halving.py --seeds 200 --out hb.json
+    python examples/hyperband_vs_halving.py --seeds 200 --out hb.json
 """
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 from simengine.research import Space, successive_halving
 from simengine.research.hyperband import MultiFidelity, UnitRunner, asha, hyperband, space_sampler
 from simengine.research.stats import bootstrap_mean, paired_bootstrap_diff

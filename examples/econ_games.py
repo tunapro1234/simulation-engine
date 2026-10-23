@@ -11,7 +11,10 @@ institutional result better than persona agents. Rerun through `simengine.llm` b
 import hashlib
 import json
 import re
+import sys
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 import simengine as se
 import simengine.games as gm
 from simengine import bench

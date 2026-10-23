@@ -86,7 +86,8 @@ run.calls, run.invalid, run.conflicts, run.stopped
 Command, run once on 22 Oct 2026 (offline, `nice -n 19`, 1,041 s wall on a shared machine):
 
 ```bash
-PYTHONPATH=. python examples/sugarscape_measure.py <transcribed sugar-map grid>   # without the argument row A' is skipped
+python examples/sugarscape_measure.py <transcribed sugar-map grid>   # without the argument row A' is skipped
+python examples/sugarscape_measure.py --quick      # smoke run, ~3 s: 25x25 map, 2 seeds, 60 steps; not these numbers
 ```
 
 All runs below use 10 seeds unless noted. Each cell is mean (sd over seeds).

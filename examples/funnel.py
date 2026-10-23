@@ -9,7 +9,10 @@ long checkout form. With a real backend pass llm=se.llm.Claude(...) instead; the
 Dry runs only: the numbers below come from the responder, not from people.
 """
 import re
+import sys
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 from simengine.llm.fake import FakeLLM, survey_responder
 from simengine.sim.funnel import funnel, funnel_frame
 

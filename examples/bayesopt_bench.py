@@ -11,12 +11,15 @@ B. `Loop` with one change per turn (the proposer interface), `--turns` turns, st
 import argparse
 import hashlib
 import json
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 from simengine.research import Loop, RandomProposer
 from simengine.research.bayesopt import (BRANIN_MIN, GPProposer, TPEProposer, branin, branin_space, minimize,
                                          mixed_toy, mixed_toy_space)

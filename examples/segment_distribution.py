@@ -8,11 +8,14 @@ Measured guidance (docs/RESULTS.md, makro/RAPOR.md C1): on CES 2020 segments the
 37-person real survey (0.050); a persona panel closed only 0.55. It lost to the general marginal on 2 of 8 items,
 and memorisation is not ruled out: seal predictions before you open the truth.
 """
+import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 import simengine as se
 import simengine.methods as M
 

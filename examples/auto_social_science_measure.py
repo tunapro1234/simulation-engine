@@ -1,11 +1,13 @@
 """Measured numbers of docs/modules/research/auto_social_science.md (no LLM calls, ~10 s).
 
-    SIMENGINE_DATA=<data-root> PYTHONPATH=. python examples/auto_social_science_measure.py
+    SIMENGINE_DATA=<data-root> python examples/auto_social_science_measure.py
 Sections 1-3 are synthetic; section 4 reads <data-root>/socsci210/ham/cond_stats.parquet (skipped if absent) and
 scores under the Hewitt protocol (one outcome and one control per study per repeat) and pooled over all outcomes.
 """
 import json, sys, time
+from pathlib import Path
 import numpy as np, pandas as pd
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 from simengine.research import hypotheses as H
 from simengine.llm.fake import FakeLLM
 
@@ -46,7 +48,6 @@ out["conversation_fake"] = {"llm_calls": len(llm.calls), "seconds": round(time.t
                             **res.runs[0].summary}
 
 # 4. SocSci210 condition table: reliability and non-LLM baselines under the Hewitt protocol
-from pathlib import Path
 from simengine.bench.base import DataNotFound, resolve_root
 try:
     path = Path(resolve_root(None, "socsci210")) / "ham" / "cond_stats.parquet"

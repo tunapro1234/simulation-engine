@@ -17,11 +17,14 @@ exactly one chosen row, as `MNL.fit` requires.
 """
 import json
 import re
+import sys
 import zlib
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 import simengine as se
 from simengine.methods.conjoint import MNL, elasticity, simulate_shares, wtp
 

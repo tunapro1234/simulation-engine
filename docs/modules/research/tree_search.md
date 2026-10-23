@@ -150,7 +150,11 @@ Command:
 
 ```bash
 SIMENGINE_DATA=<data-root> OMP_NUM_THREADS=1 nice -n 19 python examples/tree_search_bank.py --budget 20 --seeds 0 1 2 --out <scratch>
+python examples/tree_search_bank.py --synthetic --budget 4 --seeds 0 --out <scratch>   # offline wiring check, ~4 s
 ```
+
+Without a data root (or with `--synthetic`) the script writes a 3,000-row table in the bank layout to a temporary
+directory and runs the same loader and searches on it; those numbers check the wiring only.
 
 | search | seed 0 dev / test | seed 1 dev / test | seed 2 dev / test | test − default (mean of 3) |
 |---|---|---|---|---|

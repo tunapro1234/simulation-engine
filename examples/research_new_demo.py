@@ -10,18 +10,21 @@
 Every number printed here is from synthetic problems with a scripted FakeLLM; it checks the wiring, not how well any
 method works on real tasks (measured numbers: docs/modules/research/<module>.md).
 
-    PYTHONPATH=. python examples/research_new_demo.py
+    python examples/research_new_demo.py
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import tempfile
 import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 import simengine.research as R
 from simengine.llm.fake import FakeLLM
 

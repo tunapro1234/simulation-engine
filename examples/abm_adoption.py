@@ -9,9 +9,13 @@ ABM had MAE 8.48 pp vs 9.73 for the Bass-simulator control and 10.72 for a linea
 ABC + the analogy prior, not the ABM structure; at h=1 simple baselines win, and on mixed US household technologies
 the analogy prior hurt (10.07 vs 8.54).
 """
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 import simengine as se
 import simengine.abm as abm
 

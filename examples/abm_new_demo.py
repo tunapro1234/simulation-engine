@@ -7,8 +7,12 @@ FakeLLM). Offline, synthetic data only, small sizes so it runs in well under 30 
 The numbers printed here are small-scale smoke values on synthetic data, not results. Measured numbers and their
 provenance are in docs/modules/abm.md and the unit docs under docs/modules/abm/.
 """
+import sys
+from pathlib import Path
+
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 import simengine.abm as abm
 from simengine.abm import placement as pl
 from simengine.abm import spatial_sir as ep

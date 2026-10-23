@@ -10,11 +10,14 @@ per task next to the built-in baselines. `m5` is listed on purpose without files
 in docs/modules/bench/<task>.md; the synthetic effects below are planted, so the scores here mean nothing.
 """
 import os
+import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))       # run from a checkout without pip install
 from simengine import bench
 from simengine.bench.tasks import uplift
 
