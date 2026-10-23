@@ -267,6 +267,12 @@ lies in 0-1), ab `pair_sign`. The CLI warns when `--primary` is missing. `primar
 common alias (`log_loss`, `roc_auc`, `f1`, `brier_score`, ...; case and hyphens ignored) or the internal name; an
 unknown name raises a `ValueError` that lists the task's metrics and suggests the closest one.
 
+The card's limits (`kanit_kart["yanilgi"]`) carry every limit note (duplicates dropped, order kept; it used to keep
+only the first three, so prereg and dominant-block notes vanished). On a pending card (no truth yet) the baseline row
+reads `report["bildirilen_tabanlar"]` and says "declared, scored when truth arrives: T0, T1" instead of "taban yok".
+When the report has `persona_alanlari` (e.g. `persona.field_report(...)`), two rows follow the six: `persona`
+(fields that reached the prompt; partly missing fields in the note) and `dusen` (dropped fields).
+
 `panel_cost` converts extra answers to a public panel price ($0.95–2.86 per answer, a calculation).
 - *Measured:* under this rule none of the four example cards (Twin, OE value, OE class, OE LLM-500) is
   "high". The methods do not beat the strongest simple baseline by more than 0.02 [kanit RAPOR §1c].
@@ -607,6 +613,25 @@ ev.summary(rep)["ceiling"], ev.summary(rep)["gap_closed"], rep["gurultu_tavani"]
 - *One rehearsal run (D3 dev, 300 films, no CI):* half Spearman 0.950 → Spearman-Brown 0.975 → ceiling ≈ 0.987.
   These numbers come from the rehearsal's own split-half script, not from this function.
 
+**Sampling-noise ceiling of an error metric (`se_col=`, D5 #8d / D11 #5c / D3 #7).** `noise_ceiling=` covers
+correlation metrics only. When the truth is an estimate with a per-row standard error (a survey share, a model
+estimate), `evaluate(df, primary="mae", se_col="se")` (also `"rmse"`, `"wmape"`; `task="forecast"` defaults to
+wmape) builds the oracle that knows the latent value: its error against the observed truth is N(0, se), so the column
+truth + sign·se·a (a = |z| averaged over 400 seeded draws, sqrt(mean z²) for rmse: the draw-averaged metric) is
+routed through the `ceiling_col` machinery as "Model/oracle ceiling (sampling noise (SE column))" with a bootstrap CI
+and the gap closed. The analytic floor on the scored rows (test rows, `weight` honoured) sits next to it: mae
+sum(w·sqrt(2/π)·se)/sum(w), rmse sqrt(sum(w·se²)/sum(w)), wmape sum(w·sqrt(2/π)·se)/sum(w·|y|).
+`report["se_tavani"]` / `summary()["se_ceiling"]` (`analytic`, `value`, `lo`, `hi`, `draws`, `seed`, `n`),
+`summary()["ceiling_kind"] == "sampling noise (SE column)"`, a card line. No `aggregate_by` needed (with it the
+oracle column is averaged per group and `analytic` is None). NaN or negative SEs on rows with truth, a correlation
+primary, or combining it with `ceiling_col` / `noise_ceiling` raise `ValueError`. Clearly beating this floor points
+to leakage or an SE column that overstates the noise. Measured on a synthetic 800-row frame (se uniform 0.2-1.0):
+rmse ceiling 0.643 [0.627, 0.662] against the analytic 0.644.
+```python
+rep = ev.evaluate(df, ours="model", primary="mae", se_col="se", split="test")
+ev.summary(rep)["se_ceiling"]["analytic"], ev.summary(rep)["ceiling"]
+```
+
 **Call budget first (`correlation_audit`).** `max_calls` is compared with the planned total (prompt arms × keys ×
 samples) before any call. The error names the number needed (`pass max_calls=600`). Cached replies are counted,
 because the LLM backend has no public cache probe; a re-run from the cache costs nothing. An answer-dict arm needs no
@@ -687,11 +712,26 @@ ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipp
   `seal(..., prereg_doc=)` (CLI `muhurle --belge`) writes `"onkayit_belgesi": {"dosya", "sha256"}` (file name only)
   into the chain record and appends `[ön kayıt belgesi <name> sha256:<hash>]` to the description. `evaluate(prereg=
   <registry>)` then picks the document up from the registry's parent directory on its own.
+- **Declared vs scored primary metric (D10 metric trap).** The primary metric declared in the documents is read by
+  `api.declared_primary(text)`: the `research.Prereg` JSON block (`metrics` as `{"primary": ...}`, a list whose
+  first entry is the primary, or text), a `Primary metric: ...` / `Birincil metrik: ...` line, or the first line of
+  a `## Metrics` section; the first known metric name wins, and the latest declaring document (an addendum) counts.
+  When it differs from the scored primary (`mae` and `1-mae` count as the same), `evaluate` raises a `UserWarning`,
+  adds an audit warning row "birincil metrik beyanı (ön kayıt)" (English: "declared primary metric
+  (pre-registration)") and puts the card limit "primary metric differs from the declared one: ..." first; a match
+  writes an "ok" row. No document, no row.
 - **Declared split.** `split="test"` (or `"holdout"`, `"deger"`, `"degerlendirme"`) writes a constant split column
   when the frame has none: TEST-only frames and `sim.distribution_frame` cells (all held out) then run the split
   audit instead of skipping it ("bölme bilgisi" no longer flags leakage as unproven), and an audit row "bölme beyanı
-  (split=)" says the split was declared by the caller, not derived. A frame that already has a split column keeps it
+  (split=)" says the split was declared by the caller, not derived. `split="oof"` / `"cv"` / `"time"` declare
+  out-of-fold, cross-validated or time-split predictions (D12 #22, D9 #6, D6 #3b, D7 #12): every row is scored as an
+  evaluation row and the audit row reads "cross-fitted (declared)". A frame that already has a split column keeps it
   (warning). Other labels raise `ValueError`.
+- **One sign rule on the card (D5 #8c).** The "Ours − strongest baseline" line is in the metric direction (positive
+  = better) and now also prints the raw difference: for lower-is-better metrics `raw ours − baseline = -0.010
+  [...] (mae, lower is better: negative favours ours, ...)`, the convention of the registered-comparison rows (raw
+  A − B). The English card gives a significant-but-small difference its reason and the threshold
+  (`kart.ANLAMLI_FARK` = 0.02) instead of an empty line (D12 #10).
 - **Dominant block.** `balance_col="country"` (default: `block_col` when given) checks the shares of the scored
   rows. When one block holds more than max(`dominance_share`=0.20, 1.5 / n_blocks), an audit warning row, a card
   note and `report["baskin_blok"]` / `summary(rep)["dominant_block"]` give the primary metric of every method both
@@ -999,3 +1039,47 @@ mem = ev.ab_memorization(llm, test_pairs, "Upworthy Research Archive (2013-2015)
 rep = ev.evaluate(f, task="ab", ours="stack", raw="llm", memorization=mem)
 ```
 Not yet run on real data. `evaluate(task="ab_pair")` (taking the pair table directly) is still to come.
+
+## Frame helpers: repeated splits, cell counts, wide-to-long, segment bias (D9 #5 #6, D11 #5d, D12 #3 #7 #20 #21)
+
+`frames.py`. Four bridges the TALP rehearsals wrote by hand: a seed loop over random splits (the dev card showed one
+split), `value_counts` + concat to turn per-person argmax into cell counts, melting a sealed wide multi-target file and
+dividing by the training sd, and the brief's segment error.
+
+```python
+ss = ev.split_summary(lambda s: ev.evaluate(make_split(s), ours="t1", multiplier=False), seeds=range(100),
+                      pairs=[("t1", "o1")])        # or a list / {name: x} of reports or frames
+print(ss.markdown)                                 # card section; ev.evaluate(..., limits=ss.limits) puts it on the card
+cf = ev.counts_frame(people, {"m": "p_vec"}, by=["area"], probs=True, classes=cls, argmax_too=True)
+ev.evaluate(cf, ours="m", task="forecast", primary="wmape")          # pred_m (expected) vs pred_m_argmax counts
+lf = ev.long_frame("sealed_wide.csv", truth_wide, "id", scale="sd_train", train=train_wide)
+ev.evaluate(lf, ours="ours", task="continuous", primary="mae")      # MAE in training-sd units (zMAE)
+sb = ev.segment_bias(frame, "region", ["ours", "base"])             # sb["arms"], sb["diff"], sb["segments"]
+```
+
+- **`split_summary(reports_or_frames, metric=None, pairs=None, *, seeds=None, task=None, names=None)`** returns a
+  `SplitSummary`: `per_split` (split x column value, split x pair difference), `table` (median, 2.5 / 97.5 % over
+  splits, mean, `share_a_better` for pairs: ties count half, signed metrics compare |value|), `markdown`, `limits`.
+  Reports are read from `sonuclar` (columns by method name, baseline columns such as `taban_marjinal`, and `ours`,
+  `raw`, `best_baseline` = that split's strongest baseline); frames are scored with point metrics only (no
+  bootstrap). Default pair for reports: `("ours", "best_baseline")`. The quantiles are split-to-split spread, not a CI.
+- **`counts_frame(rows, pred_cols, by, *, truth="truth", cluster=None, probs=False, classes=None, weight=None,
+  argmax_too=False)`**: one row per observed by-cell x class (zeros kept) with `truth` count, `pred_<arm>` count, `n`,
+  `item` = class and `group` = cluster (default the by-cell). Label arms count persons per predicted class; probability
+  arms (`probs=True` or a list of arms; a vector column with `classes=`, a `{class: p}` column, or `{class: column}`)
+  sum probabilities into expected counts. `argmax_too=True` adds `pred_<arm>_argmax`: the trap where argmax wins
+  person accuracy and loses the count WMAPE because every cell collapses onto its majority class. A cell where an arm
+  has a missing prediction gets NaN for that arm, never a zero count.
+- **`long_frame(pred_wide, truth_wide, id_col, scale=None, *, train=None, targets=None, arm="ours")`**: wide files
+  (DataFrame or CSV / parquet path; `{arm: ...}` for several arms) to `group` = unit, `item` = target, `truth`,
+  `pred_<arm>`. `scale="sd_train"` divides each target by its training sd (ddof 1, from `train=`), or pass
+  `{target: s}`; zero or missing scales raise. Truth units without a prediction are dropped with a warning. The scale
+  used is in `frame.attrs["scale"]`.
+- **`segment_bias(frame, seg, arms, weight=None, *, cluster=None, B=2000, seed=0, ci="percentile", min_n=1)`**:
+  Σ_s w_s |mean pred_s − mean truth_s|, w_s = n_s / n (`weight="equal"`: 1 / S; a column name: row weights). The
+  cluster bootstrap (group > item > row) resamples truth and every arm together; pairs are `arms[0]` − each other arm.
+  **A single-arm CI of an absolute-value metric is biased**: each resample adds noise inside |·|, so its distribution
+  sits above the point when the true error is near 0. Synthetic check *(this port)*: 60 segments x 10 rows, no true
+  error, 30 seeds: the point fell below its single-arm percentile CI in 29 of 30, while the paired difference CI of
+  two unbiased arms covered 0 in 30 of 30. The result flags `point_outside_ci` (with a `UserWarning`) and carries the
+  note; judge arms on `diff`.

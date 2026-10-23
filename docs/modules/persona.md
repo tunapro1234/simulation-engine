@@ -119,6 +119,11 @@ Ported from the TALP prep branches (read-only research code):
 - `to_frames(personas)` returns `(people, features)`. `people` has `id`, `seg_*`, `segment` and
   `persona_text`. `features` is a long frame of `quantitative_dispositions` (`id, item, value`).
 - `age_band(age)` maps a numeric age to a TALP AgeBand.
+- `field_report(people, source_df=None, mapping=None)` (`fields.py`) counts what reached the prompt:
+  `{"n_fields", "used", "dropped", "per_field_missing", "why", "n_people"}`. A mapped column the table does not have,
+  a column left out of an explicit Mapping, or a field empty for part of the rows is otherwise silent.
+  `as_limit(rep)` makes one line for `evaluate(limits=[...])`; `report["persona_alanlari"] = rep` adds the
+  persona / dropped-field rows to the evidence card.
 
 ### Builders from history (`history.py`)
 This module follows the talp73 levels:
