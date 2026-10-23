@@ -2508,7 +2508,8 @@ def _a_better(M, va, vb) -> bool | None:
 
 def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = None, aggregate_by: str | None = None,
                 group: str | None = None, B: int = 2000, seed: int = 0, offset_col: str | None = None,
-                task: str | None = None, aggregate: str = "mean", ci: str = "percentile") -> dict:
+                task: str | None = None, aggregate: str = "mean", ci: str = "percentile",
+                block_col: str | None = None) -> dict:
     """Paired difference metric(a) − metric(b) with a cluster-bootstrap 95 % CI, for ANY two columns (a drop
     condition such as P1 − L1, or a control such as P1 − P_shuffled). b=None: a's own value and CI (e.g. "P2 ≈ 0").
 
@@ -2521,11 +2522,21 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
         `evaluate`, subtracted before aggregation. All percentile CIs use B resamples for every metric type.
     metric="wmape" / "bias" work on continuous (and task="forecast") frames: numerator and denominator are resampled
         together. aggregate="sum": sum per aggregate_by group instead of the mean. ci="basic": 2*diff - quantiles.
+    block_col: the two-way block bootstrap of `evaluate(block_col=)` (blocks × clusters resampled independently,
+        same default: off), so a pre-registered paired decision does not flip with the bootstrap type (D7 #9:
+        evaluate(block_col="origin") gave [-0.059, +0.015], paired_diff without blocks [-0.041, -0.003]). With
+        aggregate_by= the column must be constant within each group. On a report: the report's own bootstrap is
+        reused (its block_col is returned); a different block_col raises ValueError.
     Returns {"metric", "a", "b", "value_a", "value_b", "diff", "lo", "hi", "p", "n" (clusters), "cluster",
-    "a_better", "B", "source"}. diff is raw a − b: for lower-is-better metrics a negative diff favours a."""
+    "block_col", "n_blocks", "a_better", "B", "source"}. diff is raw a − b: for lower-is-better metrics a negative diff favours a."""
     if isinstance(frame_or_report, dict):
-        return _paired_from_report(frame_or_report, a, b, metric)
+        return _paired_from_report(frame_or_report, a, b, metric, block_col)
     d = to_internal(frame_or_report)
+    blok = None
+    if block_col is not None:
+        blok = block_col if block_col in d.columns else COLUMN_TO_INTERNAL.get(block_col, block_col)
+        if blok not in d.columns:
+            raise ValueError(f"block_col {block_col!r} is not a column of the frame")
     task_i = _task(task)
     if offset_col is not None:
         d, _ = _offset(d, offset_col, task_i)
@@ -2544,7 +2555,7 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
             if (d.groupby(col, dropna=False)[gc].nunique(dropna=False) > 1).any():
                 raise ValueError(f"group {group!r} must be constant within each aggregate_by={aggregate_by!r} group")
             cmap = d.groupby(col, dropna=False)[gc].first()
-        d, _ = _aggregate(d, aggregate_by, task_i, how=aggregate)
+        d, _ = _aggregate(d, aggregate_by, task_i, how=aggregate, keep={blok: "block_col"} if blok else ())
         task_i = "surekli"
         if cmap is not None:
             d["grup"] = d[col].map(cmap).astype(str)
@@ -2568,7 +2579,11 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
         if c not in dd:
             raise ValueError(f"column {c!r} is not in the frame (need pred_<name>)")
     girdi = {c: (*_metrik.diziler(v, c), None) for c in cols}
-    orn = _boot.Orneklem(v.kume, B=B, B_toplu=B, tohum=seed, madde_kume=v.kume_adi == "madde")
+    if blok is not None:
+        from .cekirdek import _blok_kur
+        _blok_kur(v, blok, False)        # as evaluate: NaN raises, one distinct value -> default clusters
+    orn = _boot.Orneklem(v.kume, B=B, B_toplu=B, tohum=seed, madde_kume=v.kume_adi == "madde" and v.blok is None,
+                         iki_yon=v.iki_yon)
     nokta, tekrar = _boot.hesapla(orn, girdi, [M], pd.factorize(dd["madde"])[0] if madde_var else None,
                                   dd["agirlik"].to_numpy(float) if "agirlik" in dd else None)
     ca = cols[0]
@@ -2580,12 +2595,18 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
     lo, hi = _boot.ga(f, nokta=diff, yontem=ci)
     return {"metric": METRIC_TO_ENGLISH.get(ad, ad), "a": _method(a), "b": _method(b), "value_a": va, "value_b": vb,
             "diff": diff, "lo": lo, "hi": hi, "p": _boot.p_degeri(f),
-            "a_better": _a_better(M, va, vb) if cb else None, "n": int(v.kume.max()) + 1, "cluster": v.kume_adi,
-            "B": int(B), "source": "frame"}
+            "a_better": _a_better(M, va, vb) if cb else None, "n": v.n_kume, "cluster": v.kume_adi,
+            "block_col": block_col if v.blok is not None else None,
+            "n_blocks": int(dd[v.blok].nunique()) if v.blok is not None else None, "B": int(B), "source": "frame"}
 
 
-def _paired_from_report(report: dict, a: str, b: str | None, metric: str | None) -> dict:
+def _paired_from_report(report: dict, a: str, b: str | None, metric: str | None, block_col: str | None = None) -> dict:
     met = _metric(metric) or report.get("birincil")
+    rb = (report.get("blok_bootstrap") or {}).get("sutun")
+    if block_col is not None and rb not in (block_col, COLUMN_TO_INTERNAL.get(block_col, block_col)):
+        raise ValueError(f"block_col {block_col!r} differs from the report's ({rb!r}): the report's CIs come from its "
+                         "own bootstrap; pass the frame to resample other blocks")
+    rb_en = INTERNAL_TO_COLUMN.get(rb, rb)     # "zaman" -> "time"; user columns stay
     ca = ON_EK + _method(a)
     cb = None if b is None else ON_EK + _method(b)
     names = lambda x: {x, _method(x)} if x else {None}
@@ -2616,7 +2637,8 @@ def _paired_from_report(report: dict, a: str, b: str | None, metric: str | None)
         return {"metric": METRIC_TO_ENGLISH.get(met, met), "a": _method(a), "b": _method(b), "value_a": None,
                 "value_b": None, "diff": diff, "lo": lo, "hi": hi, "p": r.get("p"),
                 "a_better": better, "n": r.get("n", n),
-                "cluster": report.get("tutma_birimi"), "B": None, "source": "report"}
+                "cluster": report.get("tutma_birimi"), "block_col": rb_en,
+                "n_blocks": (report.get("blok_bootstrap") or {}).get("n_blok"), "B": None, "source": "report"}
     raise ValueError(f"pair ({a!r}, {b!r}) on {met!r} is not in the report: pass the frame, or evaluate(..., "
                      f"compare=[({a!r}, {b!r})])")
 
