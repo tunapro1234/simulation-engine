@@ -195,6 +195,33 @@ class TestLightGBMSafety(unittest.TestCase):
                                                                    eval_set=(X.to_numpy()[:300], y[:300])))
         self.assertTrue(any("eval_set" in m and "identical" in m for m in msgs), msgs)
 
+    def test_eval_overlap_separate_files_no_warning(self):
+        # train.csv (index 0..n-1) and a dev frame filtered / sampled from a separate file: the labels 0..m
+        # coincide but the rows are different, so no warning (it warned 1038/1038 and 500/500 before)
+        X, y = rare(rate=0.2)
+        T, yt = rare(n=2000, rate=0.2, seed=5)
+        keep = T.x2.to_numpy() > 0
+        for Xv, yv in ((T[keep], yt[keep]), (T.sample(500, random_state=0), yt[T.sample(500, random_state=0).index])):
+            _, msgs = caught(lambda: LightGBMBaseline(**self.FAST).fit(X, y, eval_set=(Xv, yv)))
+            self.assertFalse(any("eval_set" in m for m in msgs), msgs)
+        # same labels and same rows still warns
+        _, msgs = caught(lambda: LightGBMBaseline(**self.FAST).fit(X, y, eval_set=(X[X.x2 > 1], y[X.x2 > 1])))
+        self.assertTrue(any("eval_set" in m and "index" in m for m in msgs), msgs)
+
+    def test_sample_weight_rebalance_and_multiclass_class_weight_warn(self):
+        X, y = rare(n=4000, rate=0.05)
+        _, msgs = caught(lambda: LightGBMBaseline(**self.FAST).fit(X, y, sample_weight=np.where(y == 1, 19.0, 1.0)))
+        self.assertTrue(any("not calibrated" in m and "sample_weight" in m for m in msgs), msgs)
+        noise = np.random.default_rng(3).integers(1, 4, len(y)).astype(float)       # not tied to the class
+        _, msgs = caught(lambda: LightGBMBaseline(**self.FAST).fit(X, y, sample_weight=noise))
+        self.assertFalse(any("not calibrated" in m for m in msgs), msgs)
+        rs = np.random.default_rng(4)
+        ym = np.where(X.x1 > 1.2, "c", np.where(rs.random(len(X)) < 0.08, "b", "a"))
+        _, msgs = caught(lambda: LightGBMBaseline(class_weight="balanced", **self.FAST).fit(X, ym))
+        self.assertTrue(any("not calibrated" in m and "class_weight" in m for m in msgs), msgs)
+        _, msgs = caught(lambda: LightGBMBaseline(**self.FAST).fit(X, ym))
+        self.assertFalse(any("not calibrated" in m for m in msgs), msgs)
+
     def test_class_weight_warns_and_platt_calibrates(self):
         X, y = rare(n=4000, rate=0.05)
         Xv, yv = rare(n=2000, rate=0.05, seed=1)

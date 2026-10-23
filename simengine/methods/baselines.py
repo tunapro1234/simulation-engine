@@ -936,34 +936,53 @@ RARE_SHARE = 0.02           # LightGBMBaseline: minority class share below this 
 _MIN_CHILD_KEYS = ("min_child_samples", "min_data_in_leaf", "min_data_per_leaf", "min_data")
 
 
-def _reweighting(params: dict) -> str | None:
-    """The class-reweighting parameter that is set (LightGBM names and aliases), or None."""
+REWEIGHT_ODDS = 1.5        # LightGBMBaseline: sample_weight moving the positive odds by more than this is a reweighting
+
+
+def _reweighting(params: dict, kind: str = "binary", y=None, w=None) -> str | None:
+    """The class-reweighting parameter that is set (LightGBM names and aliases), or None. Binary: also a
+    ``sample_weight`` whose weighted positive odds differ from the unweighted odds by more than ``REWEIGHT_ODDS``
+    (e.g. ``w = 19`` on positives), the same decalibration by hand. Multiclass: ``class_weight`` only."""
+    if params.get("class_weight") is not None:
+        return f"class_weight={params['class_weight']!r}"
+    if kind != "binary":
+        return None
     spw = params.get("scale_pos_weight")
     if spw is not None and float(spw) != 1.0:
         return f"scale_pos_weight={spw}"
     for k in ("is_unbalance", "unbalance", "unbalanced_sets"):
         if params.get(k):
             return f"{k}=True"
-    if params.get("class_weight") is not None:
-        return f"class_weight={params['class_weight']!r}"
+    if w is not None and y is not None and w.sum() > 0:
+        r, rw = float(np.mean(y)), float(np.sum(w * y) / np.sum(w))
+        if 0 < r < 1 and 0 < rw < 1:
+            odds = (rw / (1 - rw)) / (r / (1 - r))
+            if not 1 / REWEIGHT_ODDS <= odds <= REWEIGHT_ODDS:
+                return f"sample_weight (weighted positive share {rw:.3f} vs {r:.3f})"
     return None
 
 
 def _eval_overlap(X: pd.DataFrame, Xv: pd.DataFrame, labels: bool = True) -> str | None:
     """Why ``eval_set`` looks like it holds training rows, or None. Row labels are compared when both came as
-    pandas objects (``labels``) and not both have a fresh 0..n-1 index (no information); otherwise whole feature
-    rows are hashed, if the training rows are mostly distinct (repeated rows, e.g. all-categorical features, make
-    identical rows normal)."""
+    pandas objects (``labels``) and not both have a fresh 0..n-1 index (no information): a row counts only when its
+    label AND its feature values match a training row (a dev frame cut from a separate file shares labels 0..m with
+    a train file but not the rows). Otherwise whole feature rows are hashed, if the training rows are mostly
+    distinct (repeated rows, e.g. all-categorical features, make identical rows normal)."""
     def fresh(ix):
         return isinstance(ix, pd.RangeIndex) and ix.start == 0 and ix.step == 1
     if not len(X) or not len(Xv):
         return None
-    if labels and not (fresh(X.index) and fresh(Xv.index)):
-        k = int(Xv.index.isin(X.index).sum())
-        return f"shares {k} of its {len(Xv)} row labels (index) with the training rows" if k else None
     cols = [c for c in X.columns if c in Xv.columns]
     if not cols:
         return None
+    if labels and not (fresh(X.index) and fresh(Xv.index)):
+        shared = Xv.index.isin(X.index)
+        if not shared.any():
+            return None
+        hv = pd.util.hash_pandas_object(Xv[cols][shared], index=True).to_numpy()
+        k = int(np.isin(hv, pd.util.hash_pandas_object(X[cols], index=True).to_numpy()).sum())
+        return (f"shares {k} of its {len(Xv)} row labels (index) with the training rows, features identical"
+                if k else None)
     h = pd.util.hash_pandas_object(X[cols], index=False).to_numpy()
     if len(np.unique(h)) < 0.9 * len(h):
         return None
@@ -986,9 +1005,10 @@ class LightGBMBaseline:
       ``min_child_samples`` (200+), ``learning_rate=0.02`` and L2 (``reg_lambda=5``), or start from LogisticBaseline.
     - ``eval_set`` rows that share row labels (index) with the training rows, or (both indexes 0..n-1) are
       identical feature rows: early stopping then follows training rows and the eval score is optimistic.
-    - ``scale_pos_weight`` / ``is_unbalance`` / ``class_weight`` set: they reweight the classes, so ``predict_proba``
-      is a ranking score, not a probability (D13: no error, the mean prediction moved far above the rate). The
-      warning gives the mean in-sample prediction vs the training rate.
+    - ``scale_pos_weight`` / ``is_unbalance`` / ``class_weight`` set, or (binary) a ``sample_weight`` that moves the
+      positive odds by more than ``REWEIGHT_ODDS`` (1.5x): they reweight the classes, so ``predict_proba`` is a
+      ranking score, not a probability (D13: no error, the mean prediction moved far above the rate). The warning
+      gives the mean in-sample prediction vs the training rate (multiclass: the class with the largest gap).
 
     ``calibrate="platt"`` (binary only) fits ``methods.hybrid.BinaryCalibrator(method="platt")`` on the raw
     predictions for ``calibrate_set=(X, y)``, else ``eval_set`` (which early stopping also used, mildly optimistic);
@@ -1073,8 +1093,16 @@ class LightGBMBaseline:
         if self.kind_ == "multiclass":
             self.classes_ = list(self.model_.classes_)
         self.calibrator_ = None
-        rew = _reweighting(prm) if self.kind_ == "binary" else None
-        if self.calibrate:
+        rew = _reweighting(prm, self.kind_, y, w) if self.kind_ != "continuous" else None
+        if rew and self.kind_ == "multiclass":
+            P = np.asarray(self.predict_proba(X), float)
+            share = pd.Series(y).value_counts(normalize=True).reindex(self.classes_, fill_value=0).to_numpy()
+            j = int(np.argmax(np.abs(P.mean(0) - share)))
+            warnings.warn(f"LightGBMBaseline: {rew} reweights the classes, so predict_proba is not calibrated (class "
+                          f"{self.classes_[j]!r}: mean prediction on the training rows {P[:, j].mean():.3f} vs "
+                          f"training share {share[j]:.3f}); use it as a ranking score or recalibrate on held-out "
+                          "rows", UserWarning, stacklevel=2)
+        elif self.calibrate:
             from .hybrid import BinaryCalibrator
             yc = np.asarray(cal_set[1]).astype(int)
             self.calibrator_ = BinaryCalibrator(method=self.calibrate).fit(self.predict_proba(cal_set[0], raw=True),
