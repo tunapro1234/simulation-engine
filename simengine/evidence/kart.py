@@ -260,7 +260,14 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
                  n_kume=n_kume if son else None, anlamli_fark=esik)
     esit = ", ".join((tb_bel or {}).get("esitler") or [])
     if fark_r is not fark and r != "bekliyor":
-        g = f"{g} (Rozet eşit tabanların en kötüsüne karşı: {esit}; badge against the worst tied baseline.)"
+        # D13-W8/W10 #4: rozetin GA'sı (eşitlerin en kötüsü) kayıtlı karşılaştırmanınkiyle (bizim − tek en güçlü taban)
+        # aynı değil; iki alt uç adıyla basılır, jüri tek iddia için iki etiketsiz alt sınır görmez. Dil-nötr yazım:
+        # api'nin İngilizce görünümü bu parantezi olduğu gibi taşır.
+        be = (biz or {}).get("etiket") or "ours"
+        ci = lambda d: f"{d['fark']:+.3f} [{d['alt']:+.3f}; {d['ust']:+.3f}]"
+        enk = ", ".join(f"{be} − {e}" for e in (tb_bel or {}).get("esitler") or [])
+        olcu = f"min({enk}) = {ci(fark_r)}; {be} − {tb.get('etiket')} = {ci(fark)}"
+        g = f"{g} (Rozet eşit tabanların en kötüsüne karşı: {esit}: {olcu}; badge against the worst tied baseline.)"
     atl = [d.get("kontrol") for d in oz.get("denetim") or [] if d.get("durum") == "atlandi" and not d.get("uygulanamaz")
            and any(k in (d.get("kontrol") or "") for k in ("bölme", "grup", "zaman", "kontaminasyon", "ezber"))]
     llm_yok = any(d.get("uygulanamaz") and "ezber" in (d.get("kontrol") or "") for d in oz.get("denetim") or [])
