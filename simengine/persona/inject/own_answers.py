@@ -136,7 +136,7 @@ def score_bm25(query: str, docs: Sequence[str], k1: float = 1.2, b: float = 0.75
     for c in toks:
         dl = sum(c.values())
         s = 0.0
-        for t in q:
+        for t in sorted(q):   # a set's order follows PYTHONHASHSEED and the float sum with it (cf. bm25_rank)
             if t in c:
                 idf = math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
                 s += idf * c[t] * (k1 + 1) / (c[t] + k1 * (1 - b + b * dl / (avg or 1.0)))

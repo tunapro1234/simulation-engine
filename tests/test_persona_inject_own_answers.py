@@ -270,5 +270,22 @@ class TestCompare(unittest.TestCase):
             self.assertNotIn("household own?\nA:", system + user)
 
 
+class TestBm25Deterministic(unittest.TestCase):
+    def test_scores_do_not_depend_on_hash_seed(self):
+        """Regression: score_bm25 summed over a set, so float scores (and the picked answers) varied per PYTHONHASHSEED."""
+        import os, subprocess, sys
+        code = ("import random; from simengine.persona.inject.own_answers import score_bm25\n"
+                "r = random.Random(0); W = 'a b c d e f g h i j k l m n o p q r s'.split(); out = []\n"
+                "for _ in range(200):\n"
+                "    docs = [' '.join(r.choice(W) for _ in range(r.randint(2, 9))) for _ in range(30)]\n"
+                "    out.append(score_bm25(' '.join(r.sample(W, 6)), docs))\n"
+                "print(repr(out))")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        runs = {subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, cwd=root,
+                               env={**os.environ, "PYTHONHASHSEED": str(seed), "PYTHONPATH": root}).stdout
+                for seed in (1, 2, 3)}
+        self.assertEqual(len(runs), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
