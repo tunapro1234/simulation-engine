@@ -6,6 +6,7 @@ that combine an LLM prediction with a model learned from data.
 | component | what it is | verdict from the prep nights |
 |---|---|---|
 | `ConstantBaseline`, `MajorityBaseline`, `ItemMarginal`, `SegmentRate` | rate / median / class shares, per item or shrunk per segment | always report them; they are hard to beat on accuracy |
+| `ConditionalMode`; `MedianConstant`, `CellMedian`, `stat_for_metric` | multiclass mode per key cell (person x slot x day-type) with neighbour smoothing, time decay and a backoff chain, from sparse counts; median / mean / quantile constant and shrunk cell median for MAE ladders | report the median rung next to the mean on any MAE task (D12 pilot: median +0.0075 zMAE better); measured runs pending |
 | `uniform_distribution`, `weighted_distribution`, `overall_copy`, `segment_distributions`, `segment_empirical`, `select_m` | distribution baselines for group-level opinion; `mode="shrunk"` is segment empirical shrunk toward the population, `m` picked by K-fold cross-validation (`select_m`) | `overall_copy` wins against the uniform distribution and against neighbour transfer; with segment training data, report shrunk segment empirical next to `overall_copy`: they are the LLM-free arms to beat |
 | `PersistenceBaseline`, `persistence` | "tomorrow = yesterday" from the unit's own history | strongest single signal wherever history exists |
 | `basket_tensor`, `popularity`, `personal_frequency`, `decayed_frequency`, `tifu_knn` | next-basket / repeat-purchase scorers | decayed frequency beats P-TopFreq; TIFU-KNN adds nothing |
@@ -100,6 +101,20 @@ LightGBM defaults), the persona kit (`Medyan`), the deney kit (`KomsuDeney`), ka
   across-person correlation as its metric.
 - **`SegmentRate`** computes `(sum + a*g) / (n + a)`. `a` is picked from (1, 5, 20, 50, 200) on validation; the
   default is `a = 10`, as in kanit.
+- **`ConditionalMode`** is the multiclass counterpart for long tables: the most frequent label per key cell,
+  `ConditionalMode(["person", "slot", "daytype"], target="place", smooth={"slot": [(-1, .5), (1, .5)]},
+  wrap={"slot": 48}, backoff=[["person"], ["slot", "daytype"]], decay=0.95, time_col="day")`. A cell also counts
+  its neighbours' rows at the given weights (its own rows weigh 1); cells with no weight fall down the backoff
+  chain and finally to the global mode (`levels_`, `predict(..., return_level=True)`). Ties go to the globally
+  more frequent label. `predict(q, k=3)` returns the top 3, padded from the next levels. Counts are sparse
+  groupbys, so no dense user x period x item tensor is built (1M history rows, 200k queries: fit ~2 s, top-1
+  ~0.3 s, top-3 ~5 s on the dev box). It generalises `abm.mobility.slot_mode`; nothing measured with it yet.
+- **MAE ladder rungs.** `MedianConstant()` is the training median (`metric="mse"` gives the mean, `stat=0.9` a
+  quantile, `fit(y, weight=w)` a weighted one). `CellMedian(by=[...], y_col=..., shrink=k, weight=...)` gives
+  `(n * cell + k * global) / (n + k)` per cell, n = rows (Kish n with weights); `shrink=None` with
+  `fit(train, valid=dev)` picks k from (0 ... 500) by the metric's loss (absolute, squared or pinball).
+  `stat_for_metric` maps MAE / WAPE / zMAE to the median and MSE / RMSE to the mean, as `point_for_metric` does
+  for forecasts. On the D12 pilot the median constant beat the mean by +0.0075 zMAE.
 - **Distributions.** For OpinionQA subgroups (setting B, Overall known), copying Overall to every group gives
   dev WD 0.0530 [0.0509, 0.0554]. The uniform distribution gives 0.1976 and "sibling" transfer gives 0.0764
   **[dongu]**. Adding neighbour-group deviations on top was significantly worse (+0.0014 [+0.0006, +0.0021]
@@ -477,6 +492,14 @@ LightGBM beats Markov-2 by +4.66 [+2.04, +7.55], and by [+1.68, +7.66] user-clus
 [-0.14, +3.11]); the two are not separable. Part of the gain is per-user history. Use `use_user_prior=False` to
 ablate it. The source's page-structure, click-type and text-overlap features were dataset-specific and are **not
 ported**; pass equivalents as `numeric` / `categorical`.
+
+**Any query x candidate table.** `NextActionRanker(query_col="qid", cand_col="cell", features=["hist", "dist",
+"zone"])` skips the session schema: `fit(table)` / `score(table)` take one row per (query, candidate) with a
+relevance column `y` (0/1 or graded ints), e.g. person x time queries against candidate cells (D9 needed a
+hand-written LightGBM lambdarank for this). No priors are built; bring them as features. Non-numeric features
+become categoricals, scores come back in input row order, and every row is trained on unless
+`sample_negatives=True` (positives + `top` by `prior_col` + `random` per query). `top1(..., query_col=,
+cand_col=)` and `hit_at_k(..., query_col=)` take the same names. The session schema stays the default.
 
 **Session level: conversion / abandonment from the first steps.** `next_action.sessions` and `next_action.funnel`
 turn the step table into session rows without building candidates (not re-exported from `simengine.methods`;
