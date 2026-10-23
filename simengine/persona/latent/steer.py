@@ -117,6 +117,23 @@ def derange(n: int, seed: int = 0) -> np.ndarray:
             return p
 
 
+def _check_injector(ld, kind, layer, soft_id, suffix):
+    """Resolve soft_id (default: soft_placeholder) and fail early on a missing layer or a suffix without
+    placeholders (soft tokens would silently not be injected)."""
+    if kind == "residual":
+        if layer is None:
+            raise ValueError("kind 'residual' needs layer= (e.g. ld.layer_index(0.5))")
+        return soft_id
+    if kind != "soft":
+        raise ValueError("kind must be 'residual' or 'soft'")
+    if soft_id is None:
+        soft_id = soft_placeholder(ld.tok)[0]
+    if int(soft_id) not in _ids(ld.tok, [suffix])[0]:
+        raise ValueError("kind 'soft': the suffix holds no soft placeholder; build it with "
+                         "prompts.short_split(tok, messages, soft_k=k, soft_token=soft_placeholder(tok)[1])")
+    return soft_id
+
+
 def _injection(kind, proj, U, layer, positions, soft_id):
     import torch
     Ut = torch.as_tensor(np.asarray(U, np.float32))
@@ -138,15 +155,17 @@ def soft_placeholder(tok) -> tuple[int, str]:
 
 
 def train_injector(ld, proj, kind: str, prefixes: Sequence[str], suffix: str, U_fit, cells_fit, U_val, cells_val, *,
-                   layer: int | None, positions: str = "last", lr: float = 3e-4, epochs: float = 1.0,
+                   layer: int | None = None, positions: str = "last", lr: float = 3e-4, epochs: float = 1.0,
                    batch_size: int = 64, seed: int = 0, eval_every: float = 0.5, weight_decay: float = 0.01,
                    soft_id: int | None = None, score_fn=None, words: Sequence[str] = YES_NO, guard=None,
                    uids_fit=None, max_seconds: float | None = None):
     """Train `proj` with the model frozen. cells_*: int arrays (K, 3) of (prefix index, person row in U_*, y).
     Loss: BCE on log P(yes) - log P(no) at the end of prefix + suffix with proj(u) injected. Prefix caches are built
     once. Validation every `eval_every` epochs: score_fn(p_val, cells_val) -> float (higher is better; default
-    -log loss); the best state is kept. guard.check_uids(uids_fit) runs first when given. Returns (proj, history)."""
+    -log loss); the best state is kept. guard.check_uids(uids_fit) runs first when given. layer is required for
+    "residual"; soft_id defaults to soft_placeholder(ld.tok). Returns (proj, history)."""
     import torch
+    soft_id = _check_injector(ld, kind, layer, soft_id, suffix)
     if guard is not None and uids_fit is not None:
         guard.check_uids(uids_fit, "train_injector")
     torch.manual_seed(seed)
@@ -202,10 +221,11 @@ def train_injector(ld, proj, kind: str, prefixes: Sequence[str], suffix: str, U_
     return proj.eval(), hist
 
 
-def predict_injector(ld, proj, kind: str, prefixes: Sequence[str], suffix: str, U, cells, *, layer: int | None,
+def predict_injector(ld, proj, kind: str, prefixes: Sequence[str], suffix: str, U, cells, *, layer: int | None = None,
                      positions: str = "last", soft_id: int | None = None, batch_size: int = 64) -> np.ndarray:
     """P(yes) per cell (K, 2) = (prefix index, person row in U) with proj(U[row]) injected."""
     import torch
+    soft_id = _check_injector(ld, kind, layer, soft_id, suffix)
     cells = np.asarray(cells, np.int64)[:, :2]
     inj = _injection(kind, proj, U, layer, positions, soft_id)
     c3 = np.stack([cells[:, 0], np.zeros(len(cells), np.int64), cells[:, 1]], 1)

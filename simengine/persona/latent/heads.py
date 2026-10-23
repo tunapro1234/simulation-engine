@@ -27,6 +27,17 @@ def _sigmoid(z):
     return 1.0 / (1.0 + np.exp(-np.asarray(z, float)))
 
 
+def _codes(cat) -> np.ndarray:
+    """cat as integer codes 0..C-1; ValueError (with the fix) for labels such as category names."""
+    cat = np.asarray(cat)
+    if not np.issubdtype(cat.dtype, np.integer):
+        raise ValueError("cat must be integer category codes 0..C-1, not labels "
+                         "(e.g. cat = pd.Categorical(df.item, categories=items).codes)")
+    if len(cat) and cat.min() < 0:
+        raise ValueError("cat has negative codes (an item missing from the categories list?)")
+    return cat
+
+
 class EncoderHead:
     """enc-<u>: per-category L2 logistic regression on u ("logistic"), or one MLP over [u, category embedding(16)]
     with hidden 256 ("mlp", early-stopped on the validation cells by log loss, <= `epochs`)."""
@@ -53,7 +64,7 @@ class EncoderHead:
         """X holds every person (test persons included); only X[rows] enters the fit, standardisation included.
         val = (X_val, rows_val, cat_val, y_val) for MLP early stopping (ignored by logistic)."""
         Z = self._prep(X, fit=True, rows=rows)
-        rows, cat, y = np.asarray(rows), np.asarray(cat), np.asarray(y, float)
+        rows, cat, y = np.asarray(rows), _codes(cat), np.asarray(y, float)
         self.n_cat_ = int(cat.max()) + 1
         if self.kind == "logistic":
             from sklearn.linear_model import LogisticRegression
@@ -117,7 +128,7 @@ class EncoderHead:
 
     def predict(self, X, rows, cat) -> np.ndarray:
         Z = self._prep(X)
-        rows, cat = np.asarray(rows), np.asarray(cat)
+        rows, cat = np.asarray(rows), _codes(cat)
         if self.kind == "logistic":
             p = np.empty(len(rows))
             for c in np.unique(cat):
@@ -160,7 +171,7 @@ class Probe(EncoderHead):
         if self.estimator == "logistic":
             return super().fit(P, rows, cat, y)
         Z = self._prep(P, fit=True, rows=rows)
-        rows, cat, y = np.asarray(rows), np.asarray(cat), np.asarray(y, float)
+        rows, cat, y = np.asarray(rows), _codes(cat), np.asarray(y, float)
         self.n_cat_ = int(cat.max()) + 1
         self.dirs_ = np.zeros((self.n_cat_, Z.shape[1]), np.float32)
         for c in range(self.n_cat_):
@@ -177,7 +188,7 @@ class Probe(EncoderHead):
         if self.estimator == "logistic":
             return super().predict(P, rows, cat)
         Z = self._prep(P)
-        rows, cat = np.asarray(rows), np.asarray(cat)
+        rows, cat = np.asarray(rows), _codes(cat)
         return self.cal_((Z[rows] * self.dirs_[cat]).sum(1), cat)
 
 

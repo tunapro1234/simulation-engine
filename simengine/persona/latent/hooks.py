@@ -27,6 +27,15 @@ def _rebuild(out, h):
     return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
 
 
+def _layer(model, layer: int):
+    """Decoder layer `layer` with a readable error when it is out of range (pick it with ld.layer_index(frac))."""
+    lay = layers(model)
+    if not -len(lay) <= int(layer) < len(lay):
+        raise ValueError(f"layer {layer} is out of range: the model has {len(lay)} decoder layers "
+                         f"(use ld.layer_index(0.5) for half depth)")
+    return lay[int(layer)]
+
+
 def _pos_slice(positions, T: int):
     """positions: "last" | "last<k>" | "all" | slice | int -> slice over the T positions of this forward."""
     if isinstance(positions, slice):
@@ -50,7 +59,7 @@ def add_to_residual(model, layer: int, delta, *, positions="last", scale: float 
     delta: tensor (d,), (B, d) or (B, T_sel, d), or a callable h -> such a tensor (h = the layer output, (B, T, d);
     a learned projector closes over its inputs here). Cast to the layer output's dtype / device. In a KV-cached step
     the forward has only the new tokens, so "last" is that step's last token. No in-place edit (autograd-safe)."""
-    lay = layers(model)[int(layer)]
+    lay = _layer(model, layer)
 
     def hook(_m, _inp, out):
         h = _hidden(out)
@@ -85,7 +94,7 @@ def capture(model, layer_ids: Sequence[int], *, pool: str = "last", span=None):
     if pool not in ("last", "mean", "none"):
         raise ValueError("pool must be 'last', 'mean' or 'none'")
     store: dict[int, list] = {int(l): [] for l in layer_ids}
-    lay = layers(model)
+    lay = {l: _layer(model, l) for l in store}
     handles = []
 
     def make(l):
