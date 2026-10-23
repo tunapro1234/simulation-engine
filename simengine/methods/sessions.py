@@ -285,8 +285,8 @@ def prefix_features(rows: pd.DataFrame, *, item_col: str | None = None, time_col
 
     Returns a copy of ``rows`` with ``prefix_pop_<item_col>k`` (occurrences of the item over every prefix position
     of the same cutoff's rows / their number, so it can pass 1; label-free and built from the prefixes alone, so a
-    test set's own prefixes give the same column), ``prefix_same_item`` (all prefix items equal), ``prefix_hour`` (hour of the
-    first prefix event, fractional), ``prefix_weekday`` (0 = Monday) and ``prefix_days_after_cutoff``. A numeric
+    test set's own prefixes give the same column), ``prefix_same_item`` (all prefix items equal), ``prefix_hour``
+    (hour of the first prefix event, fractional), ``prefix_weekday`` (0 = Monday) and ``prefix_days_after_cutoff``. A numeric
     time column needs ``time_unit=`` and is read as epoch time (UTC). Popularity is within each ``cutoff_col``
     value: score train and test rows built from the same kind of selection, or the shares differ by construction.
 
