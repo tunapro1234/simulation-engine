@@ -48,6 +48,25 @@ Each task declares its options (`accepted_options`; shown by `simengine bench li
 unknown option key raises `ValueError`, so a typo such as `upworthy:spilt=holdout` fails instead of silently running
 the default split.
 
+### Any labelled table: `bench.from_csv`
+
+`bench.from_csv(path_or_df, *, target, id_col=None, group_col=None, item_col=None, split_col=None, test_frac=0.2,
+task="binary" | "multiclass" | "continuous", metric=None, features=None, positive=None, seed=0)` (`csvtask.py`)
+returns an unregistered `CsvTask`, so a competition's `train.csv` runs through `task.run`, `task.score` and
+`bench.run([task], ...)` like the built-in tasks.
+
+- Split: `split_col` (rows marked test / holdout / eval / true / 1 are test, the rest train), otherwise a seeded
+  `test_frac` split, by group when `group_col` is given so no group lands on both sides. Rows with no target are
+  dropped and counted in `meta["n_unlabeled_dropped"]`. Binary targets are encoded 0/1 (`meta["positive"]`), and
+  multiclass targets as codes (`meta["classes"]`).
+- Metrics: the `simengine.evidence` family for the kind, under English names. The primary is the evidence default
+  (accuracy for binary/multiclass, pearson for continuous) or `metric=` (English, sklearn-style or internal name).
+  The CI is a cluster bootstrap over `group_col`, or over rows when there is none, and `n` counts the clusters.
+- Baselines, fit on train only: `constant` (train mean or class shares); `majority` (binary/multiclass, hard) or
+  `median` (continuous); and `item_marginal` (per-item train mean or shares) when `item_col` is given.
+- Multiclass predictions can be a probability matrix, class codes or the original labels. Labels are scored as
+  one-hot.
+
 ## Datasets and licences
 
 The repository ships no data. Download each set yourself under its own terms and point `data_root` (or

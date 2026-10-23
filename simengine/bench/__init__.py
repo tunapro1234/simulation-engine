@@ -7,17 +7,19 @@
     frame = task.run(methods={"mine": lambda data: ...}, data=data)   # EvalFrame (truth, pred_<method>, ...)
     task.score(frame, "mine")                      # task metric with a bootstrap CI
     table = bench.run(["gss", "upworthy"], methods=...)   # long table; bench.to_markdown(table)
+    csv = bench.from_csv("train.csv", target="y", group_col="user")   # any labelled table as a task (csvtask.py)
 
 Expected file layout per task: `bench.get(name).layout` (and docs/modules/bench.md).
 """
 from .base import (ENV_DATA, BenchTask, DataNotFound, Metric, get, list_tasks, methods_in, register,
                    resolve_root)
+from .csvtask import CsvTask, from_csv
 from .leaderboard import run, to_markdown
 from .tasks import (BankMarketing, BeeBenchB01Prior, EconGamesB01, ErtanWTP, GSSWave, OpenEcommerce, OpinionQAGroups,
                     SimBench, Twin2K500, Upworthy)
 
 list = list_tasks  # noqa: A001  (bench.list() per the module contract)
 
-__all__ = ["ENV_DATA", "BenchTask", "DataNotFound", "Metric", "get", "list", "list_tasks", "methods_in", "register",
-           "resolve_root", "run", "to_markdown", "BankMarketing", "BeeBenchB01Prior", "EconGamesB01", "ErtanWTP",
-           "GSSWave", "OpenEcommerce", "OpinionQAGroups", "SimBench", "Twin2K500", "Upworthy"]
+__all__ = ["ENV_DATA", "BenchTask", "CsvTask", "DataNotFound", "Metric", "from_csv", "get", "list", "list_tasks",
+           "methods_in", "register", "resolve_root", "run", "to_markdown", "BankMarketing", "BeeBenchB01Prior",
+           "EconGamesB01", "ErtanWTP", "GSSWave", "OpenEcommerce", "OpinionQAGroups", "SimBench", "Twin2K500", "Upworthy"]
