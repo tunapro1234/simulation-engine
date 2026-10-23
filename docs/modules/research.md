@@ -1,4 +1,4 @@
-# `simengine.research`: pre-registration, sealed predictions, turn-based auto-research loop
+# `simengine.research`: pre-registration, sealed predictions, turn-based auto-research loop, search modules
 
 Ported from the TALP prep code: the loop driver `uretim/dongu/kod/dongu.py` (rules `uretim/dongu/onkayit/dongu.md`
 v1.0 to v1.2), the `claude -p` observer `uretim/dongu/kod/gozlemci.sh`, the bootstrap of `uretim/dongu/kod/kosucu.py`, and
@@ -24,6 +24,89 @@ or `"test"` (key names can be changed). With `HalvingProposer` it also gets `cfg
 `{"per_unit": DataFrame[unit, <primary>, ...], "metrics": {...}}`. The loop computes every number itself from the
 per-unit scores; it never takes a metric the runner reports about itself. Every per-unit numeric column gets a
 bootstrap CI in the journal, and the paired comparison uses the primary column on the units both runs share.
+
+## Search and method modules
+
+Six modules sit next to the loop. Each has its own page with the API, provenance checked against the papers,
+measured numbers and limitations. Their main names are exported from `simengine.research` lazily, so
+`import simengine.research` still loads no scipy or scikit-learn; the module itself is `simengine.research.<name>`.
+Generic helpers stay in their module: `bandits.simulate`, `bandits.compare`, `bayesopt.minimize`,
+`hypotheses.design` / `encode` / `estimate`, `prompt_evolution.split_units` / `toy_problem`. The Hyperband function is
+`research.hyperband.hyperband` (`research.hyperband` is the module). `examples/research_new_demo.py` runs one small
+synthetic case of each in about 2 s (FakeLLM, no data).
+
+All numbers below are copied from the unit pages, where the commands are. They come from synthetic problems unless a
+dataset is named, and no real LLM was called in any of them.
+
+### `bandits`: choose among K methods under a noisy evaluation budget ([page](research/bandits.md))
+
+UCB1, Thompson sampling (Beta, Gaussian), successive rejects, LUCB1 and uniform allocation; `identify_best(pull,
+n_arms, budget, algorithm)`, a vectorised simulator (`SimulatedArms`, `bandits.simulate`) and `RacingProposer`, which
+races the one-change candidates of a `Loop` turn over `cfg["fidelity"]` mini-batches. Exported: `SimulatedArms`,
+`BanditResult`, `identify_best`, `RacingProposer`, `ucb1`, `thompson_beta`, `thompson_gaussian`, `successive_rejects`,
+`lucb`, `lucb_beta`, `sr_schedule`, `AUDIBERT_BUBECK_2010`.
+Measured on the Audibert, Bubeck & Munos (2010) problems (2000 runs each): successive rejects, LUCB1 and Thompson-Beta
+beat uniform allocation by a wide margin where there are many bad arms (exp1: uniform 0.446, SR 0.187 error). Our
+uniform and SR rates are within 0.045 of the bars read off the paper's Figure 5 on six problems; exp3 and exp5 do not
+match the printed formulas (unresolved, see the page). LUCB1's round index starts at K + 1 as in the paper.
+
+### `bayesopt`: GP-EI / GP-UCB and TPE-lite ([page](research/bayesopt.md))
+
+`GPProposer` and `TPEProposer` plug into `Loop` (acquisition maximised over the one-change neighbours of the
+incumbent); `bayesopt.minimize(objective, space, method="gp" | "tpe" | "random")` moves every key. Exported:
+`GPProposer`, `TPEProposer`, `SpaceEncoder`, `TPE`, `Parzen1D`, `fit_gp`, `gp_scores`, `expected_improvement`,
+`upper_confidence_bound`, `ucb_beta`, `branin`, `branin_space`, `BRANIN_MIN`, `mixed_toy`, `mixed_toy_space`.
+Measured (20 seeds, 30 calls): with every key free, GP-EI and GP-UCB beat random search in 20 of 20 paired seeds on
+Branin (median regret 0.036 and 0.008 against 1.31). Inside `Loop` (one key per turn) the GP still beats random on
+Branin, but on the mixed toy all three model proposers lose to random (median 0.30 against 0.015): the one-change
+rule makes BO a coordinate search, which cannot cross an interaction. A 30-call GP run takes 16-24 s.
+
+### `hyperband`: Hyperband, ASHA and a multi-fidelity runner protocol ([page](research/hyperband.md))
+
+`MultiFidelity(fn, max_budget)` and `UnitRunner(score_units, n_units)` map (config, budget) to a score, with the
+budget in units (rows, personas, questions, LLM calls) and common random numbers across configs. `hyperband.hyperband`
+follows JMLR Algorithm 1 over `successive_halving`; `asha` follows MLSys Algorithm 2. Exported: `FidelityRunner`,
+`MultiFidelity`, `UnitRunner`, `space_sampler`, `pool_sampler`, `hyperband_brackets`, `ASHA`, `asha`.
+Measured (200 seeds, one synthetic objective): when a low budget is an unbiased mean of units, ASHA beats Hyperband
+by 0.0165 regret [0.0092, 0.0242] and charges the fewest units; when low budgets mislead (late bloomers), ASHA is
+about twice as bad and random search at full budget beats Hyperband by 0.017. Not wired into `make_proposer`;
+`HalvingProposer` stays the loop's multi-fidelity proposer.
+
+### `tree_search`: AIDE-style tree search and MCTS-UCT ([page](research/tree_search.md))
+
+`TreeSearch(runner, operators)` drafts, debugs and improves nodes with the aideml search policy (greedy best node);
+`MCTSSearch(runner, space)` runs UCT over the grid of a `Space`. Both use the loop's runner contract and workdir
+layout, and `finalize()` runs the winner and the defaults once on test and reports the winner's test - dev gap next
+to the defaults' gap. Operators: `ConfigOperators` (no LLM) and `LLMOperators`. Exported: `TreeSearch`, `MCTSSearch`,
+`ConfigOperators`, `LLMOperators`, `summarize_tree`.
+Measured: on the toy objective (budget 20, 10 seeds) AIDE-improve reaches 0.033 mean true effect, MCTS 0.104, random
+0.134, `Loop` 0.020. On Bank Marketing (row Brier, temporal split, 3 seeds) every search lowered dev Brier and 11 of
+12 winners were worse than the sklearn defaults on test; the base rate shifts from 11% in dev to 31% in test.
+
+### `prompt_evolution`: OPRO, APE and Promptbreeder over a text ([page](research/prompt_evolution.md))
+
+Search on the training split, re-rank the top-k on validation, seal the winner, score the winner and the baselines
+once on test with paired CIs (`select_and_test`; `evolve` does search and selection in one call). Exported:
+`PromptEvaluator`, `PromptEvolutionResult`, `opro`, `ape`, `promptbreeder`, `select_and_test`, `evolve`,
+`make_llm_scorer`, `opro_meta_prompt`, `ape_forward_prompt`, `diversity_filter`.
+Measured only on the offline keyword toy with a FakeLLM optimiser (5 seeds): every method's winner beats the seed
+text on test in 5 of 5 seeds and ends 0.01-0.05 below the oracle text. This checks the pipeline, not LLM
+optimisation quality; no real-LLM run is reported.
+
+### `hypotheses`: automated social science and experiment outcome prediction ([page](research/auto_social_science.md))
+
+`AutoSocialScience(llm, scenario, simulator=...)` has an LLM state a linear SCM, builds the factorial design, simulates
+every cell (LLM interview, LLM conversation with a judge, or a numpy world such as `linear_world` / `market_world`),
+fits it by OLS and compares the fit with the LLM's forecast made before the simulation (Manning, Zhu & Horton 2024).
+`forecast_experiment` and `score_condition_forecasts` predict and score survey-experiment effects (Hewitt et al.
+2024). Every decision goes to a `DecisionLog`. Exported: `AutoSocialScience`, `AutoSocialScienceResult`,
+`HypothesisRun`, `Hypothesis`, `Variable`, `DecisionLog`, `propose_hypotheses`, `parse_hypotheses`,
+`InterviewSimulator`, `ConversationSimulator`, `StructuralSimulator`, `make_simulator`, `linear_world`,
+`market_world`, `predict_paths`, `compare_paths`, `ExperimentForecast`, `forecast_experiment`,
+`score_effect_forecasts`, `score_condition_forecasts`.
+Measured: OLS 95% CI coverage 0.953 on `linear_world` (500 seeds). On SocSci210 under the paper's one-outcome draw,
+the non-LLM baselines are at chance (random r -0.033, TF-IDF ridge r 0.038, sign accuracy 0.46-0.51); that is
+the floor an LLM forecaster has to clear. No LLM forecast has been run.
 
 ## Declared targets and harness robustness
 
