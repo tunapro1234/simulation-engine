@@ -33,13 +33,6 @@ def _tr(x: float, b: int = 1) -> str:
     return f"{x:.{b}f}".replace(".", ",")
 
 
-def _onehot(kod: np.ndarray, K: int) -> np.ndarray:
-    o = np.zeros((len(kod), K))
-    ok = (kod >= 0) & (kod < K)
-    o[np.flatnonzero(ok), kod[ok]] = 1.0
-    return o
-
-
 # ------------------------------------------------------------------ ortak yardımcılar
 def _oran_ga(a, b, kume, B, rng):
     """Σa/Σb ve kümeler üzerinde bootstrap %95 GA."""
@@ -76,47 +69,138 @@ def _satir(n, deger, alt, ust, **ek):
 
 
 # ------------------------------------------------------------------ birey düzeyi görevler
+# Çok sınıflı etiketler tamsayı kod olarak kalır (tek-sıcak örtük): satır × sınıf tek-sıcak matris ya da
+# tekrar × n × sınıf tensör kurulmaz; sayımlar bincount ile, kovaryanslar yeterli istatistiklerle. Yoğun girdiler
+# (sürekli/ikili K = 1, olasılık vektörleri) özgün aritmetikle, en çok PARCA öğelik ara dizilerle.
+PARCA = 4_000_000         # yoğun ara dizi üst sınırı (öğe; ~32 MB)
+
+
+def _adim(birim: int, toplam: int) -> int:
+    """Parça başına satır: birim × adım ≤ PARCA."""
+    return max(1, min(toplam, PARCA // max(int(birim), 1)))
+
+
+def _toplam(x, K):
+    """Birimler üzerinde sütun toplamı → (K,)."""
+    return np.bincount(x, minlength=K).astype(float) if x.ndim == 1 else x.sum(0)
+
+
+def _s2(y, K):
+    """Σ_k Var(y_k), ddof = 1."""
+    if y.ndim > 1:
+        return y.var(0, ddof=1).sum()
+    S, N = _toplam(y, K), len(y)
+    return (N - S @ S / N) / (N - 1)
+
+
+def _etiketli(rng, R, N, n, parca=PARCA):
+    """argsort(rng.random((R, N)), 1)[:, :n] ile aynı dizinler ve üreteç durumu; ara dizi ≤ parca öğe."""
+    lab = np.empty((R, n), np.intp)
+    adim = max(1, min(R, parca // N))
+    for a in range(0, R, adim):
+        u = rng.random((min(adim, R - a), N))
+        p = np.argpartition(u, n - 1, axis=1)[:, :n] if n < N else np.broadcast_to(np.arange(N), u.shape)
+        lab[a:a + len(u)] = np.take_along_axis(p, np.argsort(np.take_along_axis(u, p, 1), 1), 1)
+    return lab
+
+
+def _topla(x, lab, K):
+    """Σ_j x[lab[r, j]] → (R, K): kodda bincount, yoğunda R parçalı x[lab].sum(1)."""
+    R = len(lab)
+    if x.ndim == 1:
+        k = (x[lab] + (np.arange(R) * K)[:, None]).ravel()
+        return np.bincount(k, minlength=R * K).reshape(R, K).astype(float)
+    adim = _adim(lab.shape[1] * x.shape[1], R)
+    return np.concatenate([x[lab[a:a + adim]].sum(1) for a in range(0, R, adim)])
+
+
+def _yogun(x, lab, K):
+    """x[lab] → (r, n, K); kod tek-sıcak açılır."""
+    if x.ndim > 1:
+        return x[lab]
+    o = np.zeros((*lab.shape, K))
+    np.put_along_axis(o, x[lab][..., None], 1.0, axis=-1)
+    return o
+
+
+def _lam_tek(y, f, lab, sy, sf, K):
+    """Tek madde: λ = Cov(y, f)/Var(f) her tekrarın etiketli n biriminden (sy, sf: etiketli toplamlar). → (R,)"""
+    R, n = lab.shape
+    if y.ndim == 1 and f.ndim == 1:                                       # iki kod: Σ y·f = eşleşme sayısı
+        cov = (y[lab] == f[lab]).sum(1) - (sy * sf).sum(1) / n
+        v = n - (sf * sf).sum(1) / n
+    else:
+        cov, v = np.empty(R), np.empty(R)
+        adim = _adim(n * (f.shape[1] if f.ndim > 1 else K), R)
+        for a in range(0, R, adim):
+            s = slice(a, a + adim)
+            yc = _yogun(y, lab[s], K) - (sy[s] / n)[:, None]
+            fc = _yogun(f, lab[s], K) - (sf[s] / n)[:, None]
+            v[s], cov[s] = (fc * fc).sum((1, 2)), (yc * fc).sum((1, 2))
+    return np.where(v > 0, cov / np.where(v > 0, v, 1), 0.0)
+
+
+def _madde_ist(y, f, K):
+    """Bir madde: σ_yf, σ²_f (iz, ddof = 1) ve yalnız simülasyon MSE'si (f̄−ȳ)² − Var(f−y)/N + Var(f)/N."""
+    N = len(y)
+    if y.ndim > 1:                                                        # yoğun (K = 1): özgün aritmetik
+        syf = ((y - y.mean(0)) * (f - f.mean(0))).sum() / (N - 1)
+        sf2 = f.var(0, ddof=1).sum()
+        return syf, sf2, ((f.mean(0) - y.mean(0)) ** 2).sum() - (f - y).var(0, ddof=1).sum() / N + sf2 / N
+    Sy = _toplam(y, K)
+    if f.ndim == 1:
+        Sf = _toplam(f, K)
+        syf, sf2, f_ort = ((y == f).sum() - Sy @ Sf / N) / (N - 1), (N - Sf @ Sf / N) / (N - 1), Sf / N
+    else:                                                                 # olasılık vektörü: ortalamadan sapma
+        f_ort = f.mean(0)
+        fc = f - f_ort
+        syf, sf2 = (fc[np.arange(N), y].sum() - Sy @ fc.sum(0) / N) / (N - 1), f.var(0, ddof=1).sum()
+    return syf, sf2, ((f_ort - Sy / N) ** 2).sum() - (_s2(y, K) + sf2 - 2 * syf) / N + sf2 / N
+
+
 def _birey_dizileri(veri, sutunlar):
+    """→ Y, Fs, madde, K. cok_sinif: Y kod (U,), Fs[c] kod (U,) ya da olasılık (U, K); diğerleri (U, 1), K = 1."""
     d = veri.df
     if veri.gorev == "cok_sinif":
         kod = {k: i for i, k in enumerate(veri.siniflar)}
         K = len(kod)
-        Y = _onehot(d["gercek"].map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy(int), K)
-        Fs = {}
-        for c in sutunlar:
-            s = d[c]
-            if isinstance(s.iloc[0], np.ndarray):
-                Fs[c] = np.vstack(s.to_numpy()).astype(float)
-            else:
-                Fs[c] = _onehot(s.map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy(int), K)
-        gecerli = Y.sum(1) > 0
+
+        def kodla(s):
+            return s.map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy(int)
+        Y = kodla(d["gercek"])
+        Fs = {c: np.vstack(d[c].to_numpy()).astype(float) if isinstance(d[c].iloc[0], np.ndarray) else kodla(d[c])
+              for c in sutunlar}
+        gecerli = (Y >= 0) & (Y < K)
         for F in Fs.values():
-            gecerli &= np.isfinite(F).all(1) & (F.sum(1) > 0)
+            gecerli &= ((F >= 0) & (F < K)) if F.ndim == 1 else (np.isfinite(F).all(1) & (F.sum(1) > 0))
     else:
+        K = 1
         Y = pd.to_numeric(d["gercek"], errors="coerce").to_numpy(float)[:, None]
         Fs = {c: pd.to_numeric(d[c], errors="coerce").to_numpy(float)[:, None] for c in sutunlar}
         gecerli = np.isfinite(Y[:, 0])
         for F in Fs.values():
             gecerli &= np.isfinite(F[:, 0])
     madde = pd.factorize(d["madde"])[0] if "madde" in d else np.zeros(len(d), int)
-    return Y[gecerli], {c: F[gecerli] for c, F in Fs.items()}, madde[gecerli]
+    if gecerli.all():                                                     # büyük olasılık matrisini kopyalama
+        return Y, Fs, madde, K
+    return Y[gecerli], {c: F[gecerli] for c, F in Fs.items()}, madde[gecerli], K
 
 
 def _birey(veri, sutunlar, n_listesi, R, B, rng, notlar):
-    Y, Fs, madde = _birey_dizileri(veri, sutunlar)
-    M = int(madde.max()) + 1 if len(madde) else 0
-    gruplar = [ix for ix in (np.flatnonzero(madde == m) for m in range(M)) if len(ix) >= 2]
+    Y, Fs, madde, K = _birey_dizileri(veri, sutunlar)
+    sira = np.argsort(madde, kind="stable")
+    gruplar = [ix for ix in np.split(sira, np.cumsum(np.bincount(madde))[:-1]) if len(ix) >= 2] if len(madde) else []
     M = len(gruplar)
     if M == 0:
         return None
     tek = M == 1
     if tek:
         notlar.append("tek madde: λ etiketli n birimden, n0 tekrar yarılarında seçildi, GA tekrarlar üzerinden")
-    # madde istatistikleri: σ², σ_yf (iz, sınıflar üzerinde toplam)
-    s2 = np.array([Y[ix].var(0, ddof=1).sum() for ix in gruplar])
-    syf = {c: np.array([((Y[ix] - Y[ix].mean(0)) * (F[ix] - F[ix].mean(0))).sum() / (len(ix) - 1)
-                        for ix in gruplar]) for c, F in Fs.items()}
-    sf2 = {c: np.array([F[ix].var(0, ddof=1).sum() for ix in gruplar]) for c, F in Fs.items()}
+    # madde istatistikleri: σ², σ_yf, σ²_f (iz, sınıflar üzerinde toplam), yalnız simülasyon MSE'si
+    s2 = np.array([_s2(Y[ix], K) for ix in gruplar])
+    ist = {c: np.array([_madde_ist(Y[ix], F[ix], K) for ix in gruplar]) for c, F in Fs.items()}   # (M, 3)
+    syf = {c: ist[c][:, 0] for c in Fs}
+    sf2 = {c: ist[c][:, 1] for c in Fs}
     Nm = np.array([len(ix) for ix in gruplar], float)
     # λ çapraz uydurma: h yarısı öbür yarının havuzlanmış λ'sını kullanır
     yari_m = rng.permutation(M) % 2
@@ -138,26 +222,21 @@ def _birey(veri, sutunlar, n_listesi, R, B, rng, notlar):
             ix = gruplar[i]
             N = len(ix)
             y = Y[ix]
-            lab = np.argsort(rng.random((R, N)), axis=1)[:, :n]           # (R, n)
-            yl = y[lab]                                                   # (R, n, K)
-            yn = yl.mean(1)
-            teta = (y.sum(0) - yl.sum(1)) / (N - n)                       # kalan birimlerin ortalaması
+            lab = _etiketli(rng, R, N, n)                                 # (R, n)
+            sy = _topla(y, lab, K)
+            yn = sy / n
+            teta = (_toplam(y, K) - sy) / (N - n)                         # kalan birimlerin ortalaması
             duz = s2[i] / (N - n)
             E_kl.append(((yn - teta) ** 2).sum(1) - duz)
             for c, F in Fs.items():
                 f = F[ix]
-                fl = f[lab]
-                fn, fN = fl.mean(1), f.mean(0)
-                if tek:                                                   # λ etiketli örneklemden
-                    yc, fc = yl - yn[:, None], fl - fn[:, None]
-                    v = (fc * fc).sum((1, 2))
-                    l = np.where(v > 0, (yc * fc).sum((1, 2)) / np.where(v > 0, v, 1), 0.0)
-                else:
-                    l = np.full(R, lam[c][yari_m[i]])
+                sf = _topla(f, lab, K)
+                fn, fN = sf / n, _toplam(f, K) / N
+                l = _lam_tek(y, f, lab, sy, sf, K) if tek else np.full(R, lam[c][yari_m[i]])   # tek: etiketliden
                 ppi = yn + l[:, None] * (fN - fn)
                 E_ppi[c].append(((ppi - teta) ** 2).sum(1) - duz + 2 * l * syf[c][i] / N)
-                bay = (1 - w)[:, None, None] * yn + w[:, None, None] * fN  # (G, R, K)
-                E_bay[c].append((((bay - teta) ** 2).sum(2) - duz + 2 * w[:, None] * syf[c][i] / N).T)
+                bay = np.array([(((1 - g) * yn + g * fN - teta) ** 2).sum(1) for g in w])   # (G, R)
+                E_bay[c].append((bay - duz + 2 * w[:, None] * syf[c][i] / N).T)
         if tek:   # birim = tekrar
             a = E_kl[0]
             kume = np.arange(R)
@@ -181,12 +260,9 @@ def _birey(veri, sutunlar, n_listesi, R, B, rng, notlar):
     # yalnız simülasyon: σ²/MSE, MSE = (f̄−ȳ)² − Var(f−y)/N + Var(f)/N
     for c, F in Fs.items():
         if tek:
-            sonuc[c]["yalniz_sim"] = _yalniz_tek(Y[gruplar[0]], F[gruplar[0]], B, rng)
+            sonuc[c]["yalniz_sim"] = _yalniz_tek(Y[gruplar[0]], F[gruplar[0]], B, rng, K)
             continue
-        mse = np.array([((F[ix].mean(0) - Y[ix].mean(0)) ** 2).sum()
-                        - (F[ix] - Y[ix]).var(0, ddof=1).sum() / len(ix) + sf2[c][i] / len(ix)
-                        for i, ix in enumerate(gruplar)])
-        d, lo, hi = _oran_ga(s2, mse, np.arange(M), B, rng)
+        d, lo, hi = _oran_ga(s2, ist[c][:, 2], np.arange(M), B, rng)
         sonuc[c]["yalniz_sim"] = _esdeger(d, lo, hi)
     return sonuc
 
@@ -196,20 +272,45 @@ def _esdeger(d, lo, hi):
     return {"esdeger_n": yuv(d), "alt": yuv(lo), "ust": yuv(hi)}
 
 
-def _yalniz_tek(y, f, B, rng, parca=20):
-    """Tek madde: birim bootstrap'ı (parça parça, bellek sınırlı)."""
-    def es(ix):
-        yy, ff = y[ix], f[ix]                                             # (b, N, K)
-        N = yy.shape[1]
-        s2 = yy.var(1, ddof=1).sum(-1)
-        mse = (((ff.mean(1) - yy.mean(1)) ** 2).sum(-1) - (ff - yy).var(1, ddof=1).sum(-1) / N
-               + ff.var(1, ddof=1).sum(-1) / N)
-        return np.minimum(s2 / np.maximum(mse, s2 / ORAN_TAVAN + 1e-300), ORAN_TAVAN)
+def _yalniz_tek(y, f, B, rng, K=1, parca=20):
+    """Tek madde: birim bootstrap'ı (parça parça, bellek sınırlı). Kodlu y'de tekrar ağırlıklı yeterli
+    istatistikler; (b, N, K) dizi kurulmaz."""
     N = len(y)
+    oran = lambda s2, mse: np.minimum(s2 / np.maximum(mse, s2 / ORAN_TAVAN + 1e-300), ORAN_TAVAN)
+    if y.ndim > 1:                                                        # yoğun (K = 1): özgün aritmetik
+        def es(ix):
+            if len(ix) * N * y.shape[1] > PARCA:
+                adim = _adim(N * y.shape[1], len(ix))
+                return np.concatenate([es(ix[a:a + adim]) for a in range(0, len(ix), adim)])
+            yy, ff = y[ix], f[ix]                                         # (b, N, K)
+            mse = (((ff.mean(1) - yy.mean(1)) ** 2).sum(-1) - (ff - yy).var(1, ddof=1).sum(-1) / N
+                   + ff.var(1, ddof=1).sum(-1) / N)
+            return oran(yy.var(1, ddof=1).sum(-1), mse)
+    else:
+        if f.ndim > 1:                                                    # olasılık vektörü: ortalamadan sapma
+            f_ort = f.mean(0)
+            fc = f - f_ort
+            qf, gf = (fc * fc).sum(1), fc[np.arange(N), y]
+        else:
+            gf = (y == f).astype(float)
+
+        def es(ix):
+            b = len(ix)
+            W = np.bincount((ix + (np.arange(b) * N)[:, None]).ravel(), minlength=b * N).reshape(b, N).astype(float)
+            satir = (np.arange(b) * K)[:, None]
+            Sy = np.bincount((satir + y).ravel(), weights=W.ravel(), minlength=b * K).reshape(b, K)
+            if f.ndim > 1:
+                Sf, ff, ort_f = W @ fc, W @ qf, (W @ fc) / N + f_ort
+            else:
+                Sf = np.bincount((satir + f).ravel(), weights=W.ravel(), minlength=b * K).reshape(b, K)
+                ff, ort_f = N, Sf / N
+            s2 = (N - (Sy * Sy).sum(1) / N) / (N - 1)
+            sf2 = (ff - (Sf * Sf).sum(1) / N) / (N - 1)
+            syf = (W @ gf - (Sy * Sf).sum(1) / N) / (N - 1)
+            return oran(s2, ((ort_f - Sy / N) ** 2).sum(1) - (s2 + sf2 - 2 * syf) / N + sf2 / N)
     d = float(es(np.arange(N)[None])[0])
     o = np.concatenate([es(rng.integers(0, N, (min(parca, B - k), N))) for k in range(0, B, parca)])
     return _esdeger(d, np.percentile(o, 2.5), np.percentile(o, 97.5))
-
 
 # ------------------------------------------------------------------ dağılım görevi
 def _dagilim(veri, sutunlar, n_listesi, R, B, rng, notlar, kontrol):
@@ -305,7 +406,7 @@ def _bedel_ppi(veri, sutunlar, sonuc, n_listesi, tohum, notlar, B_bedel: int = 2
         spec = importlib.util.spec_from_file_location("kanit_bedel", Path(__file__).with_name("bedel.py"))
         bd = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bd)
-    Y, Fs, _ = _birey_dizileri(veri, list(sutunlar))
+    Y, Fs, _, _ = _birey_dizileri(veri, list(sutunlar))
     for c, F in Fs.items():
         satirlar = []
         for n in n_listesi:
