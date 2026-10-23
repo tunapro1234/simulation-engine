@@ -10,6 +10,7 @@ kind: "binary" (P(y=1) out), "multiclass" (probability matrix, columns = ``class
 """
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -43,16 +44,52 @@ def _n(X) -> int:
     return int(X) if np.isscalar(X) else len(X)
 
 
+def _ndim(a) -> int:
+    if a is None:
+        return 0
+    if isinstance(a, pd.DataFrame):
+        return 2
+    if isinstance(a, (pd.Series, pd.Index)):
+        return 1
+    try:
+        return int(np.ndim(a))
+    except ValueError:                       # ragged list
+        return 1
+
+
+def _ncols(a) -> int:
+    return int(np.shape(a)[1]) if _ndim(a) == 2 else 1
+
+
+def _y_first(y, X):
+    """Argument order of ``fit(y, X=None)``. ``methods.transfer.oof_predict`` and sklearn-style callers call
+    ``fit(X, y)``; that is detected when the first argument is 2-D (DataFrame / matrix) and the second 1-D, or the
+    first has more than one column, and turned around. Both 1-D (equal length) is ambiguous: the old order (y first)
+    is kept. A one-column 2-D y (column vector) is flattened."""
+    if _ndim(y) == 2 and (_ndim(X) == 1 or _ncols(y) > 1):
+        if X is None:
+            raise ValueError(f"fit got a {np.shape(y)} table and no y: call fit(y) or fit(X, y)")
+        y, X = X, y
+    if _ndim(y) == 2 and _ncols(y) == 1:
+        y = np.asarray(y, dtype=object)[:, 0]
+    return y, X
+
+
 # ---------------------------------------------------------------- knows nothing
 
 class ConstantBaseline:
     """Same prediction for everyone (intent kit `_sabit`): binary = training rate, multiclass = training class shares,
-    continuous = training median (``stat="mean"`` for the mean). ``predict`` accepts a row count or any sized input."""
+    continuous = training median (``stat="mean"`` for the mean). ``predict`` accepts a row count or any sized input.
+
+    ``fit(y)`` / ``fit(y, X)``; the sklearn order ``fit(X, y)`` (what ``oof_predict`` calls) is detected by shape
+    (first argument 2-D and second 1-D, or first with several columns) and handled. Two 1-D arguments of equal
+    length are read as ``(y, X)``; pass ``y=`` by keyword when in doubt."""
 
     def __init__(self, kind: str = "auto", stat: str = "median"):
         self.kind, self.stat = kind, stat
 
     def fit(self, y, X=None):
+        y, X = _y_first(y, X)
         y = pd.Series(np.asarray(y, dtype=object)).dropna()
         self.kind_ = _check_kind(self.kind, y)
         if self.kind_ == "binary":
@@ -82,9 +119,11 @@ class ConstantBaseline:
 
 class MajorityBaseline:
     """Majority class label (``predict``) and its one-hot (``predict_proba``). Report it next to every accuracy:
-    in the Twin-2K-500 persona task the column median alone scores acc 0.755 (uretim/persona/RAPOR.md, T1 table)."""
+    in the Twin-2K-500 persona task the column median alone scores acc 0.755 (uretim/persona/RAPOR.md, T1 table).
+    ``fit(y)``, ``fit(y, X)`` or ``fit(X, y)``: argument order as in :class:`ConstantBaseline`."""
 
     def fit(self, y, X=None):
+        y, X = _y_first(y, X)
         s = pd.Series(np.asarray(y, dtype=object)).dropna()
         vc = s.value_counts()
         self.label_ = vc.index[0]
@@ -125,7 +164,7 @@ class ItemMarginal:
     def predict(self, df: pd.DataFrame):
         if self.kind_ == "multiclass":
             T = self.table_.reindex(df[self.item_col].to_numpy())
-            M = T.to_numpy(float)
+            M = np.array(T.to_numpy(float))     # writable copy (copy-on-write hands back read-only views)
             bad = np.isnan(M).any(1)
             M[bad] = self.global_
             return M
@@ -149,7 +188,7 @@ class SegmentRate:
             prior = y_tr.value_counts(normalize=True).reindex(self.classes_).fillna(0)
             cnt = pd.crosstab(np.asarray(seg_tr), np.asarray(y_tr)).reindex(columns=self.classes_, fill_value=0)
             sh = (cnt + a * prior.to_numpy()).div(cnt.sum(1) + a, axis=0)
-            out = sh.reindex(pd.Series(seg).to_numpy()).to_numpy(float)
+            out = np.array(sh.reindex(pd.Series(seg).to_numpy()).to_numpy(float))       # writable copy
             bad = np.isnan(out).any(1)
             out[bad] = prior.to_numpy()
             return out
@@ -405,12 +444,21 @@ def _loss(y, p, stat) -> float:
 class MedianConstant:
     """The constant rung of an MAE ladder: training median (default, ``metric="mae"``), mean (``metric="mse"``)
     or quantile ``stat=q``, optionally weighted. ``ConstantBaseline`` already has stat="median"; this one picks
-    the stat from the metric and takes weights. D12 pilot: the median constant beat the mean by +0.0075 zMAE."""
+    the stat from the metric and takes weights. D12 pilot: the median constant beat the mean by +0.0075 zMAE.
+
+    ``fit(y, X=None, weight=None)``; ``fit(X, y)`` (``oof_predict``, sklearn) is detected as in
+    :class:`ConstantBaseline`, and ``sample_weight=`` is an alias of ``weight`` (so ``oof_predict(weight=...)``
+    works)."""
 
     def __init__(self, stat=None, metric: str = "mae"):
         self.stat, self.metric = stat, metric
 
-    def fit(self, y, X=None, weight=None):
+    def fit(self, y, X=None, weight=None, sample_weight=None):
+        if sample_weight is not None:
+            if weight is not None:
+                raise ValueError("pass weight= or sample_weight=, not both")
+            weight = sample_weight
+        y, X = _y_first(y, X)
         self.stat_ = _resolve_stat(self.stat, self.metric)
         v = pd.to_numeric(pd.Series(np.asarray(y, dtype=object)), errors="coerce").to_numpy(float)
         w = None if weight is None else np.asarray(weight, float)
@@ -702,7 +750,7 @@ class PersistenceBaseline:
 
     def predict(self, units) -> np.ndarray:
         u = pd.Series(np.asarray(units, dtype=object))
-        p = u.map(self.values_).to_numpy(float)
+        p = np.array(u.map(self.values_).to_numpy(float))          # writable copy (copy-on-write)
         miss = np.isnan(p)
         if miss.any():
             if self.fill == "zero":
@@ -821,28 +869,35 @@ def _proba_out(model, P, kind):
 
 class LogisticBaseline:
     """One-hot categoricals + standardised numerics -> logistic regression (C=1) or ridge (alpha=1) for continuous
-    targets (intent kit `lineer`). Train rows above ``max_rows`` are subsampled (seed 0)."""
+    targets (intent kit `lineer`). Train rows above ``max_rows`` are subsampled (seed 0).
+
+    ``fit(X, y, sample_weight=None)``: per-row weights go to the final estimator (the scaler stays unweighted) and
+    are subsampled with the rows, so ``oof_predict(weight=...)`` works."""
 
     def __init__(self, kind: str = "auto", categorical: Sequence[str] | None = None, C: float = 1.0,
                  alpha: float = 1.0, max_rows: int = 300_000):
         self.kind, self.categorical, self.C, self.alpha, self.max_rows = kind, categorical, C, alpha, max_rows
 
-    def fit(self, X: pd.DataFrame, y):
+    def fit(self, X: pd.DataFrame, y, sample_weight=None):
         from sklearn.linear_model import LogisticRegression, Ridge
         from sklearn.pipeline import make_pipeline
         X = pd.DataFrame(X)
         y = np.asarray(y)
+        w = _sample_weight(sample_weight, len(X))
         self.kind_ = _check_kind(self.kind, y)
         if len(X) > self.max_rows:
             i = np.random.default_rng(0).choice(len(X), self.max_rows, replace=False)
             X, y = X.iloc[i], y[i]
+            w = None if w is None else w[i]
         self.cat_, self.num_ = _split_columns(X, self.categorical)
         est = Ridge(alpha=self.alpha) if self.kind_ == "continuous" else LogisticRegression(max_iter=2000, C=self.C)
         if self.kind_ == "binary":
             y = y.astype(int)
         elif self.kind_ == "multiclass":
             y = y.astype(str)
-        self.model_ = make_pipeline(_preprocessor(self.cat_, self.num_), est).fit(X[self.cat_ + self.num_], y)
+        pipe = make_pipeline(_preprocessor(self.cat_, self.num_), est)
+        kw = {} if w is None else {f"{pipe.steps[-1][0]}__sample_weight": w}
+        self.model_ = pipe.fit(X[self.cat_ + self.num_], y, **kw)
         if self.kind_ == "multiclass":
             self.classes_ = list(self.model_.classes_)
         return self
@@ -857,6 +912,17 @@ class LogisticBaseline:
         return self.predict_proba(X)
 
 
+def _sample_weight(w, n: int):
+    if w is None:
+        return None
+    w = np.array(w, dtype=float).reshape(-1)
+    if len(w) != n:
+        raise ValueError(f"sample_weight has {len(w)} values for {n} rows")
+    if not np.isfinite(w).all() or (w < 0).any():
+        raise ValueError("sample_weight must be finite and >= 0")
+    return w
+
+
 def _eval_kw(Model, Xv, yv) -> dict:
     """Validation-set keywords for LightGBM's sklearn fit: eval_X/eval_y on versions that have them (4.7+
     deprecates eval_set), else eval_set."""
@@ -866,13 +932,84 @@ def _eval_kw(Model, Xv, yv) -> dict:
     return {"eval_set": [(Xv, yv)]}
 
 
+RARE_SHARE = 0.02           # LightGBMBaseline: minority class share below this with default min_child_samples warns
+_MIN_CHILD_KEYS = ("min_child_samples", "min_data_in_leaf", "min_data_per_leaf", "min_data")
+
+
+def _reweighting(params: dict) -> str | None:
+    """The class-reweighting parameter that is set (LightGBM names and aliases), or None."""
+    spw = params.get("scale_pos_weight")
+    if spw is not None and float(spw) != 1.0:
+        return f"scale_pos_weight={spw}"
+    for k in ("is_unbalance", "unbalance", "unbalanced_sets"):
+        if params.get(k):
+            return f"{k}=True"
+    if params.get("class_weight") is not None:
+        return f"class_weight={params['class_weight']!r}"
+    return None
+
+
+def _eval_overlap(X: pd.DataFrame, Xv: pd.DataFrame, labels: bool = True) -> str | None:
+    """Why ``eval_set`` looks like it holds training rows, or None. Row labels are compared when both came as
+    pandas objects (``labels``) and not both have a fresh 0..n-1 index (no information); otherwise whole feature
+    rows are hashed, if the training rows are mostly distinct (repeated rows, e.g. all-categorical features, make
+    identical rows normal)."""
+    def fresh(ix):
+        return isinstance(ix, pd.RangeIndex) and ix.start == 0 and ix.step == 1
+    if not len(X) or not len(Xv):
+        return None
+    if labels and not (fresh(X.index) and fresh(Xv.index)):
+        k = int(Xv.index.isin(X.index).sum())
+        return f"shares {k} of its {len(Xv)} row labels (index) with the training rows" if k else None
+    cols = [c for c in X.columns if c in Xv.columns]
+    if not cols:
+        return None
+    h = pd.util.hash_pandas_object(X[cols], index=False).to_numpy()
+    if len(np.unique(h)) < 0.9 * len(h):
+        return None
+    k = int(np.isin(pd.util.hash_pandas_object(Xv[cols], index=False).to_numpy(), h).sum())
+    if k and k >= 0.01 * len(Xv):
+        return f"has {k} of its {len(Xv)} rows identical to training rows (all {len(cols)} features)"
+    return None
+
+
 class LightGBMBaseline:
     """LightGBM (lazily imported) with the intent kit defaults: 2000 trees max, lr 0.05, 31 leaves,
     min_child_samples 50, subsample/colsample 0.8, early stopping 100 on ``eval_set`` when given (else 300 trees).
-    Object/category columns become pandas categoricals with the training categories."""
+    Object/category columns become pandas categoricals with the training categories.
 
-    def __init__(self, kind: str = "auto", seed: int = 0, objective: str | None = None, **params):
-        self.kind, self.seed, self.objective, self.params = kind, seed, objective, params
+    ``fit(X, y, eval_set=None, sample_weight=None, calibrate_set=None)``; ``sample_weight`` goes to LightGBM (so
+    ``oof_predict(weight=...)`` works). Warnings (``UserWarning``), each a silent failure seen in rehearsals:
+
+    - binary minority class below ``RARE_SHARE`` (2%) with min_child_samples left at 50: leaves fit a handful of
+      positives and the trees over-fit (D13: ~1% positives, ~6 min per fit, over-fit). Set a larger
+      ``min_child_samples`` (200+), ``learning_rate=0.02`` and L2 (``reg_lambda=5``), or start from LogisticBaseline.
+    - ``eval_set`` rows that share row labels (index) with the training rows, or (both indexes 0..n-1) are
+      identical feature rows: early stopping then follows training rows and the eval score is optimistic.
+    - ``scale_pos_weight`` / ``is_unbalance`` / ``class_weight`` set: they reweight the classes, so ``predict_proba``
+      is a ranking score, not a probability (D13: no error, the mean prediction moved far above the rate). The
+      warning gives the mean in-sample prediction vs the training rate.
+
+    ``calibrate="platt"`` (binary only) fits ``methods.hybrid.BinaryCalibrator(method="platt")`` on the raw
+    predictions for ``calibrate_set=(X, y)``, else ``eval_set`` (which early stopping also used, mildly optimistic);
+    neither given -> ``ValueError``. ``predict`` / ``predict_proba`` then return calibrated probabilities,
+    ``predict_proba(X, raw=True)`` the uncalibrated ones. Without it, calibrate held-out predictions yourself with
+    ``BinaryCalibrator``.
+
+    Usage::
+
+        m = LightGBMBaseline(scale_pos_weight=20, calibrate="platt", min_child_samples=300)
+        m.fit(X_tr, y_tr, eval_set=(X_dev, y_dev))
+        p = m.predict_proba(X_test)                 # calibrated; raw=True for the reweighted score
+    """
+
+    CALIBRATE = (None, "platt")
+
+    def __init__(self, kind: str = "auto", seed: int = 0, objective: str | None = None, calibrate: str | None = None,
+                 **params):
+        if calibrate not in self.CALIBRATE:
+            raise ValueError(f"calibrate must be one of {self.CALIBRATE}, got {calibrate!r}")
+        self.kind, self.seed, self.objective, self.calibrate, self.params = kind, seed, objective, calibrate, params
 
     def _frame(self, X):
         X = pd.DataFrame(X).copy()
@@ -880,11 +1017,31 @@ class LightGBMBaseline:
             X[c] = pd.Categorical(X[c].astype(str), categories=self.categories_[c])
         return X[self.columns_]
 
-    def fit(self, X, y, eval_set: tuple | None = None):
+    def _warn_rare(self, y):
+        if self.kind_ != "binary" or not len(y) or any(k in self.params for k in _MIN_CHILD_KEYS):
+            return
+        rate = float(np.mean(y))
+        share, name = (rate, "positive") if rate <= 0.5 else (1 - rate, "negative")
+        if 0 < share < RARE_SHARE:
+            k = int(round(share * len(y)))
+            warnings.warn(f"LightGBMBaseline: {name} share {share:.2%} ({k} of {len(y)} rows) with the default "
+                          "min_child_samples=50: leaves fit a few rare rows and the trees over-fit (D13: ~1% "
+                          "positives, ~6 min per fit). Try min_child_samples=200+ (a leaf should hold several rare "
+                          "rows), learning_rate=0.02, reg_lambda=5 (L2), or LogisticBaseline first",
+                          UserWarning, stacklevel=3)
+
+    def fit(self, X, y, eval_set: tuple | None = None, sample_weight=None, calibrate_set: tuple | None = None):
         lgb = require_lightgbm()
+        labeled = isinstance(X, (pd.DataFrame, pd.Series))
         X = pd.DataFrame(X)
         y = np.asarray(y)
+        w = _sample_weight(sample_weight, len(X))
         self.kind_ = _check_kind(self.kind, y)
+        cal_set = calibrate_set if calibrate_set is not None else eval_set
+        if self.calibrate and self.kind_ != "binary":
+            raise ValueError(f"calibrate={self.calibrate!r} is for a binary target, this one is {self.kind_}")
+        if self.calibrate and cal_set is None:
+            raise ValueError(f"calibrate={self.calibrate!r} needs held-out rows: pass eval_set= or calibrate_set=")
         self.columns_ = list(X.columns)
         self.cat_ = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
         self.categories_ = {c: sorted(X[c].astype(str).unique()) for c in self.cat_}
@@ -899,19 +1056,41 @@ class LightGBMBaseline:
             y = y.astype(str)
         elif self.kind_ == "binary":
             y = y.astype(int)
-        kw = {}
+        self._warn_rare(y)
+        kw = {} if w is None else {"sample_weight": w}
         if eval_set is not None:
+            why = _eval_overlap(X, pd.DataFrame(eval_set[0]),
+                                labels=labeled and isinstance(eval_set[0], (pd.DataFrame, pd.Series)))
+            if why:
+                warnings.warn(f"LightGBMBaseline: eval_set {why}; early stopping then tracks rows the trees were "
+                              "fit on (stops late) and the eval score is optimistic. Split by unit / time first",
+                              UserWarning, stacklevel=2)
             yv = np.asarray(eval_set[1])
             yv = yv.astype(str) if self.kind_ == "multiclass" else yv
-            kw = _eval_kw(Model, self._frame(eval_set[0]), yv)
+            kw.update(_eval_kw(Model, self._frame(eval_set[0]), yv))
             kw["callbacks"] = [lgb.early_stopping(100, verbose=False)]
         self.model_ = Model(**prm).fit(self._frame(X), y, **kw)
         if self.kind_ == "multiclass":
             self.classes_ = list(self.model_.classes_)
+        self.calibrator_ = None
+        rew = _reweighting(prm) if self.kind_ == "binary" else None
+        if self.calibrate:
+            from .hybrid import BinaryCalibrator
+            yc = np.asarray(cal_set[1]).astype(int)
+            self.calibrator_ = BinaryCalibrator(method=self.calibrate).fit(self.predict_proba(cal_set[0], raw=True),
+                                                                           yc)
+        elif rew:
+            m = float(self.predict_proba(X, raw=True).mean())
+            warnings.warn(f"LightGBMBaseline: {rew} reweights the classes, so predict_proba is not calibrated (mean "
+                          f"prediction on the training rows {m:.3f} vs training rate {float(np.mean(y)):.3f}); use it "
+                          "as a ranking score, or pass calibrate='platt' with eval_set= / calibrate_set= (or fit "
+                          "methods.hybrid.BinaryCalibrator on held-out predictions)", UserWarning, stacklevel=2)
         return self
 
-    def predict_proba(self, X):
-        return _proba_out(self.model_, self.model_.predict_proba(self._frame(X)), self.kind_)
+    def predict_proba(self, X, raw: bool = False):
+        p = _proba_out(self.model_, self.model_.predict_proba(self._frame(X)), self.kind_)
+        cal = getattr(self, "calibrator_", None)
+        return p if raw or cal is None else cal.predict(p)
 
     def predict(self, X):
         if self.kind_ == "continuous":
