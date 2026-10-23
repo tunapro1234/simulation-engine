@@ -246,5 +246,93 @@ class MinEffectTest(unittest.TestCase):
             api.evaluate(self._small_gain(), "t", ours="ours", min_effect=-1, **FAST)
 
 
+class ReviewW9Test(unittest.TestCase):
+    """Adversarial review of the five fixes above."""
+
+    def _uneven(self, seed=0):
+        """Continuous rows; persons with many rows predict well, persons with few predict badly."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        for k in range(30):
+            for _ in range(2 + 3 * k):
+                y = rng.normal()
+                rows.append({"person": f"p{k}", "truth": y, "pred_a": y + rng.normal(0, 0.2 if k > 20 else 2.0),
+                             "pred_b": rng.normal()})
+        return pd.DataFrame(rows)
+
+    def test_unit_mean_pooled_primary_is_flagged(self):
+        # continuous default primary is Pearson (pooled, unweighted): unit_mean used to return the plain row value
+        # with "level: unit mean" on the card
+        df = self._uneven()
+        plain = _quiet(api.evaluate, df, "t", ours="a", **FAST)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            um = api.evaluate(df, "t", ours="a", aggregate_by="person", aggregate="unit_mean", **FAST)
+        self.assertEqual(api.summary(um)["ours"]["value"], api.summary(plain)["ours"]["value"])
+        self.assertEqual(um["toplama"]["pooled_primary"], "pearson")
+        self.assertTrue(any("does not apply to the primary metric pearson" in str(x.message) for x in w))
+        md = api.card_markdown(um, lang="en")
+        self.assertIn("pearson is pooled, NOT a unit mean", md)
+        self.assertNotIn("level: unit mean", md)
+        self.assertNotRegex(md.split("pooled metrics take no row weights")[0].rsplit("\n", 1)[-1], r"[çğıöşü]")
+        mae = _quiet(api.evaluate, df, "t", ours="a", primary="mae", aggregate_by="person", aggregate="unit_mean",
+                     **FAST)
+        self.assertNotIn("pooled_primary", mae["toplama"])
+        self.assertIn("level: unit mean", api.card_markdown(mae, lang="en"))
+
+    def test_unit_mean_imbalanced_binary_default_flagged(self):
+        rng = np.random.default_rng(3)
+        rows = []
+        for k in range(30):
+            for _ in range(2 + 2 * k):
+                y = int(rng.random() < 0.85)
+                rows.append({"person": f"p{k}", "truth": y, "pred_a": y if rng.random() < 0.5 + k / 60 else 1 - y,
+                             "pred_b": 1})
+        rep = _quiet(api.evaluate, pd.DataFrame(rows), "t", ours="a", aggregate_by="person", aggregate="unit_mean",
+                     **FAST)
+        self.assertEqual(rep["toplama"].get("pooled_primary"), "macro_f1")
+
+    def test_paired_diff_unit_mean_and_unknown_aggregate(self):
+        df = _persons()
+        with self.assertRaises(ValueError):
+            api.paired_diff(df, "a", "b", aggregate_by="person", aggregate="median", B=50)
+        with self.assertRaises(ValueError):
+            api.paired_diff(df, "a", "b", aggregate="unit_mean", B=50)
+        rep = _quiet(api.evaluate, df, "t", ours="a", primary="accuracy", aggregate_by="person",
+                     aggregate="unit_mean", compare=[("a", "b")], **FAST)
+        r = next(c for c in rep["kayitli_karsilastirmalar"] if c.get("metrik") == "dogruluk")
+        um = api.paired_diff(df, "a", "b", metric="accuracy", aggregate_by="person", aggregate="unit_mean", B=300)
+        mean = api.paired_diff(df, "a", "b", aggregate_by="person", B=300)
+        self.assertAlmostEqual(um["diff"], r["fark"], places=10)
+        self.assertAlmostEqual(um["lo"], r["alt"], places=9)
+        self.assertEqual(um["metric"], "accuracy")
+        self.assertNotEqual(mean["metric"], "accuracy")      # the group mean turns the task continuous
+
+    def test_dropped_units_split_by_cause(self):
+        df = _persons(n=30, train_only=4)
+        df.loc[(df["person"] == "p3") & (df["split"] == "test"), "pred_a"] = np.nan
+        rep = _quiet(api.evaluate, df, "t", ours="a", aggregate_by="person", **FAST)
+        a = rep["toplama"]
+        self.assertEqual((a["n_dropped"], a["n_dropped_no_test_row"], a["n_dropped_missing"]), (5, 4, 1))
+
+    def test_en_text_keeps_numbers_without_turkish_words(self):
+        out = api._en_text("pearson: ours − b = -0.127 [-0.257, 0.022], p=0.200 · berabere: eşleşik GA 0'ı "
+                           "içeriyor (tied: paired CI includes 0)")
+        self.assertNotRegex(out, r"[çğıöşüÇĞİÖŞÜ]")
+        for x in ("-0.127", "-0.257", "0.022", "p=0.200", "tied: paired CI includes 0"):
+            self.assertIn(x, out)
+
+    def test_constant_prediction_detail_english(self):
+        df = _repeated_items(n_items=12, n_blocks=12)
+        df["pred_flat"] = 0.0
+        df.loc[df["item"] == "q0", "pred_ours"] = 1.0
+        rep = _quiet(api.evaluate, df, "t", ours="ours", **FAST)
+        md = api.card_markdown(rep, lang="en")
+        rows = [ln for ln in md.splitlines() if ln.startswith("| constant prediction")]
+        self.assertTrue(rows, md)
+        for ln in rows:
+            self.assertNotRegex(ln, r"[çğıöşüÇĞİÖŞÜ]")
+
+
 if __name__ == "__main__":
     unittest.main()

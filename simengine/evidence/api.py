@@ -450,8 +450,11 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         equal-weighted mean of the units (D9 #3b, per-person accuracy); the task is kept (binary stays binary).
         Rank / correlation metrics are one weighted sample value. Every aggregate_by mode counts the units with no
         scored row (no test-split row, truth or predictions missing): `report["toplama"]` n_units, n_units_scored,
-        n_dropped, n_rows_dropped; when n_dropped > 0 a UserWarning, a limit line and the card meta say
+        n_dropped, n_rows_dropped, n_dropped_no_test_row (train-only units), n_dropped_missing (test rows without
+        truth / predictions); when n_dropped > 0 a UserWarning, a limit line and the card meta say
         "k of N units dropped" (D9 #4d: 15 persons had no DEV rows and were dropped silently).
+        A pooled primary (Pearson, Spearman, AUC, macro-F1, ECE: no row weights) is not a unit mean: unit_mean then
+        warns, adds a limit line, sets `report["toplama"]["pooled_primary"]` and the card says "NOT a unit mean".
     ci: "percentile" (default) or "basic" (2*theta - bootstrap quantiles) for column, ladder, headline and paired
         CIs. When the point estimate falls outside the percentile CI (possible for ratio/aggregate metrics) a warning
         is raised and the card gets an audit row and a flag.
@@ -635,9 +638,10 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         toplama.update(dus)
         if dus.get("n_dropped"):
             n, N, r = dus["n_dropped"], dus["n_units"], dus["n_rows_dropped"]
-            warnings.warn(f"evaluate: aggregate_by={aggregate_by!r}: {n} of {N} units dropped (no scored row: no test "
-                          f"split row, or truth / predictions missing; {r} input rows); the metric covers the other "
-                          f"{N - n} units", UserWarning, stacklevel=2)
+            why = f"{dus['n_dropped_no_test_row']} with no test-split row, {dus['n_dropped_missing']} with truth / " \
+                  "predictions missing"
+            warnings.warn(f"evaluate: aggregate_by={aggregate_by!r}: {n} of {N} units dropped (no scored row: {why}; "
+                          f"{r} input rows); the metric covers the other {N - n} units", UserWarning, stacklevel=2)
             limits = list(limits or []) + [
                 f"aggregate_by={aggregate_by}: {N} birimden {n} tanesinin değerlendirilen satırı yok, düşürüldü "
                 f"({r} girdi satırı) ({n} of {N} units dropped by aggregate_by={aggregate_by}: no scored row, "
@@ -676,6 +680,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         rep["min_effect"] = min_effect
     if toplama:
         rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
+        if aggregate == UNIT_MEAN:
+            _unit_mean_pooled_primary(rep, aggregate_by, primary)
     if kume is not None:
         rep["kume_sutunu"] = kume
     if prereg_texts:
@@ -1114,8 +1120,15 @@ def _dropped_units(rows: pd.DataFrame, scored: pd.DataFrame, col: str, methods) 
     n_units = int(units.nunique(dropna=False))
     lost = ~units.isin(keep).to_numpy()
     n_drop = int(units[lost].nunique(dropna=False))
+    # split of the dropped units: no test-split row at all (train-only, e.g. D9 persons without DEV rows, or the
+    # training weeks of a forecast frame) vs test rows whose truth / predictions are missing
+    n_no_test = 0
+    if "bolum" in rows.columns and n_drop:
+        test = set(units[rows["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()].tolist())
+        n_no_test = int(units[lost & ~units.isin(test).to_numpy()].nunique(dropna=False))
     return {"n_units": n_units, "n_units_scored": n_units - n_drop, "n_dropped": n_drop,
-            "n_rows_dropped": int(lost.sum())}
+            "n_rows_dropped": int(lost.sum()), "n_dropped_no_test_row": n_no_test,
+            "n_dropped_missing": n_drop - n_no_test}
 
 
 def _unit_mean(d: pd.DataFrame, by: str, task: str | None, methods) -> tuple[pd.DataFrame, dict]:
@@ -1139,14 +1152,44 @@ def _unit_mean(d: pd.DataFrame, by: str, task: str | None, methods) -> tuple[pd.
     n_units = int(d.loc[ok, col].nunique())
     note = (f"Birim ortalaması (aggregate_by={by}, aggregate='unit_mean'): {int(ok.sum())} değerlendirme satırında "
             f"satır metriği önce her birimin içinde, sonra {n_units} birim eşit ağırlıkla ortalandı (satır ağırlığı "
-            "1/n_birim); bootstrap birimler üzerinden. Sıra/korelasyon metrikleri (AUC, Spearman) birim ortalaması "
-            "değil, bu ağırlıklarla tek örneklem değeridir "
+            "1/n_birim); bootstrap birimler üzerinden. Toplu metrikler (Pearson, Spearman, AUC, macro-F1, ECE) ağırlık "
+            "almaz: birim ortalaması değil, bütün satırların tek değeridir "
             f"(unit mean, aggregate_by={by}: a per-row metric averaged within each of {n_units} units over "
-            f"{int(ok.sum())} scored rows, then across units with equal weight; bootstrap over units; rank and "
-            "correlation metrics are one weighted sample value, not a mean of units)")
+            f"{int(ok.sum())} scored rows, then across units with equal weight, row weight 1/n_unit; bootstrap over "
+            "units; pooled metrics "
+            "such as Pearson, Spearman, AUC, macro-F1 and ECE take no weights: one value over all rows, not a mean of "
+            "units)")
     info = {"by": by, "column": col, "n_rows": int(len(d)), "n_groups": n_units, "n_eval_rows": int(ok.sum()),
             "aggregate": UNIT_MEAN, "note": note}
     return d, info
+
+
+def _unit_mean_pooled_primary(rep: dict, by: str, primary: str | None) -> None:
+    """aggregate="unit_mean" weights rows 1/n_unit, but pooled ("toplu") metrics take no weights: a pooled primary
+    (continuous default Pearson; binary macro-F1 picked for class imbalance) left the headline equal to the plain
+    row-level value with no sign on the card. Flags it: toplama["pooled_primary"], a UserWarning and a limit line."""
+    met = rep.get("birincil")
+    gorev = rep.get("gorev")
+    if not met or not gorev or not rep.get("sonuclar"):
+        return
+    try:
+        fam = _metrik.aile(gorev, True, True, True, True, True)
+    except ValueError:
+        return
+    M = next((m for m in fam if m.ad == met), None)
+    if M is None or M.tur != "toplu":
+        return
+    en = METRIC_TO_ENGLISH.get(met, met)
+    picked = "picked by default" if primary is None else "passed as primary"
+    msg = (f"aggregate='unit_mean': birincil metrik {en} toplu bir metrik, ağırlık almaz; manşet birim ortalaması "
+           f"değil, satır düzeyindeki değerdir (aggregate='unit_mean' with aggregate_by={by} does not apply to the "
+           f"primary metric {en}, {picked}: pooled metrics take no row weights, so the headline is the row-level "
+           "value; pass a per-row primary such as accuracy, brier, mae or rmse for a mean of units)")
+    warnings.warn(f"evaluate: {msg}", UserWarning, stacklevel=3)
+    rep["toplama"]["pooled_primary"] = en
+    rep["sinirlar"] = list(rep.get("sinirlar") or []) + [msg]
+    if isinstance(rep.get("kanit_kart"), dict):
+        rep["kanit_kart"]["yanilgi"] = list(rep["kanit_kart"].get("yanilgi") or []) + [msg]
 
 
 def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0,
@@ -1722,6 +1765,13 @@ _PHRASES_EN = [
     (r"\bkarıştırılmış\b", "shuffled"), (r"− marjinal\b", "− marginal"), (r"'bizim'", "'ours'"), (r"\bbizim\b", "ours"),
     (r" farkı ", " difference "),
 ]
+_PHRASES_EN += [   # constant-prediction audit detail (denetim): its nested-bracket tail defeats the fallback
+    (r"(\d+) madde sabit tahmin \(sd 0\), (\d+)/(\d+) maddede sıra/korelasyon metriği tanımsız",
+     r"\1 items with a constant prediction (sd 0), rank/correlation metric undefined in \2/\3 items"),
+    (r" · NaN maddeler madde ortalamasından \(madde_ici_kor, madde başına Spearman\) sessizce düşer "
+     r"\(constant prediction: rank metrics undefined \(\d+ items\); NaN items drop out of per-item means\)",
+     r" · NaN items drop out of per-item means (within-item correlation, per-item Spearman) silently"),
+]
 _PHRASES_EN = [(re.compile(p), r) for p, r in _PHRASES_EN]
 _TR_LETTERS = re.compile(r"[çğıöşüÇĞİÖŞÜ]")
 _TAIL_EN = re.compile(r"^(.*\S)\s+\(([^()]*)\)\.?$", re.S)
@@ -1780,6 +1830,22 @@ def _check_en(name) -> str:
     return name
 
 
+def _en_tail_keep_numbers(tr: str, en: str) -> str:
+    """English part of a "Turkish (English)" text without losing numbers only the Turkish part has (W8). Turkish
+    decimal commas count as points. Language-neutral " · " segments of the Turkish part (no Turkish letters, e.g.
+    "mae: ours − b = -0.12 [-0.25, 0.02], p=0.200") are kept before the English part; numbers still missing follow
+    in brackets. The Turkish words themselves never reach the English view (the W8 fix first bracketed the whole
+    Turkish part: "tied: paired CI includes 0 [... · berabere: eşleşik GA 0'ı içeriyor]")."""
+    nums = lambda x: _NUM_RE.findall(re.sub(r"(?<=\d),(?=\d)", ".", x))
+    if not set(nums(tr)) - set(nums(en)):
+        return en
+    keep = [g for g in tr.split(" · ") if not _TR_LETTERS.search(g)]
+    out = " · ".join(keep + [en])
+    have = set(nums(out))
+    lost = list(dict.fromkeys(x for x in nums(tr) if x not in have))
+    return out + (f" [{', '.join(lost)}]" if lost else "")
+
+
 def _en_text(s) -> str:
     """Free research text (flag, note, audit detail, limit, badge reason) -> English where a table covers it.
     Dot decimals and pred_ names always; a sentence written as "Turkish (English)" falls back to its English part;
@@ -1798,9 +1864,7 @@ def _en_text(s) -> str:
             t = t.replace(tr, en)
     m = _TAIL_EN.match(t)
     if m and _TR_LETTERS.search(m.group(1)) and not _TR_LETTERS.search(m.group(2)) and len(m.group(2).split()) >= 3:
-        # numbers only in the Turkish part would be lost (W8): then the Turkish part follows in brackets
-        lost = set(_NUM_RE.findall(m.group(1))) - set(_NUM_RE.findall(m.group(2)))
-        t = m.group(2) + (f" [{m.group(1)}]" if lost else "")
+        t = _en_tail_keep_numbers(m.group(1), m.group(2))
     t = re.sub(r"(?<![\w%])%(\d+(?:\.\d+)?)", r"\1%", t)
     return _METRIC_RE.sub(lambda q: METRIC_TO_ENGLISH[q.group(1)], _names_en(t))
 
@@ -2239,8 +2303,10 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         meta += f" · source: {_md(k.get('kaynak'))}"
     if s.get("aggregate"):
         a = s["aggregate"]
-        meta += (f" · level: unit mean (aggregate_by={a.get('by')}: metric within each of {a.get('n_groups')} units, "
-                 "then their mean)" if a.get("aggregate") == UNIT_MEAN else
+        meta += ((f" · level: rows, unit-clustered (aggregate_by={a.get('by')}: {a.get('n_groups')} units; "
+                  f"{a['pooled_primary']} is pooled, NOT a unit mean)" if a.get("pooled_primary") else
+                  f" · level: unit mean (aggregate_by={a.get('by')}: metric within each of {a.get('n_groups')} units, "
+                  "then their mean)") if a.get("aggregate") == UNIT_MEAN else
                  f" · level: group (aggregate_by={a.get('by')}: {a.get('n_rows')} rows -> {a.get('n_groups')} groups)")
         if a.get("n_dropped"):
             meta += f" · {a['n_dropped']} of {a['n_units']} units dropped (no scored row)"
@@ -2554,7 +2620,10 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
         group > item > row; with aggregate_by it must be constant within each aggregate group). offset_col: as in
         `evaluate`, subtracted before aggregation. All percentile CIs use B resamples for every metric type.
     metric="wmape" / "bias" work on continuous (and task="forecast") frames: numerator and denominator are resampled
-        together. aggregate="sum": sum per aggregate_by group instead of the mean. ci="basic": 2*diff - quantiles.
+        together. aggregate="sum": sum per aggregate_by group instead of the mean; aggregate="unit_mean": rows weighted
+        1/n_unit and units as clusters, as `evaluate(aggregate="unit_mean")` (an unknown value raises; "unit_mean"
+        used to fall through to the group mean silently). group= is the counterpart of `evaluate(cluster=)`.
+        ci="basic": 2*diff - quantiles.
     block_col: the two-way block bootstrap of `evaluate(block_col=)` (blocks × clusters resampled independently,
         same default: off), so a pre-registered paired decision does not flip with the bootstrap type (D7 #9:
         evaluate(block_col="origin") gave [-0.059, +0.015], paired_diff without blocks [-0.041, -0.003]). With
@@ -2565,6 +2634,10 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
     diff favours a."""
     if isinstance(frame_or_report, dict):
         return _paired_from_report(frame_or_report, a, b, metric, block_col)
+    if aggregate not in AGGREGATES + (UNIT_MEAN,):
+        raise ValueError(f"aggregate must be one of {AGGREGATES + (UNIT_MEAN,)}, not {aggregate!r}")
+    if aggregate == UNIT_MEAN and aggregate_by is None:
+        raise ValueError("aggregate='unit_mean' needs aggregate_by= (the unit column, e.g. the person)")
     d = to_internal(frame_or_report)
     blok = None
     if block_col is not None:
@@ -2589,8 +2662,11 @@ def paired_diff(frame_or_report, a: str, b: str | None, *, metric: str | None = 
             if (d.groupby(col, dropna=False)[gc].nunique(dropna=False) > 1).any():
                 raise ValueError(f"group {group!r} must be constant within each aggregate_by={aggregate_by!r} group")
             cmap = d.groupby(col, dropna=False)[gc].first()
-        d, _ = _aggregate(d, aggregate_by, task_i, how=aggregate, keep={blok: "block_col"} if blok else ())
-        task_i = "surekli"
+        if aggregate == UNIT_MEAN:
+            d, _ = _unit_mean(d, aggregate_by, task_i, None)     # rows stay rows: the task is kept
+        else:
+            d, _ = _aggregate(d, aggregate_by, task_i, how=aggregate, keep={blok: "block_col"} if blok else ())
+            task_i = "surekli"
         if cmap is not None:
             d["grup"] = d[col].map(cmap).astype(str)
     elif gc is not None and gc != "grup":
