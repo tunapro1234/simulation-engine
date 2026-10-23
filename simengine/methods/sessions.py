@@ -20,7 +20,8 @@ numeric one pass numbers in the column's unit, or set ``time_unit="ms"`` (or "s"
     p = rescale_to_rates(p_dev, dev["segment"], train.groupby("segment")["y"].mean())   # label-free
     # dev["split"] = "test" (train: "train"), read by evaluate; evaluate wants `truth`: y_col="truth" or rename y
     lab = cutoff_windows(ev, cuts, "21D", label={"buy": "transaction", "cart": "addtocart"}, ...)  # 2 labels
-    test = cutoff_windows(sessionize(pd.concat([log, test_prefix_events]), ...), [test_start], "21D", label=None, ...)
+    test = cutoff_windows(sessionize(pd.concat([log, test_prefix_events]), ...), [test_start], "21D", label=None,
+                          select="all", ...)                    # "all": a visitor's every test session, not the first
     test = prefix_features(test, item_col="item")            # window popularity of the prefix items, hour, weekday
 
 Trap (D13 #8): 21-day windows every 7 days overlap, so the same session lands in training rows and in an
@@ -155,7 +156,8 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
     ``label={"buy": "transaction", "cart": "addtocart"}``: one label column per entry (a kind or a callable) in one
     pass (``y_col`` unused). ``label=None``: unlabeled feature rows, e.g. test prefixes whose future is not in the
     log (no label column, no censoring warning): add the prefix events to the log, sessionize, then
-    ``cutoff_windows(ev, [test_start], horizon, label=None, ...)``.
+    ``cutoff_windows(ev, [test_start], horizon, label=None, select="all", ...)`` (the default select keeps only a
+    visitor's first test session).
     ``features(history, rows, T)`` adds columns; ``history`` holds only events with time < T.
 
     ``eval_gap`` (a duration, "0D" = adjacent): returns ``(train, eval)``. eval = rows of the latest cutoff Te;
@@ -237,7 +239,8 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
         sub = sub[sub["session_id"].isin(ok)]
         pre, rest = sub[sub["seq"] < L], sub[sub["seq"] >= L]
         sids = pre["session_id"].to_numpy()[::L]
-        rows = pd.DataFrame({"cutoff": [T] * len(sids), user_col: pre[user_col].to_numpy()[::L], "session_id": sids,
+        cut = pd.Series([T] * len(sids), dtype=pd.Series([T]).dtype)       # empty window: keep the cutoff dtype
+        rows = pd.DataFrame({"cutoff": cut, user_col: pre[user_col].to_numpy()[::L], "session_id": sids,
                              "session_start": pre["session_start"].to_numpy()[::L]})
         for k in range(L):
             for col in (time_col, kind_col, item_col):
@@ -313,7 +316,8 @@ def prefix_features(rows: pd.DataFrame, *, item_col: str | None = None, time_col
         share = long.groupby(["c", "i"], sort=False).size().div(cut.value_counts(), level="c")
         for col in cols:
             out[f"prefix_pop_{col}"] = share.reindex(pd.MultiIndex.from_arrays([cut, rows[col]])).to_numpy()
-        out["prefix_same_item"] = rows[cols].nunique(axis=1).eq(1).astype(np.int64).to_numpy()
+        same = rows[cols].eq(rows[cols[0]], axis=0).all(axis=1)              # a missing item is never "same"
+        out["prefix_same_item"] = same.astype(np.int64).to_numpy()
     out["prefix_hour"] = (t0.dt.hour + t0.dt.minute / 60 + t0.dt.second / 3600).to_numpy()
     out["prefix_weekday"] = t0.dt.weekday.astype(np.int64).to_numpy()
     out["prefix_days_after_cutoff"] = ((t0 - cut) / pd.Timedelta("1D")).to_numpy()

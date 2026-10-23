@@ -171,6 +171,29 @@ class TestPrefixFeatures(_Base):
         self.assertIn("prefix_hour", f.columns)
         self.assertNotIn("prefix_same_item", f.columns)
 
+    def test_empty_windows(self):
+        # review: a window with no session gave a float64 cutoff column and prefix_features raised on datetime - float
+        far = self.ev["time"].max() + pd.Timedelta("400D")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for lab in (None, "transaction", {"buy": "transaction", "n": len}):
+                r = cutoff_windows(self.ev, [far], "21D", label=lab, kind_col="event", item_col="item")
+                self.assertEqual(len(r), 0)
+                self.assertTrue(pd.api.types.is_datetime64_any_dtype(r["cutoff"]))
+                f = prefix_features(r, item_col="item")
+                self.assertEqual(len(f), 0)
+                self.assertIn("prefix_days_after_cutoff", f.columns)
+
+    def test_missing_item_is_not_same(self):
+        # review: nunique(axis=1) skipped NaN, so (NaN, "c") counted as one distinct item -> same_item 1
+        r = self._rows().head(4).copy()
+        r["item1"] = r["item0"]
+        r.loc[0, "item0"] = np.nan
+        r.loc[1, ["item0", "item1"]] = np.nan
+        f = prefix_features(r, item_col="item")
+        self.assertEqual(f["prefix_same_item"].tolist(), [0, 0, 1, 1])
+        self.assertTrue(np.isnan(f.loc[0, "prefix_pop_item0"]))                # no item, no popularity
+
 
 if __name__ == "__main__":
     unittest.main()
