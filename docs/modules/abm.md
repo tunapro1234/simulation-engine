@@ -176,7 +176,7 @@ say so next to the numbers, or use "nan" with a fallback to keep every series.
 prior = abm.llm_ceiling_prior(llm, hist, groups="kind", perturb=0.15, parallel=8, seed=0)  # hist: t <= origin
 prior[["ceiling", "ceiling_blind", "ceiling_perturbed", "ceiling_shuffled", "ceiling_group_median"]]
 print(prior.attrs["leak_check"]["message"])
-upper = abm.ceiling_upper(prior)                    # {series: ceiling}, floored at the observed max
+upper = abm.ceiling_upper(prior, col="ceiling_blind")   # blind ceilings: the default "ceiling" is the named (recalled) one
 abm.AdoptionABCAnalogy(scale={s: c / 100 for s, c in upper.items()}, group_col="kind")
 DirectForecaster("hgb", horizons=4, target="logit", upper=upper)   # per-series ceilings
 sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor = best + ABM delta
