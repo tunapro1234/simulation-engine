@@ -25,6 +25,7 @@ that combine an LLM prediction with a model learned from data.
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
 | `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature`; `forecast.panel_from_long`, `forecast.extrapolation_check` | multi-series forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon (level, log-ratio or logit-with-ceiling target; origin-time features), rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls, long `id, time, variable, value` table -> panel, extrapolation warning | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 | `wave_persistence`, `pooled_shrunk`, `same_regime`, `subgroup_mixture`, `mixture_reweight`, `role_swap`, `transition_backtest`, `merge_frames` (`waves.py`) | repeated surveys: past waves -> next wave's segment x question distributions; last-wave copy, k-wave pool shrunk to the population, same-regime pool, party-ID mixture with role swap across a regime switch, per-year backtest over past switch years | D6 rehearsal (yearly opinion survey, D -> R president, one run): copying last year 0.1315 test TVD (approval 0.295), role-mirror baseline 0.0839, team 0.0788; on dev the same-regime 4-wave pool beat the preregistered method, 0.0990 vs 0.1007 |
+| `sessionize`, `cutoff_windows`, `history_features`, `rescale_to_rates` (`sessions.py`) | event log -> sessions (gap rule, same-time events ordered view < addtocart < transaction); one row per (cutoff, user) for the first session after each cutoff with prefix columns and the label from the rest of the session; `eval_gap=` gives a train / eval split whose time ranges do not overlap; per user / item / user x item counts, smoothed conversion rates and days since last event, all strictly before the cutoff; segment means moved to training rates with the within-segment ranking kept | D13 rehearsal wrote these by hand (~10 min). Overlapping 21-day windows every 7 days put the same sessions in the early-stopping eval set: LightGBM grew to 1300-2200 trees, dev AP 0.026 vs logistic 0.044 |
 
 **Provenance.** Everything is ported from the TALP prep research branches under
 `talp-simulation-hackathon-2026/uretim/<branch>/`. The algorithms and defaults are unchanged. Shorthand used below:
@@ -40,6 +41,7 @@ that combine an LLM prediction with a model learned from data.
 - **[prova-d3]** = `uretim/prova/d3/SIMENGINE-EKSIK.md` (blind rehearsal: new-film ratings, item cold start; code `kod/ozellik.py`, `kod/model.py`)
 - **[prova-d6]** = `uretim/prova/d6/SIMENGINE-EKSIK.md`, `SONUC-MAIN.md` (blind rehearsal: yearly opinion survey 2006-2024 -> 2025 segment x question distributions across a president switch, cell TVD)
 - **[prova-d11]** = `uretim/prova/d11/SIMENGINE-EKSIK.md`, `SONUC-MAIN.md` (blind rehearsal: SMS pilot RCT -> rollout segment uplift, 26 segments)
+- **[prova-d13]** = `uretim/prova/d13/SIMENGINE-EKSIK.md` (blind rehearsal: click log, does a first session opening with two views end in a purchase, plus total / segment rates; code `kod/ozellik.py`, `kod/modeller.py`)
 - **[G1]** = `uretim/recete/G1/RECETE.md`, `kart.md` (open recipe rehearsal: climate many-labs, 11 messages vs control, 32 training / 31 test countries); **[G4]** = `uretim/recete/G4/RECETE.md`, `kart.md`, `CAPRAZ-G1.md` (open recipe rehearsal: ShopCART first query -> purchase, 1,000 test sessions)
 
 Every number below comes from those files. This port re-measured nothing. The tests
@@ -1211,3 +1213,76 @@ Cautions:
   not cover year-to-year spread. Score on several past switch years (`transition_backtest`) and report each year.
 - **Post-hoc selection.** In D6 the arm picked after the referee (best of ~40 configurations on two dev years)
   lost to the preregistered arm on test. Seal the preregistered arm separately and report both.
+
+## Sessions / event logs (`sessions.py`) [prova-d13]
+
+For "click / event log -> will this session convert, and what are the total and segment rates". Input is long: one
+row per event with user, time (datetime64, or numbers with `time_unit="ms"`), kind and item columns (names are
+keyword arguments). Durations are pandas offsets (`"30min"`, `"21D"`).
+
+- `sessionize(events, user_col, time_col, gap="30min", order={"view": 0, "addtocart": 1, "transaction": 2},
+  kind_col=None)`: a gap strictly longer than `gap` starts a new session; same-time events are ordered by `order`
+  (unknown kinds last). Returns a sorted copy with `session_id`, `session_start` and `seq`.
+- `cutoff_windows(events, cutoffs, horizon, *, label, select="first_session_after", prefix_len=2,
+  prefix_kinds=None, max_end_offset=None, eval_gap=None, truncate=True, features=None, ...)`: for each cutoff T,
+  each user's first session starting in [T, T + horizon) (or every session with `select="all"`), kept when its first
+  `prefix_len` events exist (and are all `prefix_kinds`); `max_end_offset` drops sessions starting later than
+  T + horizon - offset. Events at or after T + horizon are not seen (`truncate`), as in a test log that ends there.
+  Columns: `cutoff`, user, `session_id`, `session_start`, `time0..`, `<kind>0..`, `<item>0..`, `prefix_span`
+  (seconds), `prefix_items`, `n_rest`, `label_end`, `y`. `label` is a kind (any such event after the prefix) or a
+  callable on the rest of the session. `features(history, rows, T)` gets only events with time < T.
+- `eval_gap=` (D13 #8): returns `(train, eval)`, eval = the latest cutoff Te, train = cutoffs with
+  T + horizon + eval_gap <= Te (`train.attrs["dropped_cutoffs"]` lists the others). Without it, 21-day windows
+  every 7 days share sessions between training rows and an early-stopping `eval_set`.
+- `history_features(events, at, rows=None, *, on=None, entity=("user", "item"), kinds=None, windows=(None, "28D"))`:
+  per entity and window `<e>_n_<kind>`, `<e>_rate_<kind>` = (n_kind + 2 prior) / (n_base + 2) against the first
+  kind, `<e>_days_since_last` / `_first`, `<e>_n_unique_<other>`, `<e>_n_sessions`, and the same counts per
+  user x item pair (`user_item_n_view`). Only events strictly before `at` (asserted: every days-since value is > 0).
+  With `rows` the features are joined; several columns per entity (`item0`, `item1`) add a `_<column>` suffix;
+  unseen entities get counts 0, the prior rate, NaN days and `<e>_seen` 0. Pass `kinds=` to keep the columns the
+  same across cutoffs.
+- `rescale_to_rates(p, segment, target, *, method="scale", default=None)`: each segment's mean prediction moved to
+  `target[segment]` (e.g. training rates, so no eval label is used), ranking within the segment unchanged;
+  `segment=None` with one rate is the total version. `method="scale"` multiplies (clips at 1 with a warning),
+  `"logit"` shifts log-odds and stays inside (0, 1).
+
+```python
+import numpy as np
+import pandas as pd
+import simengine.methods as M
+from sklearn.linear_model import LogisticRegression
+
+# synthetic click log: user, time, event (view / addtocart / transaction), item
+rng = np.random.default_rng(0)
+S = 8_000                                                                # sessions of 1-6 events, a minute apart
+start = pd.Timestamp("2026-01-01") + pd.to_timedelta(rng.integers(0, 120 * 86_400, S), unit="s")
+k = rng.integers(1, 7, S)
+sid = np.repeat(np.arange(S), k)
+step = np.arange(len(sid)) - np.repeat(np.cumsum(k) - k, k)
+log = pd.DataFrame({"user": rng.integers(0, 1_500, S)[sid], "time": start[sid] + pd.to_timedelta(step, unit="min"),
+                    "item": rng.integers(0, 200, len(sid)),
+                    "event": np.where(step < 2, "view", rng.choice(["view", "addtocart", "transaction"], len(sid),
+                                                                    p=[0.8, 0.12, 0.08]))})
+
+ev = M.sessionize(log, "user", "time", gap="30min", kind_col="event")   # + session_id, session_start, seq
+test_start = pd.Timestamp("2026-04-21")
+cuts = [test_start - pd.Timedelta(days=7 * k) for k in range(3, 14)]    # weekly cutoffs, 21-day windows
+kinds = ("view", "addtocart", "transaction")
+feats = lambda hist, rows, at: M.history_features(hist, at, rows, on={"user": "user", "item": ["item0", "item1"]},
+                                                  kinds=kinds, kind_col="event")
+train, dev = M.cutoff_windows(ev, cuts, "21D", label="transaction", prefix_len=2, prefix_kinds=("view",),
+                              max_end_offset="3h", eval_gap="0D", features=feats,
+                              kind_col="event", item_col="item")
+train.attrs["dropped_cutoffs"]          # the two cutoffs whose windows overlap the eval window
+assert not set(train.session_id) & set(dev.session_id)
+
+X = ["prefix_span", "user_n_view", "user_seen", "item_rate_transaction_item0", "item_rate_transaction_item1",
+     "user_item_n_view_item0", "item_n_view_28D_item1"]
+p = LogisticRegression(max_iter=1000).fit(train[X].fillna(0), train.y).predict_proba(dev[X].fillna(0))[:, 1]
+
+seg_tr = np.where(train.user_seen == 1, "returning", "new")
+seg_dev = np.where(dev.user_seen == 1, "returning", "new")
+rates = pd.Series(train.y.to_numpy()).groupby(seg_tr).mean()            # training rates: label-free on dev
+p_seg = M.rescale_to_rates(p, seg_dev, rates)                           # segment means -> training rates
+p_tot = M.rescale_to_rates(p, None, train.y.mean())                     # total version
+```
