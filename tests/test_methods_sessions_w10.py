@@ -195,5 +195,22 @@ class TestPrefixFeatures(_Base):
         self.assertTrue(np.isnan(f.loc[0, "prefix_pop_item0"]))                # no item, no popularity
 
 
+class TestCarry(_Base):
+    def test_carry_copies_the_first_prefix_event(self):
+        # D13-W10 #5: test rows had to be joined back to the brief's session id by hand
+        ev = self.ev.copy()
+        ev["oturum"] = "o" + ev["session_id"].astype(str) + "_" + ev["seq"].astype(str)
+        r = cutoff_windows(ev, self.cuts, "21D", prefix_len=2, label="transaction", kind_col="event",
+                           carry=["oturum"])
+        self.assertTrue(len(r))
+        self.assertEqual(r["oturum"].tolist(), ("o" + r["session_id"].astype(str) + "_0").tolist())
+        base = self._rows()
+        self.assertEqual(r.drop(columns="oturum").columns.tolist()[:4], base.columns.tolist()[:4])
+        with self.assertRaises(KeyError):
+            cutoff_windows(ev, self.cuts, "21D", label="transaction", kind_col="event", carry=["nope"])
+        with self.assertRaises(ValueError):
+            cutoff_windows(ev, self.cuts, "21D", label="transaction", kind_col="event", carry=["session_start"])
+
+
 if __name__ == "__main__":
     unittest.main()

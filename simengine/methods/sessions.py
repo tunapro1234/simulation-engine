@@ -136,7 +136,7 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
                    features: Callable[[pd.DataFrame, pd.DataFrame, Any], pd.DataFrame] | None = None,
                    user_col: str = "user", time_col: str = "time", kind_col: str | None = None,
                    item_col: str | None = None, time_unit: str | None = None, y_col: str = "y",
-                   split_col: str | None = "split"):
+                   split_col: str | None = "split", carry: Sequence[str] = ()):
     """Rows that mimic a test period, one per (cutoff, unit), from sessionized ``events`` (``sessionize`` first).
 
     For each cutoff T the window is [T, T + horizon). ``select="first_session_after"``: each user's first session
@@ -159,6 +159,8 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
     ``cutoff_windows(ev, [test_start], horizon, label=None, select="all", ...)`` (the default select keeps only a
     visitor's first test session).
     ``features(history, rows, T)`` adds columns; ``history`` holds only events with time < T.
+    ``carry=["oturum"]`` copies those event columns from each row's first prefix event (e.g. the brief's session id,
+    to join test rows back to the submission without a hand-made mapping; D13-W10 #5).
 
     ``eval_gap`` (a duration, "0D" = adjacent): returns ``(train, eval)``. eval = rows of the latest cutoff Te;
     train = rows of cutoffs with T + horizon + eval_gap <= Te, so no training row sees an event at or after Te
@@ -170,7 +172,7 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
     miss = {"session_id", "session_start", "seq"} - set(events.columns)
     if miss:
         raise ValueError(f"cutoff_windows: {sorted(miss)} missing; run sessionize(events, ...) first")
-    _check_cols(events, [user_col, time_col, kind_col, item_col], "cutoff_windows")
+    _check_cols(events, [user_col, time_col, kind_col, item_col, *carry], "cutoff_windows")
     if select not in SELECT:
         raise ValueError(f"select={select!r}: one of {SELECT}")
     if prefix_len < 1:
@@ -242,6 +244,10 @@ def cutoff_windows(events: pd.DataFrame, cutoffs: Sequence, horizon: Any, *,
         cut = pd.Series([T] * len(sids), dtype=pd.Series([T]).dtype)       # empty window: keep the cutoff dtype
         rows = pd.DataFrame({"cutoff": cut, user_col: pre[user_col].to_numpy()[::L], "session_id": sids,
                              "session_start": pre["session_start"].to_numpy()[::L]})
+        for col in carry:
+            if col in rows.columns:
+                raise ValueError(f"carry column {col!r} would overwrite a cutoff_windows column")
+            rows[col] = pre[col].to_numpy()[::L]
         for k in range(L):
             for col in (time_col, kind_col, item_col):
                 if col is not None:
