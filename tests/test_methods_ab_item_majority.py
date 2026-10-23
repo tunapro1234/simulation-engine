@@ -64,6 +64,15 @@ class TestItemMajority(unittest.TestCase):
         with self.assertRaises(KeyError):
             ItemMajority(item="question").fit(pd.DataFrame({"y": [1]}))
 
+    def test_string_or_out_of_range_labels_raise(self):
+        # 'A'/'B' winners coerced to NaN gave an empty table and 0.5 everywhere, with no warning
+        with self.assertRaises(ValueError):
+            ItemMajority(item="q").fit(pd.DataFrame({"q": ["x", "x"], "y": ["A", "B"]}))
+        with self.assertRaises(ValueError):
+            ItemMajority(item="q").fit(pd.DataFrame({"q": ["x", "x"], "y": [2, 0]}))      # p would exceed 1
+        m = ItemMajority(item="q", shrink=0.0).fit(pd.DataFrame({"q": ["x", "x"], "y": [True, None]}))
+        np.testing.assert_allclose(m.predict(pd.DataFrame({"q": ["x"]})), [1.0])
+
 
 if __name__ == "__main__":
     unittest.main()

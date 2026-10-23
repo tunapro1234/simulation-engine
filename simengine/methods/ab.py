@@ -93,8 +93,15 @@ class ItemMajority:
     def fit(self, train):
         train = rename_aliases(pd.DataFrame(train), ALIASES)
         keys, flip = self._keys(train)
-        y = pd.to_numeric(train["y"], errors="coerce").to_numpy(float)
+        raw = train["y"]
+        y = pd.to_numeric(raw, errors="coerce").to_numpy(float)
         ok = ~np.isnan(y)
+        bad = raw[raw.notna().to_numpy() & ~ok]          # 'A' / 'B' labels would coerce to NaN: every p = 0.5
+        if len(bad):
+            raise ValueError(f"ItemMajority: y must be 1 (A won) / 0 (B won), got {bad.unique()[:5].tolist()}; "
+                             "map string winners first")
+        if ((y[ok] < 0) | (y[ok] > 1)).any():
+            raise ValueError("ItemMajority: y must lie in [0, 1] (1 = A won)")
         self.cols_ = list(keys.columns)
         yy = np.where(flip, 1 - y, y)[ok]
         t = keys[ok].assign(_y=yy).groupby(self.cols_, dropna=False)["_y"].agg(n="size", k="sum")

@@ -97,5 +97,26 @@ class TestAlphaGrid(unittest.TestCase):
         self.assertEqual(sd.alphas, (0, 0.5, 1))
 
 
+class TestCvGroupsReview(unittest.TestCase):
+    def test_missing_cv_group_raises(self):
+        base, llm, y, g = noisy()
+        g = g.astype(float)
+        g[:3] = np.nan                                           # NaN rows used to stay 0 in cv_pred_ silently
+        with self.assertRaises(ValueError):
+            ShrunkDeviation().fit(base, llm, y, cv_groups=g)
+        go = g.astype(object)
+        go[:3] = None
+        with self.assertRaises(ValueError):
+            ShrunkDeviation().fit(base, llm, y, cv_groups=go)
+
+    def test_refit_without_cv_groups_clears_cv_results(self):
+        base, llm, y, g = noisy()
+        sd = ShrunkDeviation().fit(base, llm, y, cv_groups=g)
+        self.assertTrue(hasattr(sd, "cv_loss_"))
+        sd.fit(base, llm, y)
+        for k in ("cv_alphas_", "cv_pred_", "cv_loss_"):
+            self.assertFalse(hasattr(sd, k), k)
+
+
 if __name__ == "__main__":
     unittest.main()

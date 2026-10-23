@@ -98,11 +98,15 @@ class ShrunkDeviation:
     def fit(self, base, llm, y, groups=None, ref=None, cv_groups=None):
         dev = self.deviation(llm, groups, ref)
         self.alpha_, self.losses_ = self._select(base, dev, y)
+        for k in ("cv_alphas_", "cv_pred_", "cv_loss_"):            # a refit without cv_groups leaves none stale
+            self.__dict__.pop(k, None)
         if cv_groups is None:
             return self
         g, y = np.asarray(cv_groups), np.asarray(y)
         if len(g) != len(dev):
             raise ValueError(f"cv_groups has {len(g)} values for {len(dev)} rows")
+        if pd.isna(g).any():                         # NaN == NaN is False: those rows would stay 0 in cv_pred_
+            raise ValueError(f"cv_groups has {int(pd.isna(g).sum())} missing values; give them a group label")
         B = np.broadcast_to(np.asarray(base, float), dev.shape)      # a shared base (scalar or (K,)) per row
         keys = pd.unique(g)
         if len(keys) < 2:
