@@ -431,9 +431,12 @@ Return a JSON array with one object per (reader, test):
 JSON only."""
 
 
+READER_CHARS = 400      # ab_many: persona text per reader line, as in the measured Upworthy run
+
+
 def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYSTEM_MANY,
             template: str = MANY_TEMPLATE, max_tokens: int | None = None, ask_kw: dict | None = None,
-            usage: Usage | None = None) -> pd.DataFrame:
+            usage: Usage | None = None, reader_chars: int | None = READER_CHARS) -> pd.DataFrame:
     """Many pairwise A/B tests, all personas per call (port of sahne/prova/upworthy.py `oyla`).
     tests: DataFrame or list of dicts with columns test_id, a, b (texts). Returns one row per test:
     test_id, p_a = (votes for A + 0.5) / (votes + 1) (Laplace), n_votes, votes (list of dicts).
@@ -443,7 +446,9 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
     a larger max_tokens, a failed call gives no votes); `ask_kw` passes its options, `usage` collects the counts.
     A reply with no JSON counts in usage.unparsed_calls; every (reader, test) pair without a vote counts in
     usage.missing (usage.refused when the call stayed refused). Calls that gave no vote at all raise a
-    RuntimeWarning and are listed in df.attrs["warnings"]; their tests get p_a = 0.5, n_votes = 0."""
+    RuntimeWarning and are listed in df.attrs["warnings"]; their tests get p_a = 0.5, n_votes = 0.
+    Each reader is its persona text on one line, cut at `reader_chars` characters (400 as in the measured run;
+    None = no cut). Cut texts raise one UserWarning with their count, also listed in df.attrs["warnings"]."""
     usage = usage if usage is not None else Usage()
     ps = as_personas(personas)
     df = pd.DataFrame(tests).reset_index(drop=True)
@@ -451,7 +456,14 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
         if c not in df:
             raise ValueError(f"tests needs column {c!r}")
     df["test_id"] = df["test_id"].astype(str)
-    readers = "\n".join(f"- {p.pid}: " + p.text("en").replace("\n", " · ")[:400] for p in ps)
+    texts = [p.text("en").replace("\n", " · ") for p in ps]
+    n_cut = 0 if reader_chars is None else sum(len(t) > reader_chars for t in texts)
+    readers = "\n".join(f"- {p.pid}: " + (t if reader_chars is None else t[:reader_chars]) for p, t in zip(ps, texts))
+    warns = []
+    if n_cut:
+        warns.append(f"ab_many: {n_cut} of {len(ps)} persona texts cut at reader_chars={reader_chars} characters "
+                     f"(longest {max(map(len, texts))}); pass reader_chars=None or a larger limit to keep them whole")
+        _warnings.warn(warns[0], UserWarning, stacklevel=2)
     prompts, sizes = [], []
     for s in range(0, len(df), max(1, tests_per_call)):
         g = df.iloc[s:s + tests_per_call]
@@ -489,11 +501,10 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
         usage.missing += max(0, size - got)
         if not got:
             no_votes.append(f"call {k + 1}: " + ("no JSON" if data is None else "no parseable votes"))
-    warns = []
     if no_votes:
         warns.append(f"ab_many: {len(no_votes)} of {len(prompts)} calls returned no parseable votes "
                      f"({'; '.join(no_votes[:5])}); their tests get p_a = 0.5, n_votes = 0")
-        _warnings.warn(warns[0], RuntimeWarning, stacklevel=2)
+        _warnings.warn(warns[-1], RuntimeWarning, stacklevel=2)
     rows = []
     for tid in df["test_id"]:
         vs = votes.get(tid, [])
@@ -505,4 +516,5 @@ def ab_many(personas, tests, *, llm, tests_per_call: int = 5, system: str = SYST
     return out
 
 
-__all__ = ["ab_test", "ab_frame", "ab_lift_frame", "ab_many", "confidence_check", "paars_decision", "DEFAULT_QUESTION"]
+__all__ = ["ab_test", "ab_frame", "ab_lift_frame", "ab_many", "confidence_check", "paars_decision", "DEFAULT_QUESTION",
+           "READER_CHARS"]

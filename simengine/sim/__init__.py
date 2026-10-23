@@ -12,8 +12,11 @@ Runners (each returns a JSON-safe dict; a matching *_frame turns it into an Eval
                                       simulated vs human effects: median |sim|/|human|, slope (family CI), LOO
                                       correction, "worth ~N humans", card section
   segment_distribution                ask the model directly for each segment's answer distribution
+  segment_rate_prior                  ask each segment's event rate k times: segment x (mean, sd, n_ok, n_failed),
+                                      a group feature for methods.GroupTransfer; optional blind arm
   persona_distribution                per-persona probability vectors
-  predict_people / prediction_frame   per-person L0 / L1 / L2 / SSR prediction prompts
+  predict_people / prediction_frame   per-person L0 / L1 / L2 / SSR prediction prompts; kind="numeric" with
+                                      fields=[NumericField(name, lo, hi)] (numeric_fields normalises specs)
   batch_calibrate, retest_stats       label-free calibration and test-retest of repeated samples
   ask_constrained / completion_summary  schema-validated JSON answers with retry feedback; completion table
 Controls: no_persona and persona_swap arms run inside survey and ab_test (`controls=`); control_personas and
@@ -33,8 +36,10 @@ from .panel import (REFRAME_NOTE, REFRAME_NOTE_GENERIC, Usage, ask_many, ask_pan
                     schema_responder)
 from .parse import normalize_probs, parse_distribution, parse_item_probs, parse_json, parse_text_fields
 from .personas import PersonaView, as_persona, as_personas, control_personas, control_plan
-from .prediction import (AMAZON, PredictionSpec, batch_calibrate, history_text, predict_people, prediction_frame,
-                         profile_text, prompt_l0, prompt_l1, prompt_l2, prompt_ssr, retest_stats)
+from .prediction import (AMAZON, NumericField, PredictionSpec, batch_calibrate, history_text, numeric_fields,
+                         predict_people, prediction_frame, profile_text, prompt_l0, prompt_l1, prompt_l2, prompt_ssr,
+                         retest_stats)
+from .rate_prior import parse_rate, rate_prompt, segment_rate_prior
 from .roundtable import CONFIRMATION_BIAS, KEEP_VIEW, roundtable, roundtable_frame
 from .ssr import SCALES, SSR
 from .strategy import strategy, strategy_frame
@@ -50,7 +55,8 @@ __all__ = [
     "segment_distribution", "persona_distribution", "distribution_prompt", "distribution_frame", "w1_ordinal",
     "FRAMINGS_NAMED", "FRAMINGS_HIDDEN", "DIST_TEMPLATE",
     "PredictionSpec", "AMAZON", "predict_people", "prediction_frame", "prompt_l0", "prompt_l1", "prompt_l2",
-    "prompt_ssr", "profile_text", "history_text", "batch_calibrate", "retest_stats",
+    "prompt_ssr", "profile_text", "history_text", "batch_calibrate", "retest_stats", "NumericField", "numeric_fields",
+    "segment_rate_prior", "rate_prompt", "parse_rate",
     "ask_panel", "ask_many", "build_prompts", "Usage", "schema_responder", "looks_like_refusal", "REFRAME_NOTE",
     "REFRAME_NOTE_GENERIC",
     "PersonaView", "as_persona", "as_personas", "control_personas", "control_plan",

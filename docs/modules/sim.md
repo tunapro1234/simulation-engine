@@ -33,12 +33,13 @@ signal.
 | `roundtable_strategy` (alias `roundtable_conditions`), `roundtable_strategy_frame`, `hide_persona_fields` | `roundtable.py` | Strategy comparison at an interacting table: one `roundtable` per condition on the same panel (`{id: text}` or a list; `hide_fields=("condition",)` keeps the RCT arm out of the prompt). Output: condition × round × segment means (`table`), paired effect vs the `control` table per round (`effects`), last round − round 0 per persona with bootstrap CI and the change of the effect (`shift`), and `ranking` in round 0 and the last round. The frame helper reuses `roundtable_frame` (unit `<condition>|<unit>`); `effect=True` gives condition − control predictions to score against observed effects. CIs resample personas and ignore the within-table dependence of later rounds. |
 | `strategy`, `strategy_frame` | `strategy.py` | Two or more scenarios × segments. Each persona gives a 0-100 intent and a reason per scenario. Output: ranking, win probability, sign test on the top two, and the segment whose profile diverges most. |
 | `segment_distribution`, `distribution_prompt`, `FRAMINGS_NAMED`, `FRAMINGS_HIDDEN` | `distribution.py` | No personas. Makes one call per segment × question × framing ("estimate the percentage of these respondents who would choose each option"), then averages the 3 framings. An invalid reply becomes a uniform vector (or is skipped with `fallback="skip"`); the filled share is recorded per cell. `repeats=k` passes `sample=0..k-1` (independent draws, per-sample dists kept). See "Distribution runners" below. |
+| `segment_rate_prior`, `rate_prompt`, `parse_rate` | `rate_prior.py` | No personas. Asks each segment's event rate ("the percentage of them for which ... happens", `{"pct": n}`; `parse_pct=False` asks a 0-1 proportion) `samples` times (`sample=0..k-1`, independent draws) and returns a segment × (`mean`, `sd`, `n_ok`, `n_failed`) table, rates in [0, 1], ready as `GroupTransfer(group_features=prior[["mean"]])`. `blind=True` (or `{key: hidden wording}`) adds a `_blind` arm with the same event and an anonymous segment. Failed answers are never clipped. See "Segment rate prior" below. |
 | `effect_forecast`, `effect_frame`, `memorisation_check`, `EffectForecast` | `effect.py` | No personas. Asks for every condition's effect against control in one JSON object per arm × framing × sample (independent draws via `sample=k`), averages per condition, and returns a condition × arm table: hidden arm always, named arm (study named) with `named=`, plus named − hidden as a memorisation probe and refused / unparsed / failed / invalid counts. Import from `simengine.sim.effect`. See "Direct effect forecasts" below. |
 | `experiment`, `experiment_frame`, `exaggeration_ratio`, `correct_effects`, `human_equivalent_n`, `effect_section` | `experiment.py` | Simulated randomized experiment on a persona panel: each persona is assigned one condition (balanced, seeded; `between=False` = every condition, paired) and answers through `survey`. Per condition mean / sd / n / refused / unparsed, per effect Hedges g with SE and CI and the no_persona arm's g. Calibration against human effects: median \|sim\|/\|human\|, sim ~ human slope with a family-clustered CI, leave-one-family-out ratio / affine correction, "worth ~N humans" and a card section. See "Experiments and effect calibration" below. |
 | `persona_distribution` | `distribution.py` | Per-persona probability vectors, many respondents per call, with tables filled within each segment. Also returns the segment means, one set per `segments=` scheme, and `survey`-style refused / unparsed accounting with ids. `person_distribution_frame` gives persona × question rows. |
 | `distribution_frame`, `w1_ordinal` | `distribution.py` | Distribution EvalFrame (list-valued `truth` / `pred_llm_dist`, numeric `filled_llm_dist`; `scheme=` picks a `persona_distribution` segment scheme), and the normalised ordinal W1 used for the makro numbers. |
 | `robustness`, `robustness_frame` | `robustness.py` | Retest / framing / option-order robustness of `segment_distribution`, scaled by the group signal (W1 between each group and the population). Per condition: mean W1 against the base run, signed order shift, ratio to the signal with question-clustered CIs; summary ratio = worst condition; a card row (`tur="robustness"`). Import from `simengine.sim.robustness`. See "Robustness" below. |
-| `predict_people`, `prediction_frame` | `prediction.py` | Per-person prediction. L0 is a no-persona population prior over `l0_samples` samples. L1 uses the person's own survey answers. L2 is L1 plus the person's past behaviour in the same items. SSR asks for one first-person sentence per item. It takes independent `samples` (passed as `sample=j`) and re-asks with "JSON only" when parsing fails. `kind="numeric"` with `fields=[NumericField(name, lo, hi, unit?)]` (levels L0/L1/L2) asks for every field in one JSON reply per person, all persons in one `llm.map` batch (`ask_many`, `return_exceptions=True`); a value outside its range, absent or not one whole number (strings like `"1,250"`, `"120 USD"` are read; `"5-10"`, `"7/10"`, `"45%"`, lists are not) becomes None/NaN (never clipped) and is counted per field in `invalid` (`ok`, `out_of_range`, `unparsed`, `no_reply`). L2 summary histories list all their own items. `prediction_frame` then gives one row per person × field with `lo`, `hi`, `status`. |
+| `predict_people`, `prediction_frame` | `prediction.py` | Per-person prediction. L0 is a no-persona population prior over `l0_samples` samples. L1 uses the person's own survey answers. L2 is L1 plus the person's past behaviour in the same items. SSR asks for one first-person sentence per item. It takes independent `samples` (passed as `sample=j`) and re-asks with "JSON only" when parsing fails. `kind="numeric"` with `fields=[NumericField(name, lo, hi, unit?)]` (`from simengine.sim import NumericField, numeric_fields`; levels L0/L1/L2) asks for every field in one JSON reply per person, all persons in one `llm.map` batch (`ask_many`, `return_exceptions=True`); a value outside its range, absent or not one whole number (strings like `"1,250"`, `"120 USD"` are read; `"5-10"`, `"7/10"`, `"45%"`, lists are not) becomes None/NaN (never clipped) and is counted per field in `invalid` (`ok`, `out_of_range`, `unparsed`, `no_reply`). L2 summary histories list all their own items. `prediction_frame` then gives one row per person × field with `lo`, `hi`, `status`. |
 | `PredictionSpec`, `AMAZON`, `prompt_l0/l1/l2/ssr`, `profile_text`, `history_text` | `prediction.py` | All prompt wording. `PredictionSpec()` is neutral. `AMAZON` reproduces the measured talp73 prompts exactly (checked string-for-string against `talp73/kod/llm/istem.py` and `ssr.py`). |
 | `batch_calibrate` | `prediction.py` | Label-free batch calibration: `logit(p) − mean_item logit(p) + logit(prior_rate)`, clipped at 1e-3. It matches `talp73/kod/llm/kalibre.py` to 0.0 max abs difference on a random check. |
 | `retest_stats` | `prediction.py` | Test-retest of repeated samples: within-cell sd, share of identical cells, pairwise r, per-item signal vs noise, Spearman-Brown. `kind="distribution"` reduces each vector to E[position] first and adds the within-cell W1. |
@@ -295,6 +296,8 @@ without a vote counts in `usage.missing` (`usage.refused` when the call stayed r
 all raises a `RuntimeWarning` and is listed in `df.attrs["warnings"]`; its tests get `p_a = 0.5`, `n_votes = 0`.
 `schema_responder` answers the default `ab_many` prompt (one vote per reader and test).
 
+**`ab_many` reader length.** Each reader line is the persona text on one line, cut at `reader_chars=400` characters (`READER_CHARS`, the measured Upworthy run; the default prompt is byte-identical to the earlier versions). When texts are cut, one `UserWarning` gives the count ("3 of 8 persona texts cut ...") and is listed in `df.attrs["warnings"]`; `reader_chars=None` keeps whole texts, at more input tokens per call.
+
 ```python
 from simengine.sim.ab import ab_lift_frame
 
@@ -440,6 +443,28 @@ primary measure).
   −0.039 [−0.066; −0.015]; person AUC −0.034..−0.046, significant in all seeds. SSR-cal is below the survey model in
   every seed (1b(c) −0.028 / −0.025 / −0.041) and far below the history model (−0.102..−0.125). Free-text sentences
   carry some person-specific signal, but less than the numeric prompt. Cost: 1,043 calls, $0.678.
+
+## Segment rate prior (`rate_prior.py`)
+
+A per-segment event rate as a group feature, with no personas: one call per segment × sample, `{"pct": n}` read
+with `simengine.llm.jsonx.json_extract` (a bare number or a `"12%"` string also works). A reply with no number or
+outside 0-100 (0-1 with `parse_pct=False`) is a failed sample: it counts in `n_failed`, the mean is over the
+rest, and one `RuntimeWarning` gives the count. Calls go through `ask_many` (one `llm.map` batch per sample, soft
+refusals re-asked once, an errored call is a failed sample, `usage.error_calls`).
+
+```python
+segs = {"new|fast": "new visitors whose first two page views are under 60 seconds apart", ...}
+prior = sim.segment_rate_prior(llm, segs, "the session ends with a purchase", samples=5, blind=True,
+                               context="An online shop logs product views, add-to-cart and purchase events.")
+prior[["mean", "sd", "n_ok", "n_failed", "mean_blind"]]
+M.GroupTransfer(group_features=prior[["mean"]]).fit(X, y, groups=seg)   # every column becomes a feature
+prior.attrs["samples"]     # long rows: segment, arm, sample, rate, text
+```
+
+Measured: only once, by hand, in blind rehearsal D13 (6 segments × 5 samples, Haiku, session purchase rate).
+The prior was about three times the observed rate and its AP was at the segment-rate baseline, so the arm was
+dropped. Treat it as a feature to test against the blind arm and a shuffled placebo (`methods.llm_prior_feature`
+does the shuffle), not as a calibrated rate. Do not name the dataset or its source in `context`.
 
 ## Direct effect forecasts (`effect.py`)
 
@@ -689,7 +714,7 @@ robustness_frame(rb)                           # segment x question x condition,
 numeric / free_text, per-person stimulus, ledger tags), `test_sim_review_fixes.py` (stimulus not in the
 profile, empty / failed batches, shared handling in the other runners, exponent parsing, free-text line),
 `test_sim_survey_parallel.py` (one plan per arm, the same results as the serial loop, `parallel=`,
-`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers), `test_sim_experiment.py` (Hedges / paired g, balanced assignment, between / within runs, the 2× panel: ratio recovered, LOO correction lowers MAE, LOO never uses the own value, human-equivalent N and its noise floor, card section, few-family CI widening, noise-corrected slope, within-noise vs baseline note) (offline, FakeLLM, a few seconds):
+`refused_ids` / `unparsed_ids`, `survey(tag=)` down to the TSV column), `test_sim_effect.py` (effect forecast arms, sample keys, re-asks, memorisation check), `test_sim_rate_prior.py` (rate table mean / sd / counts, sample keys, failed and errored answers, blind arm, GroupTransfer feature, NumericField export, `ab_many` reader_chars warning and byte-identical default prompt), `test_sim_robustness.py` (order mapping, retest `sample` keys, framing axis, real-data signal, ratio, card row, invalid answers), `test_sim_experiment.py` (Hedges / paired g, balanced assignment, between / within runs, the 2× panel: ratio recovered, LOO correction lowers MAE, LOO never uses the own value, human-equivalent N and its noise floor, card section, few-family CI widening, noise-corrected slope, within-noise vs baseline note) (offline, FakeLLM, a few seconds):
 
 ```
 nice -n 19 python -m unittest discover -s tests -t . -p 'test_sim*.py'
