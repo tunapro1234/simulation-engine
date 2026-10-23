@@ -53,6 +53,66 @@ class LengthAB:
         return np.where(d > 0, 0.6, np.where(d < 0, 0.4, 0.5))
 
 
+class ItemMajority:
+    """LLM-free rung for A/B pairs whose item repeats (the same question x amount across tests or countries):
+    P(A) = the direction the item's training rows favour, shrunk to 0.5, ``(k + shrink * 0.5) / (n + shrink)``
+    with k = A wins of the item's n training rows. An unseen item gets 0.5 (``unseen="half"``) or the training
+    rate of y (``unseen="global"``); ``coverage_`` = share of the last ``predict`` rows whose item was seen.
+
+    ``item``: a column or list of columns forming the item key (``["question", "amount"]``). ``item=None`` keys on
+    the unordered text pair: a pair seen as (x, y) and later as (y, x) is one item, with y flipped, so random A/B
+    sides do not split it. ``table_`` holds n, k and p per item (p oriented to the key's first side).
+
+        im = ItemMajority(item=["question", "amount"]).fit(train)     # train: item columns + y
+        p_a = im.predict(test)
+
+    Measured: G3 rehearsal (the same items repeated across countries; ``SIMENGINE-EKSIK.md`` G3 #13), this
+    hand-written rung was the strongest arm at 0.837. Report it before any text learner or LLM arm."""
+
+    UNSEEN = ("half", "global")
+
+    def __init__(self, item: str | list[str] | None = None, shrink: float = 2.0, unseen: str = "half"):
+        if unseen not in self.UNSEEN:
+            raise ValueError(f"unseen must be one of {self.UNSEEN}, got {unseen!r}")
+        if shrink < 0:
+            raise ValueError("shrink must be >= 0")
+        self.item, self.shrink, self.unseen = item, shrink, unseen
+
+    def _keys(self, df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray]:
+        df = rename_aliases(pd.DataFrame(df), ALIASES)
+        if self.item is None:
+            a, b = _texts(_prep(df), "text_a").to_numpy(), _texts(df, "text_b").to_numpy()
+            flip = a > b
+            return pd.DataFrame({"text_1": np.where(flip, b, a), "text_2": np.where(flip, a, b)}), flip
+        cols = [self.item] if isinstance(self.item, str) else list(self.item)
+        miss = [c for c in cols if c not in df]
+        if miss:
+            raise KeyError(f"ItemMajority: item columns not found: {miss}")
+        return df[cols].reset_index(drop=True), np.zeros(len(df), bool)
+
+    def fit(self, train):
+        train = rename_aliases(pd.DataFrame(train), ALIASES)
+        keys, flip = self._keys(train)
+        y = pd.to_numeric(train["y"], errors="coerce").to_numpy(float)
+        ok = ~np.isnan(y)
+        self.cols_ = list(keys.columns)
+        yy = np.where(flip, 1 - y, y)[ok]
+        t = keys[ok].assign(_y=yy).groupby(self.cols_, dropna=False)["_y"].agg(n="size", k="sum")
+        t["p"] = (t.k + self.shrink * 0.5) / (t.n + self.shrink)
+        self.table_ = t
+        self.global_rate_ = float(y[ok].mean()) if ok.any() else 0.5
+        return self
+
+    def predict(self, test):
+        keys, flip = self._keys(test)
+        ix = pd.MultiIndex.from_frame(keys) if len(self.cols_) > 1 else pd.Index(keys[self.cols_[0]])
+        p = self.table_.p.reindex(ix).to_numpy(float)
+        seen = ~np.isnan(p)
+        self.coverage_ = float(seen.mean()) if len(p) else np.nan
+        fill = 0.5 if self.unseen == "half" else self.global_rate_
+        return np.where(seen, np.where(flip, 1 - p, p), fill)
+
+
 class TfidfAB:
     """Learner on past tests: word 1-2 gram + char_wb 2-5 gram TF-IDF difference vector (A - B), logistic regression
     without intercept, C=0.3 (Bradley-Terry symmetry: swapping A and B flips the prediction exactly).

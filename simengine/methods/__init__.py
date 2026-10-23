@@ -4,7 +4,7 @@ Every component is a port of research code measured during the prep nights; see 
 each one does, where it worked and where it did not (numbers + provenance). LightGBM is optional and imported
 lazily; LLM calls go through the ``simengine.llm`` protocol (use ``FakeLLM`` offline).
 """
-from .ab import ABStack, LengthAB, LLMDirectAB, LogitAverageAB, TfidfAB, TfidfWordAB
+from .ab import ABStack, ItemMajority, LengthAB, LLMDirectAB, LogitAverageAB, TfidfAB, TfidfWordAB
 from .binary import TfidfBinary, target_encode
 from .baselines import (CellMedian, ConditionalMode, ConstantBaseline, ItemMarginal, KNNBaseline, LightGBMBaseline,
                         LogisticBaseline, MajorityBaseline, MedianConstant, PersistenceBaseline, SegmentRate,
@@ -42,7 +42,7 @@ __all__ = [
     "uniform_distribution", "weighted_distribution", "overall_copy", "segment_distributions",
     "basket_tensor", "popularity", "personal_frequency", "decayed_frequency", "tifu_knn",
     # A/B text pairs
-    "LengthAB", "TfidfAB", "TfidfWordAB", "LLMDirectAB", "LogitAverageAB", "ABStack",
+    "LengthAB", "ItemMajority", "TfidfAB", "TfidfWordAB", "LLMDirectAB", "LogitAverageAB", "ABStack",
     # LLM prior + early test
     "EarlyTestBayes", "calibrate_prior", "early_lor", "posterior_lor", "true_lor", "equivalent_multiplier",
     "simulate_saving",
