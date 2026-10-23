@@ -6,6 +6,7 @@ from a truncated array) and makro/llmabm/kod/llm.py `sor_json` (re-ask once with
 
     data = complete_json(llm, "Return JSON only.", prompt, max_tokens=600)
     st = {}; data = complete_json(llm, sys, prompt, max_tokens=300, stats=st)   # st["truncated"], ...
+    out = complete_json_many(llm, [(sys, p) for p in prompts], max_tokens=600, stats=st)   # llm.parallel threads
 
 Truncation. A reply that stopped at the output budget (`raw["stop_reason"] == "max_tokens"`, or, when the backend
 reports no stop reason, a JSON value opened and never closed) is not a parse failure: `complete_json` asks the same
@@ -218,5 +219,48 @@ def complete_json(llm, system: str, user: str, *, attempts: int = 2, truncation_
     raise ValueError(f"no JSON after {attempts} attempts: {last}")
 
 
-__all__ = ["json_extract", "complete_json", "json_unclosed", "is_truncated", "JSON_RETRY_SUFFIX", "JSON_WARN_BELOW",
+DEFAULT_PARALLEL = 4           # complete_json_many on a backend without a `parallel` attribute (FakeLLM)
+
+
+def _request(req) -> tuple[str, str, dict]:
+    if isinstance(req, dict):
+        extra = {k: v for k, v in req.items() if k not in ("system", "user")}
+        return req.get("system", ""), req["user"], extra
+    if isinstance(req, (tuple, list)) and len(req) == 2:
+        return req[0], req[1], {}
+    raise TypeError(f"complete_json_many: a request is (system, user) or a dict with 'user', got {type(req).__name__}")
+
+
+def complete_json_many(llm, requests, *, parallel: int | None = None, attempts: int = 2,
+                       return_exceptions: bool = True, stats: dict | None = None, **kw) -> list[Any]:
+    """`complete_json` for each request on `parallel` threads (default `llm.parallel`, else 4); results in input order.
+
+    `requests`: (system, user) pairs or dicts {"system", "user", **per-request kwargs}; per-request kwargs override
+    `kw` (max_tokens, tag, truncation_retries, ...). A failed request (ValueError after `attempts`, a final
+    EmptyResponseError, any ordinary exception) does not sink the batch: its slot holds the exception
+    (return_exceptions=True) or None. A `StopError` (budget, 401, spend limit) cancels the pending requests and is
+    raised. `stats` gets the per-request complete_json counts summed (calls, truncated, truncation_retries,
+    parse_failures) plus `requests` and `failed`; each request counts into its own dict, so threads never share one."""
+    from .parallel import parallel_map
+    reqs = [_request(r) for r in requests]
+    if parallel is None:
+        parallel = getattr(llm, "parallel", None) or DEFAULT_PARALLEL
+    per: list[dict] = [{} for _ in reqs]
+
+    def one(i: int) -> Any:
+        system, user, extra = reqs[i]
+        return complete_json(llm, system, user, attempts=attempts, stats=per[i], **{**kw, **extra})
+
+    out = parallel_map(one, range(len(reqs)), parallel=parallel, return_exceptions=True)
+    failed = sum(isinstance(v, Exception) for v in out)
+    if stats is not None:
+        for d in per + [{"requests": len(reqs), "failed": failed}]:
+            for k, v in d.items():
+                stats[k] = stats.get(k, 0) + v
+    if not return_exceptions:
+        out = [None if isinstance(v, Exception) else v for v in out]
+    return out
+
+
+__all__ = ["json_extract", "complete_json", "complete_json_many", "json_unclosed", "is_truncated", "JSON_RETRY_SUFFIX", "JSON_WARN_BELOW",
            "MAX_TOKENS_CAP", "JsonBudgetWarning"]

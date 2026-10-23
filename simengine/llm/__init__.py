@@ -10,7 +10,8 @@
 All three implement `simengine.types.LLM` (complete + map).
 Also: `looks_like_refusal(text)` (soft-refusal detector), a shared TSV spend log on `CostLedger`
 (`tsv_path=` / SIMENGINE_SPEND_LOG) with `spend_summary(log_path, prefix=)` to sum it per tag, `EmptyResponseError`
-for thinking-ate-the-budget replies, `complete_json` retrying a reply cut at max_tokens with a larger budget.
+for thinking-ate-the-budget replies, `complete_json` retrying a reply cut at max_tokens with a larger budget, and `complete_json_many` running it over many
+requests on the backend's `parallel` threads (input order kept, a failed request does not sink the batch).
 """
 from .cache import DiskCache, cache_key
 from .claude import Claude, classify_error, load_api_key
@@ -19,7 +20,7 @@ from .errors import (AuthError, BudgetExceeded, EmptyResponseError, LLMError, Re
                      ThinkingBudgetWarning)
 from .fake import FakeLLM
 from .fake_distribution import DistributionFake, synthetic_distribution
-from .jsonx import JsonBudgetWarning, complete_json, is_truncated, json_extract
+from .jsonx import JsonBudgetWarning, complete_json, complete_json_many, is_truncated, json_extract
 from .ledger import AGENT_ENV, SPEND_LOG_ENV, TAG_PREFIX_ENV, TSV_COLUMNS, CostLedger, compose_tag
 from .parallel import parallel_map
 from .refusal import looks_like_refusal
@@ -31,7 +32,7 @@ __all__ = [
     "DiskCache", "cache_key", "CostLedger", "TSV_COLUMNS", "SPEND_LOG_ENV", "AGENT_ENV", "TAG_PREFIX_ENV",
     "compose_tag", "looks_like_refusal", "spend_summary", "SpendSummary",
     "PRICES", "Price", "cost_usd", "usage_cost", "price_for",
-    "json_extract", "complete_json", "is_truncated", "JsonBudgetWarning", "parallel_map",
+    "json_extract", "complete_json", "complete_json_many", "is_truncated", "JsonBudgetWarning", "parallel_map",
     "load_api_key", "classify_error",
     "LLMError", "StopError", "AuthError", "SpendLimitError", "BudgetExceeded", "RefusalError",
     "EmptyResponseError", "ThinkingBudgetWarning",

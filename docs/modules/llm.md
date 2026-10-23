@@ -12,7 +12,7 @@ The module has three backends that implement the `simengine.types.LLM` protocol
 | `CostLedger` | `ledger.py` | JSONL ledger with one line per real call, written under flock. `total()` reads incrementally. Optional shared TSV spend log (`tsv_path=`, `agent=`; `TSV_COLUMNS`). |
 | `looks_like_refusal` | `refusal.py` | Conservative regex detector for soft refusals in plain text (English and Turkish). |
 | `PRICES`, `cost_usd`, `usage_cost` | `pricing.py` | Price per model in $/MTok and the token-to-USD formula. |
-| `json_extract`, `complete_json` | `jsonx.py` | Robust JSON extraction from LLM text. `complete_json` re-asks once if parsing fails, and asks again with a doubled `max_tokens` when the reply was cut (`is_truncated`). |
+| `json_extract`, `complete_json` | `jsonx.py` | Robust JSON extraction from LLM text. `complete_json` re-asks once if parsing fails, and asks again with a doubled `max_tokens` when the reply was cut (`is_truncated`). `complete_json_many` runs it over a list of requests on `llm.parallel` threads. |
 | `spend_summary` | `spend.py` | Reads the shared TSV spend log back: calls / tokens / USD per tag (or agent, model) for a tag prefix, plus the total. |
 | `parallel_map` | `parallel.py` | Thread pool that keeps input order. A `StopError` cancels the pending items. |
 | errors | `errors.py` | `LLMError` > `StopError` > `AuthError`, `SpendLimitError`, `BudgetExceeded`; plus `RefusalError`, `EmptyResponseError` (both `LLMError`) and the `ThinkingBudgetWarning` warning class. |
@@ -241,14 +241,27 @@ data = llm.complete_json("Return JSON only.", prompt, max_tokens=600, stats=st)
 print(st)                   # {"calls": 2, "truncated": 1, "truncation_retries": 1}
 
 # many prompts in parallel (the G9 shape): llm.map returns raw replies and never retries a cut one
-from simengine.llm import parallel_map
-out = parallel_map(lambda u: llm.complete_json("Return JSON only.", u, max_tokens=600, tag="L2"), prompts,
-                   parallel=8, return_exceptions=True)          # failed slots hold the ValueError
-print(llm.stats.get("json_truncated", 0))
+from simengine.llm import complete_json_many
+out = complete_json_many(llm, [("Return JSON only.", u) for u in prompts], max_tokens=600, tag="L2", stats=st)
 ```
 
-`llm.map(...)` keeps the plain `complete` behaviour; `is_truncated(r)` on its replies counts the cut ones. With
-threads, read the counts from `llm.stats` (locked) rather than one shared `stats={}` dict.
+`llm.map(...)` keeps the plain `complete` behaviour; `is_truncated(r)` on its replies counts the cut ones.
+
+### Many requests: `complete_json_many(llm, requests, *, parallel=None, attempts=2, return_exceptions=True, stats=None, **kw)`
+
+Runs `complete_json` once per request on `parallel` threads (`parallel_map`; default `llm.parallel`, which is 4 on
+`Claude` / `ClaudeCode` unless set, and 4 on `FakeLLM`). Results come back in input order.
+
+- `requests`: `(system, user)` pairs or dicts `{"system": ..., "user": ..., **overrides}`; a dict's extra keys
+  (`max_tokens`, `tag`, `truncation_retries`, ...) override the shared `**kw` for that request only.
+- A failed request does not sink the batch: its slot holds the exception (`ValueError` after `attempts`, a final
+  `EmptyResponseError`, ...) with `return_exceptions=True`, or `None` with `False`. A `StopError` (budget, 401, spend
+  limit) still cancels the requests not yet started and is raised.
+- `stats` gets every request's counts summed (`calls`, `truncated`, `truncation_retries`, `parse_failures`) plus
+  `requests` and `failed`. Each request counts into its own dict, so no shared dict is written from two threads.
+
+Why: in the rehearsal G10 (`SIMENGINE-EKSIK.md` #6) 102 `complete_json` calls ran one after another and took 3 minutes,
+although `Claude(parallel=8)` was available; only `llm.map` used the threads, and it does not parse or retry.
 
 ## Soft refusals: `looks_like_refusal(text)`
 
