@@ -239,9 +239,17 @@ def _eksik(seri: pd.Series) -> np.ndarray:
                      for v in seri], dtype=bool)
 
 
+TRUTH_LIKE = {"y", "label", "target", "outcome", "etiket", "hedef", "sonuc", "y_true"}
+
+
 def gercek_yok(df: pd.DataFrame) -> bool:
     """Gerçek sütunu yok ya da (bolum varsa test satırlarında) tamamen eksik mi: mühürlü, gerçeği bekleyen tahmin."""
     if "gercek" not in df.columns or len(df) == 0:
+        aday = [c for c in df.columns if str(c).lower() in TRUTH_LIKE]
+        if aday:     # D13-W8 #1: cutoff_windows wrote 'y', the card came out 'awaiting truth' without a word
+            warnings.warn(f"no 'truth' (alias: gercek) column, so this is an 'awaiting truth' card; the frame has "
+                          f"{aday}: if that is the outcome, rename it to 'truth' (cutoff_windows(..., y_col='truth'))",
+                          UserWarning, stacklevel=3)
         return True
     g = df["gercek"]
     if bool(_eksik(g).all()):
