@@ -132,7 +132,8 @@ except se.llm.StopError as e:                                       # no / bad k
 print(f"LLM calls: {pred['calls']} + {ctrl['calls']} control | invalid replies (filled uniform): {pred['invalid']}")
 
 # 4. Baselines from the TRAIN survey only: overall marginal (segment ignored), segment shares shrunk toward it.
-arms = {m: {} for m in ("uniform", "train_overall", "train_segment", "llm_nosegment", "llm_dist", "llm_prior")}
+arms = {m: {} for m in ("uniform", "train_overall", "train_segment", "llm_nosegment", "llm_dist", "llm_prior",
+                        "llm_prior_nosegment")}
 for q in opts:
     tq, k = train[train.question_id == q], len(opts[q])
     overall = shares(tq, q) if len(tq) else np.full(k, 1 / k)
@@ -142,7 +143,9 @@ for q in opts:
         arms["train_segment"][s, q] = (shares(ts, q) * len(ts) + 5 * overall) / (len(ts) + 5)
         arms["llm_nosegment"][s, q], arms["llm_dist"][s, q] = np.asarray(ctrl["dist"]["all"][q]), llm_v
         # 5. Ours: the LLM as a Dirichlet prior worth K_PRIOR answers, updated with the segment's train answers.
-        arms["llm_prior"][s, q] = (K_PRIOR * llm_v + shares(ts, q) * len(ts)) / (K_PRIOR + len(ts))
+        #    Control: the same update with the no-segment LLM as prior (does the segment text add anything?).
+        post = lambda p: (K_PRIOR * np.asarray(p) + shares(ts, q) * len(ts)) / (K_PRIOR + len(ts))
+        arms["llm_prior"][s, q], arms["llm_prior_nosegment"][s, q] = post(llm_v), post(ctrl["dist"]["all"][q])
 cells = [(s, q) for s in segs for q in opts]
 frame = pd.DataFrame({"unit": [f"{s}|{q}" for s, q in cells], "segment": [s for s, _ in cells],
                       "item": [q for _, q in cells], "group": [q for _, q in cells],
@@ -150,30 +153,39 @@ frame = pd.DataFrame({"unit": [f"{s}|{q}" for s, q in cells], "segment": [s for 
 
 # 6. Seal every arm BEFORE the holdout truth is joined (pre-registration; the card shows the seal).
 registry = out / ".onkayit"
-se.seal(frame.astype(str), "segment_survey predictions; ours = llm_prior, raw = llm_dist", registry=registry)
+se.seal(frame.astype(str), "segment_survey predictions; ours = llm_prior, raw = llm_dist; pairs: llm_prior vs "
+        "llm_prior_nosegment, llm_dist vs llm_nosegment", registry=registry)        # named here = not post hoc
 hc = {c: g for c, g in hold.groupby(["segment", "question_id"])}  # a cell with no holdout answers gets no truth
 frame["truth"] = [shares(hc[c], c[1]).tolist() if c in hc else None for c in cells]
 frame = frame[frame.truth.notna()]
 
-# 7. Evidence card: 1-TVD ladder, no-segment control, shuffle; CIs over questions (few -> warning; see step 8).
+# 7. Evidence card: 1-TVD ladder, no-segment controls, shuffle; CIs over questions (few -> warning; see step 8).
 report = se.evidence.evaluate(frame, title="segment_survey distributions", ours="llm_prior", raw="llm_dist",
                               task="distribution", baselines_oof=["train_overall", "train_segment"], B=a.B,
-                              prereg=registry)
+                              prereg=registry, compare=[("llm_prior", "llm_prior_nosegment"),
+                                                        ("llm_dist", "llm_nosegment")])
 s = se.evidence.summary(report)
-print("\n" + str(s["headline"]))
+print("\n" + str(s["headline_en"] or s["headline"]))
+EN = {"tahmin_": "", "taban_marjinal": "item marginal (setting B: other segments' holdout)",
+      "taban_rastgele": "uniform", "kontrol_karistir_": "shuffled "}             # internal column names -> English
+en = lambda x: re.sub("|".join(EN), lambda m: EN[m.group()], str(x))
 for r in s["ladder"]:
-    print(f"  {str(r['label'] or r['column']):40} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
-print("badge:", s["badge"], "| audits with warnings:", [d["check"] for d in s["audits"] if d["status"] == "warning"])
+    print(f"  {en(r['column'] or r['label']):50} {r['value']:.3f} [{r['lo']:.3f}, {r['hi']:.3f}]")
+for c in s.get("comparisons") or []:                                  # registered pairs (compare=), same resamples
+    print(f"  {en(c['a'])} - {en(c['b'])}: {c['diff']:+.3f} [{c['lo']:+.3f}, {c['hi']:+.3f}] ({c['verdict']})")
+print("badge:", s["badge"], "| audits with warnings:", [d["name"] or d["check"] for d in s["audits"]
+                                                        if d["status"] == "warning"])
 
 # 8. W1 (ordinal options) with a respondent bootstrap: CIs generalise to new people from the same segments.
 wide = hold.pivot_table(index=["respondent_id", "segment"], columns="question_id", values="answer",
                         aggfunc="first").reset_index()
 w1 = se.evidence.evaluate_distribution_persons(
     wide, ["segment"], list(opts), {m: arms[m] for m in arms}, metric="w1", id_col="respondent_id", options=opts,
-    B=a.B, pairs=[("llm_prior", "train_segment"), ("llm_dist", "llm_nosegment"), ("llm_dist", "train_overall")])
+    B=a.B, pairs=[("llm_prior", "train_segment"), ("llm_prior", "llm_prior_nosegment"), ("llm_dist", "llm_nosegment"),
+           ("llm_dist", "train_overall")])
 print("\nW1 by arm (lower is better), respondent bootstrap 95% CI:")
 for m, r in w1["arms"].items():
-    print(f"  {m:16} {r['point']:.3f} [{r['ci_basic'][0]:.3f}, {r['ci_basic'][1]:.3f}]")   # basic CI: small-cell bias
+    print(f"  {m:20} {r['point']:.3f} [{r['ci_basic'][0]:.3f}, {r['ci_basic'][1]:.3f}]")   # basic CI: small-cell bias
 for d in w1["diffs"]:
     print(f"  {d['a']} - {d['b']}: {d['point']:+.3f} [{d['ci_basic'][0]:+.3f}, {d['ci_basic'][1]:+.3f}]")
 bad = [f"{c['segment']}/{c['item']}" for c in w1["cells"] if c["llm_dist"] > c["train_overall"]]

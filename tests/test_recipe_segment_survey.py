@@ -30,6 +30,7 @@ class TestSegmentSurveyRecipe(unittest.TestCase):
         r = run("--out", str(self.d / "run"), "--B", "100")
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         for s in ("LLM calls: 60 + 15 control", "llm_prior", "train_segment", "W1 by arm", "llm_dist - llm_nosegment",
+                  "llm_prior - llm_prior_nosegment",
                   "badge:", "written:"):
             self.assertIn(s, r.stdout)
         self.assertIn("PPI++", r.stdout)                 # either the estimate block or the "skipped" line
