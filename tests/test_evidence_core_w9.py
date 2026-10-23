@@ -7,6 +7,7 @@ import itertools
 import tempfile
 import unittest
 import warnings
+from unittest import mock
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +83,21 @@ class PairSignContinuousTest(unittest.TestCase):
         self.assertNotEqual(_ev(df, task="continuous")["birincil"], "cift_isaret")
         self.assertEqual(_ev(df, task="continuous", primary="pair_sign")["birincil"], "cift_isaret")
 
+    def test_pair_budget_and_explicit_primary(self):
+        # review: pairs are rebuilt in every bootstrap replicate for every arm (100 items x 200 rows made evaluate
+        # 7x slower); above the budget the secondary metric is left out with a note, primary="pair_sign" keeps it
+        df = _effects(n_exp=20, per=6, seed=5)                      # 20 x 15 = 300 within-item pairs
+        with mock.patch.object(cekirdek, "CIFT_EN_FAZLA", 299):
+            rep = _ev(df, task="continuous")
+            self.assertNotIn("cift_isaret", rep["sonuclar"]["tahmin_ours"]["metrikler"])
+            self.assertTrue(any("pair_sign skipped: 300 within-item pairs" in n for n in rep["kart"]["notlar"]))
+            rep = _ev(df, task="continuous", primary="pair_sign")
+            self.assertEqual(rep["birincil"], "cift_isaret")
+            self.assertAlmostEqual(rep["sonuclar"]["tahmin_ours"]["metrikler"]["cift_isaret"]["deger"],
+                                   _hand_pairs(df, "pred_ours"), places=12)
+        with mock.patch.object(cekirdek, "CIFT_EN_FAZLA", 300):
+            self.assertIn("cift_isaret", _ev(df, task="continuous")["sonuclar"]["tahmin_ours"]["metrikler"])
+
     def test_absent_without_item_or_on_one_row_items(self):
         df = _effects(seed=2)
         rep = _ev(df.drop(columns="item"), task="continuous")
@@ -104,6 +120,26 @@ class ChoiceRowsNotApplicableTest(unittest.TestCase):
             self.assertTrue(den[CARPAN].get("uygulanamaz"))
             self.assertIn("choice", rep["carpan_uygulanamaz"])
             self.assertIsNone(rep.get("orneklem"))
+
+    def test_named_classes_are_classification(self):
+        # review: {class: p} vectors over named classes are one shared class set (next action, mode choice), not
+        # per-task alternatives: the prediction shuffle and PPI++ stay; positional codes say how to opt out
+        rng = np.random.default_rng(6)
+        cls = ["car", "rail", "walk"]
+        P = rng.dirichlet(np.ones(3) * 2, 300)
+        d = pd.DataFrame({"truth": [cls[rng.choice(3, p=p)] for p in P], "pred_ours": [dict(zip(cls, p)) for p in P],
+                          "pred_flat": [dict.fromkeys(cls, 1 / 3)] * 300})
+        rep = _ev(d, task="multiclass", multiplier=True)
+        den = _den(rep)
+        self.assertIn("tahmin karıştırma (persona takası değil)", den)
+        self.assertNotIn(PERSONA, den)
+        self.assertNotIn("carpan_uygulanamaz", rep)
+        self.assertFalse(den.get(CARPAN, {}).get("uygulanamaz"))
+        self.assertIn('level="person"', _den(_ev(_choice(), task="multiclass"))[PERSONA]["ayrinti"])
+        den = _den(_ev(_choice(), task="multiclass", level="person"))
+        self.assertIn("tahmin karıştırma (persona takası değil)", den)
+        self.assertTrue(cekirdek._konumsal([1, 2, 3]) and cekirdek._konumsal(["0", "1"]))
+        self.assertFalse(cekirdek._konumsal([0, 2]) or cekirdek._konumsal(["a", "b"]) or cekirdek._konumsal([]))
 
     def test_explicit_level_task(self):
         d = _choice()

@@ -258,11 +258,13 @@ class TestSelectionBiasAndSeal(unittest.TestCase):
                 s = self._sel(ev.evaluate(df, "t", ours=ours, task="forecast", prereg=reg, B=50, B_aggregate=10))
                 self.assertNotIn("önceden adlandırıldı", s["ayrinti"])
                 self.assertIn("not verified", s["ayrinti"])
-            reg2 = Path(t) / "reg2"   # the seal description names ours
+            reg2 = Path(t) / "reg2"   # only the seal description names ours: a seal is not a pre-registration (D7 #11)
             ev.seal(df[["item", "time", "pred_good", "pred_naive"]], "ours: pred_good", registry=reg2,
                     store_copy=False)
             s = self._sel(ev.evaluate(df, "t", ours="good", task="forecast", prereg=reg2, B=50, B_aggregate=10))
-            self.assertIn("önceden adlandırıldı", s["ayrinti"])
+            self.assertEqual(s["durum"], "uyari")
+            self.assertNotIn("önceden adlandırıldı", s["ayrinti"])
+            self.assertIn("seal ≠ pre-registration", s["ayrinti"])
             reg3 = Path(t) / "reg3"   # two method names, ours not marked -> ambiguous
             ev.seal(df[["item", "time", "pred_good", "pred_naive"]], "pred_good and pred_naive", registry=reg3,
                     store_copy=False)

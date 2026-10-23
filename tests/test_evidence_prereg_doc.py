@@ -179,8 +179,14 @@ class TestShortOursName(unittest.TestCase):
         return _sel(_quiet(ev.evaluate, self.df, ours=ours, prereg=prereg, **FAST))
 
     def test_marker_in_seal_description(self):
+        # the marker is found in a seal description, but a seal alone is not a pre-registration (D7 #11): the row
+        # says so instead of "not found"; the same marker in a pre-registration document counts
         for desc, ours in [("ours: H", "H"), ("bizim: H, tabanlar T1", "H"), ("primary: L3", "L3")]:
-            self.assertIn("önceden adlandırıldı", self._eval(desc, ours)["ayrinti"], desc)
+            s = self._eval(desc, ours)
+            self.assertEqual(s["durum"], "uyari", desc)
+            self.assertIn("seal ≠ pre-registration", s["ayrinti"], desc)
+            self.assertNotIn("önceden adlandırıldı", s["ayrinti"], desc)
+            self.assertIn("önceden adlandırıldı", self._eval("tahmin " + ours, ours, desc + "\n")["ayrinti"], desc)
         self.assertIn("bulunamadı", self._eval("ours: h", "H")["ayrinti"])      # name stays case-sensitive
 
     def test_bare_short_name_still_not_counted_and_hint(self):

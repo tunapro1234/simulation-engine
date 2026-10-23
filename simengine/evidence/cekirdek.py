@@ -19,7 +19,9 @@ from .sema import ON_EK, _normalle, _sinif_vektoru, _vektor, _vektor_mu, gercek_
 SURUM = "0.1"
 BILGI_B_ETIKET = "ayar B: hedef sorunun öbür hücrelerinin cevabı (setting B)"
 DOLGU_ESIK = 0.05   # kol başına dolgu (geçersiz → tekdüze) payı bunu aşarsa denetim uyarısı
-CIFT_EN_FAZLA = 200  # sürekli görevde pair_sign yalnız madde başına en çok bu kadar satırda (çift sayısı ~n²/2)
+# sürekli görevde pair_sign kendiliğinden yalnız toplam madde içi çift sayısı bu kadarken eklenir (her bootstrap
+# tekrarında her kolda çiftler yeniden kurulur: 2M çiftte evaluate ~7 kat yavaşlar); primary="pair_sign" sınırı kaldırır
+CIFT_EN_FAZLA = 50_000
 AZ_KUME = 10        # bootstrap birimi (küme; ab'de test) bundan azsa GA anlamsız: denetim uyarısı, rozet "yüksek" olmaz
 # api.METRIC_TO_INTERNAL'a ek İngilizce yazımlar (sklearn / yaygın adlar) → metrik.aile iç adı
 BIRINCIL_EK_ADLAR = {"log_loss": "logloss", "cross_entropy": "logloss", "roc_auc": "auc", "f1": "macro_f1",
@@ -105,21 +107,34 @@ SECIM_DUZEY = ("task", "choice", "choice_task", "gorev", "görev", "secim", "se�
 
 
 def _secim_gorevi(veri, duzey: str | None, olasilik: bool) -> tuple[str, str] | None:
-    """Satırlar seçim görevi mi (her görevin kendi seçenekleri): level="task"/"choice" ya da çok sınıfta seçenekler
-    üzerinde olasılık vektörü + madde sütunu yok. Karıştırma bir görevin vektörünü başka seçenek kümesine taşır; PPI++
-    tek bir soruya insan yanıtı ister. Aynı soruyu yanıtlayan kişilerde item= verin (karıştırma madde içinde döner).
+    """Satırlar seçim görevi mi (her görevin kendi seçenekleri): level="task"/"choice" ya da çok sınıfta konumsal
+    seçenekler (sınıflar 0..K−1 / 1..K) üzerinde olasılık vektörü + madde sütunu yok; adlı sınıflar ("car", dict
+    anahtarları) sınıflandırmadır. Karıştırma bir görevin vektörünü başka seçenek kümesine taşır; PPI++ tek bir soruya
+    insan yanıtı ister. Konum kodlu sınıflandırmada (aynı soruyu yanıtlayan kişiler) level="person" ya da item= verin.
     level= başka bir değerle verildiyse otomatik algı yapılmaz. Döner (Türkçe neden, İngilizce neden) | None."""
     ad = str(duzey).strip().lower() if duzey else None
     if ad in SECIM_DUZEY:
         return (f"level={duzey}: satırlar seçim görevi (her görevin kendi seçenekleri), kişi değil",
                 f"level={duzey}: rows are choice tasks with their own choice sets, not persons")
-    if ad or veri.gorev != "cok_sinif" or not olasilik or "madde" in veri.df:
+    if ad or veri.gorev != "cok_sinif" or not olasilik or "madde" in veri.df or not _konumsal(veri.siniflar):
         return None
-    return ("satırlar seçim görevi: seçenekler üzerinde olasılık vektörü, madde sütunu yok; vektör başka görevin "
-            "seçenek kümesine taşınırdı (aynı soruyu yanıtlayan kişilerse item= verin)",
-            "rows are choice tasks: probability vectors over alternatives without an item column, a shuffle would move "
-            "a vector onto another task's choice set and PPI++ needs human answers to one question (if the rows are "
-            "persons answering the same question, pass item=)")
+    return ("satırlar seçim görevi: konumsal seçenekler (0..K−1) üzerinde olasılık vektörü, madde sütunu yok; vektör "
+            "başka görevin seçenek kümesine taşınırdı (aynı soruyu yanıtlayan kişilerse level=\"person\" ya da item= "
+            "verin)",
+            "rows are choice tasks: probability vectors over positional alternatives (0..K-1) without an item column, "
+            "a shuffle would move a vector onto another task's choice set and PPI++ needs human answers to one question "
+            "(if the rows are persons answering the same question, pass level=\"person\" or item=)")
+
+
+def _konumsal(siniflar) -> bool:
+    """Sınıf kümesi konum kodu mu (0..K−1 ya da 1..K tamsayı): seçim görevinde seçenek sırası. Adlı sınıflar ("car",
+    "train", dict anahtarları) bütün satırlarda aynı seçenek kümesidir: sınıflandırma, seçim görevi sayılmaz."""
+    try:
+        k = sorted(float(str(s)) for s in siniflar or [])
+    except ValueError:
+        return False
+    return bool(k) and all(v.is_integer() for v in k) and k in ([float(i) for i in range(len(k))],
+                                                                  [float(i) for i in range(1, len(k) + 1)])
 
 
 def _diz(veri, sutun, kaynak: str | None = None):
@@ -641,10 +656,10 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     duzey: "segment" / "study" / "effect" (ya da her maddede segment başına tek satır) iken satır kişi değildir:
     persona karıştırma ve PPI++ 'kaç insana bedel' gerekçesiyle uygulanamaz (ozet["carpan_uygulanamaz"]). Madde
     başına sabit tahmin denetimde uyarılır (ozet["sira_tanimsiz"]); ezber_llm=False iken ham kol LLM kolu sayılır.
-    duzey="task" / "choice" (ya da çok sınıfta olasılık vektörü + madde sütunu yok) iken satırlar seçim görevidir: aynı
-    iki satır gerekçesiyle uygulanamaz. Sürekli görevde madde başına 2..CIFT_EN_FAZLA satır varsa madde içi çift
-    sıralama doğruluğu (cift_isaret = pair_sign) ikincil metrik olur. bizim/ham oof_tabanlar içindeyse PPI++ çarpanında
-    dongusel gibi sayılır (aynı etiketlerle eğitilmiş)."""
+    duzey="task" / "choice" (ya da çok sınıfta konumsal sınıflarda olasılık vektörü + madde sütunu yok) iken satırlar
+    seçim görevidir: aynı iki satır gerekçesiyle uygulanamaz. Sürekli görevde madde içi çift toplamı ≤ CIFT_EN_FAZLA
+    ise (ya da birincil="cift_isaret") madde içi çift sıralama doğruluğu (cift_isaret = pair_sign) ikincil metrik olur.
+    bizim/ham oof_tabanlar içindeyse PPI++ çarpanında dongusel gibi sayılır (aynı etiketlerle eğitilmiş)."""
     birincil = birincil_ic(birincil)
     if gercek_yok(df):
         return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
@@ -671,9 +686,17 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     birim_aralik = veri.gorev == "surekli" and d["gercek"].between(0, 1).all()
     oranli = tahmin_gorevi or birincil in ORAN_METRIKLERI
     # sürekli görev + madde başına birden çok satır: madde içi çift sıralama doğruluğu (pair_sign) ikincil metrik;
-    # çok büyük maddede (kişi × soru) çift sayısı patlar, eklenmez
-    cift = (veri.gorev == "surekli" and madde_ici and not tahmin_gorevi
-            and int(d.groupby("madde").size().max()) <= CIFT_EN_FAZLA)
+    # toplam çift sayısı CIFT_EN_FAZLA'yı aşarsa (büyük madde, kişi × soru) kendiliğinden eklenmez, not düşülür
+    cift = veri.gorev == "surekli" and madde_ici and not tahmin_gorevi
+    if cift and birincil != "cift_isaret":
+        boy = d.groupby("madde").size().to_numpy(np.int64)
+        n_cift = int((boy * (boy - 1) // 2).sum())
+        if n_cift > CIFT_EN_FAZLA:
+            cift = False
+            veri.notlar.append(f"pair_sign (cift_isaret) eklenmedi: {n_cift} madde içi çift > {CIFT_EN_FAZLA} "
+                               "(her bootstrap tekrarında yeniden kurulur, yavaş); istenirse primary=\"pair_sign\" "
+                               f"(pair_sign skipped: {n_cift} within-item pairs > {CIFT_EN_FAZLA}; pass "
+                               "primary=\"pair_sign\" to get it)")
     metrikler = aile(veri.gorev, olasilik, madde_ici and veri.gorev in ("ikili", "surekli"), birim_aralik, oran=oranli,
                      cift=cift)
     adlar = [m.ad for m in metrikler]
@@ -1298,7 +1321,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
             sec = carpan_yontemler or [bizim] + ([ham] if ham else [])
             # bizim/ham kat dışı (OOF) taban diye bildirildiyse aynı etiketlerle eğitilmiş: circular= gibi çarpan dışı
             oof_ad = set(oof_tabanlar or []) - set(dongusel or [])
-            dongusel = list(dongusel or []) + [y for y in dict.fromkeys(sec) if y and y.removeprefix(ON_EK) in oof_ad]
+            dongusel = list(dongusel or []) + [y.removeprefix(ON_EK) for y in dict.fromkeys(sec)
+                                               if y and y.removeprefix(ON_EK) in oof_ad]
             sec = [y for y in sec if y and y.removeprefix(ON_EK) not in (dongusel or [])]
             if dongusel:
                 den.append({"kontrol": "döngüsel önsel (çarpan dışı)", "durum": "uyari", "deger": len(dongusel),
@@ -1471,7 +1495,7 @@ def _onkayit_kaniti(bizim: str, onkayit: list | None, metinler: list | None, adl
                                   "açıkça işaretlenmemiş (ours: <ad>) (several method names in the pre-registration)")
     if not any(kalip.search(g) or isaret.search(g) for g in belge):
         return "aciklama", (neden + "; " if neden else "") + (
-            "yalnız mühür açıklamasında geçiyor, ön kayıt belgesinde değil: önceden adlandırıldı sayılmaz "
+            "yalnız mühür açıklamasında geçiyor, ön kayıt belgesinde değil: önceden seçildiği kanıtlanmaz "
             "(named only in a seal description, not in a pre-registration document (seal ≠ pre-registration))")
     return kod, neden
 
@@ -1482,8 +1506,8 @@ def _onkayitta_geciyor(bizim: str, onkayit: list | None, metinler: list | None) 
 
 
 def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yapilandirma) -> dict:
-    """Seçim yanlılığı satırı: 'önceden adlandırıldı' yalnız ön kayıtta (mühür açıklaması / mühürden önceki metin)
-    kanıt varsa yazılır."""
+    """Seçim yanlılığı satırı: 'önceden adlandırıldı' yalnız ön kayıt belgesinde (mühürden önceki metin) kanıt varsa
+    yazılır; yalnız mühür açıklamasındaki ad uyarıdır (kod "aciklama")."""
     sira = sorted(yontem_c, key=lambda c: -M.yon * deg(c))
     n_den = max(len(sira), int(n_yapilandirma or 0))
     en_iyi = bool(sira) and sira[0] == bc and n_den >= 4
