@@ -42,7 +42,9 @@ Return ONLY a JSON object: {answer}"""
 PCT = {"what": "the percentage", "answer": '{"pct": <number between 0 and 100>}', "scale": 100.0}
 RATE = {"what": "the share (a proportion between 0 and 1)", "answer": '{"rate": <number between 0 and 1>}',
         "scale": 1.0}
-VALUE_KEYS = ("pct", "percent", "percentage", "rate", "share", "proportion", "value", "estimate")
+PCT_KEYS = ("pct", "percent", "percentage")        # value on a 0-100 scale, whatever parse_pct asked for
+PROP_KEYS = ("rate", "share", "proportion")         # value on a 0-1 scale
+VALUE_KEYS = ("value", "estimate")                  # scale = the one asked for (parse_pct)
 _NUM = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*(%?)\s*$")
 
 
@@ -58,9 +60,14 @@ def _blind_labels(keys: list[str], blind) -> dict[str, str]:
         if missing:
             raise ValueError(f"blind= mapping has no wording for segments {missing[:3]}")
         return {str(k): str(v) for k, v in blind.items() if str(k) in keys}
-    letters = string.ascii_uppercase
-    return {k: "group " + (letters[i] if i < 26 else f"{letters[i // 26 - 1]}{letters[i % 26]}")
-            for i, k in enumerate(keys)}
+    def label(i: int) -> str:                       # A..Z, AA..AZ, ..., ZZ, AAA, ... (spreadsheet columns)
+        out = ""
+        i += 1
+        while i:
+            i, r = divmod(i - 1, 26)
+            out = string.ascii_uppercase[r] + out
+        return out
+    return {k: "group " + label(i) for i, k in enumerate(keys)}
 
 
 def rate_prompt(group: str, event: str, *, context: str = "", parse_pct: bool = True,
@@ -72,13 +79,18 @@ def rate_prompt(group: str, event: str, *, context: str = "", parse_pct: bool = 
 
 
 def parse_rate(text: str | None, *, parse_pct: bool = True) -> float | None:
-    """Reply -> rate in [0, 1], or None (no JSON number, or outside 0-100 / 0-1). Never clipped."""
+    """Reply -> rate in [0, 1], or None (no JSON number, or outside 0-100 / 0-1). Never clipped.
+    The key sets the scale: pct / percent / percentage are 0-100 and rate / share / proportion are 0-1 whichever
+    form was asked ({"rate": 0.12} under parse_pct=True is 12 %, not 0.12 %); a "%" string is 0-100; value /
+    estimate, a single other key or a bare number use the asked scale. The asked key is looked up first."""
     data = json_extract(text, default=None) if text else None
+    pct = parse_pct
     if isinstance(data, Mapping):
         low = {str(k).strip().lower(): v for k, v in data.items()}
-        val = next((low[k] for k in VALUE_KEYS if k in low), None)
-        if val is None and len(low) == 1:
-            val = next(iter(low.values()))
+        order = (PCT_KEYS + PROP_KEYS if parse_pct else PROP_KEYS + PCT_KEYS) + VALUE_KEYS
+        key = next((k for k in order if k in low), next(iter(low)) if len(low) == 1 else None)
+        val = low[key] if key is not None else None
+        pct = True if key in PCT_KEYS else False if key in PROP_KEYS else parse_pct
     elif isinstance(data, (int, float)) and not isinstance(data, bool):
         val = data
     else:
@@ -88,10 +100,10 @@ def parse_rate(text: str | None, *, parse_pct: bool = True) -> float | None:
         m = _NUM.match(val)
         if not m:
             return None
-        val = float(m.group(1)) / (100.0 if m.group(2) and not parse_pct else 1.0)    # "4%" as a proportion
+        val, pct = float(m.group(1)), pct or bool(m.group(2))                       # "4%" is 4 of 100
     if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
         return None
-    hi = PCT["scale"] if parse_pct else RATE["scale"]
+    hi = PCT["scale"] if pct else RATE["scale"]
     if not 0 <= val <= hi:
         return None
     return float(val) / hi
@@ -111,7 +123,7 @@ def _summary(vals: list[list[float | None]], suffix: str = "") -> dict[str, list
 def segment_rate_prior(*args, llm=None, segments=MISSING, event=MISSING, samples: int = 5, blind: Any = False,
                        parse_pct: bool = True, context: str = "", system: str = RATE_SYSTEM,
                        template: str = RATE_TEMPLATE, max_tokens: int = 200, ask_kw: dict | None = None,
-                       usage: Usage | None = None) -> pd.DataFrame:
+                       usage: Usage | None = None, errors: list | None = None) -> pd.DataFrame:
     """Per-segment event-rate prior from `samples` independent answers per segment.
 
     segments: {key: description} or a list of descriptions (key = description). event: what happens to a unit,
@@ -120,14 +132,16 @@ def segment_rate_prior(*args, llm=None, segments=MISSING, event=MISSING, samples
     Returns a DataFrame indexed by segment (name "segment"): mean, sd (ddof=1, NaN under 2 answers), n_ok,
     n_failed, and with blind the same columns suffixed "_blind". Rates are in [0, 1]. attrs: "samples" (long rows:
     segment, arm, sample, rate, text), "prompts", "usage", "warnings". Pass `df[["mean"]]` as
-    `GroupTransfer(group_features=)` (every column becomes a feature). llm may be passed first (legacy) or as llm=."""
+    `GroupTransfer(group_features=)` (every column becomes a feature). llm may be passed first (legacy) or as llm=.
+    errors: a list that receives the call errors (they stay failed samples); without it, a sample whose calls all
+    failed with an error (bad key, backend down) raises the first error, as in `ask_many` / `survey`."""
     llm, (segments, event) = resolve_llm("segment_rate_prior", args, llm, {"segments": segments, "event": event})
     segs = _segments(segments)
     if not segs:
         raise ValueError("segment_rate_prior needs at least one segment")
     keys = list(segs)
     arms = {"named": segs}
-    if blind is not False and blind is not None:
+    if isinstance(blind, Mapping) or (blind is not None and bool(blind)):
         arms["blind"] = _blind_labels(keys, blind)
     jobs = [(a, k) for a in arms for k in keys]
     prompts = [(system, rate_prompt(arms[a][k], str(event), context=context, parse_pct=parse_pct, template=template))
@@ -138,11 +152,18 @@ def segment_rate_prior(*args, llm=None, segments=MISSING, event=MISSING, samples
     s0 = int(kw.pop("sample", 0))
     vals: dict[tuple[str, str], list] = {j: [] for j in jobs}
     rows = []
+    n_err = 0
     for i in range(samples):
         skw = {**kw, "sample": s0 + i} if (samples > 1 or s0) else kw     # samples=1: the plain call
         errs: list = []
+        st: list = []
         resp = ask_many(llm, prompts, max_tokens=max_tokens, usage=usage, tag="rate_prior",
-                        reframe=REFRAME_NOTE_GENERIC, errors=errs, **skw)
+                        reframe=REFRAME_NOTE_GENERIC, errors=errs, statuses=st, **skw)
+        if errors is None and errs and all(x in ("empty", "error") for x in st):
+            raise errs[0]                       # every call failed: a setup problem, not a sample of answers
+        n_err += sum(x in ("empty", "error") for x in st)
+        if errors is not None:
+            errors.extend(errs)
         for (a, k), r in zip(jobs, resp):
             text = getattr(r, "text", None) if r is not None else None
             v = parse_rate(text, parse_pct=parse_pct)
@@ -155,8 +176,9 @@ def segment_rate_prior(*args, llm=None, segments=MISSING, event=MISSING, samples
     n_bad = sum(r["rate"] is None for r in rows)
     warns = []
     if n_bad:
-        warns.append(f"segment_rate_prior: {n_bad} of {len(rows)} sampled answers failed (no reply, no number or "
-                     f"outside {'0-100 %' if parse_pct else '0-1'}); counted in n_failed, mean over the rest")
+        warns.append(f"segment_rate_prior: {n_bad} of {len(rows)} sampled answers failed ({n_err} call errors or "
+                     f"empty replies, the rest refused, no number or outside {'0-100 %' if parse_pct else '0-1'}); "
+                     "counted in n_failed, mean over the rest")
         warnings.warn(warns[0], RuntimeWarning, stacklevel=2)
     df.attrs["samples"] = rows
     df.attrs["prompts"] = [{"segment": k, "arm": a, "system": s, "user": u} for (a, k), (s, u) in zip(jobs, prompts)]

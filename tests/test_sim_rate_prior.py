@@ -125,6 +125,46 @@ class TestSegmentRatePrior(unittest.TestCase):
         self.assertEqual(df.loc["new|fast", "n_ok"], 2)
         self.assertEqual(df.attrs["usage"]["error_calls"], 2)
 
+    def test_key_sets_scale(self):
+        # review fix: a proportion key under parse_pct=True is not read as a percentage (was 100x too small)
+        self.assertAlmostEqual(parse_rate('{"rate": 0.12}'), 0.12)
+        self.assertAlmostEqual(parse_rate('{"pct": 12}', parse_pct=False), 0.12)
+        self.assertAlmostEqual(parse_rate('{"rate": 0.12, "pct": 30}', parse_pct=False), 0.12)   # asked key first
+        self.assertAlmostEqual(parse_rate('{"pct": 30, "rate": 0.12}'), 0.30)
+        self.assertIsNone(parse_rate('{"rate": 12}'))              # 12 on a 0-1 key: failed, never rescaled
+        self.assertAlmostEqual(parse_rate('{"estimate": 12}'), 0.12)
+        self.assertAlmostEqual(parse_rate('{"estimate": 0.12}', parse_pct=False), 0.12)
+        self.assertAlmostEqual(parse_rate('{"rate": "4%"}'), 0.04)
+        self.assertAlmostEqual(parse_rate("4"), 0.04)
+        self.assertAlmostEqual(parse_rate("0.04", parse_pct=False), 0.04)
+
+    def test_all_calls_errored_raises(self):
+        # review fix: a bad key / dead backend raised nothing and returned an all-NaN table
+        class DeadLLM(FakeLLM):
+            def map(self, prompts, *, max_tokens=256, return_exceptions=False, parallel=None, **kw):
+                return [LLMError("401 invalid key") for _ in prompts]
+        with self.assertRaisesRegex(LLMError, "401"):
+            segment_rate_prior(DeadLLM(), SEGS, EVENT, samples=2)
+        errs = []
+        with self.assertWarnsRegex(RuntimeWarning, "6 of 6 .*6 call errors"):
+            df = segment_rate_prior(DeadLLM(), SEGS, EVENT, samples=2, errors=errs)
+        self.assertEqual(len(errs), 6)
+        self.assertTrue(df["mean"].isna().all())
+
+    def test_blind_off_values_and_many_labels(self):
+        llm = SampleLLM()
+        df = segment_rate_prior(llm, SEGS, EVENT, samples=1, blind=0)
+        self.assertNotIn("mean_blind", df.columns)
+        self.assertEqual(len(llm.calls), 3)
+        keys = [f"s{i}" for i in range(705)]
+        llm = FakeLLM(lambda s, u: '{"pct": 5}')
+        df = segment_rate_prior(llm, keys, EVENT, samples=1, blind=True)
+        labels = [p["user"].split("Consider ")[1].split(".")[0] for p in df.attrs["prompts"] if p["arm"] == "blind"]
+        self.assertEqual(labels[:2] + labels[25:28] + labels[-3:],
+                         ["group A", "group B", "group Z", "group AA", "group AB", "group AAA", "group AAB",
+                          "group AAC"])
+        self.assertEqual(len(set(labels)), 705)
+
     def test_blind_arm(self):
         llm = SampleLLM()
         df = segment_rate_prior(llm, SEGS, EVENT, samples=1, blind=True)

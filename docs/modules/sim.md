@@ -450,7 +450,10 @@ A per-segment event rate as a group feature, with no personas: one call per segm
 with `simengine.llm.jsonx.json_extract` (a bare number or a `"12%"` string also works). A reply with no number or
 outside 0-100 (0-1 with `parse_pct=False`) is a failed sample: it counts in `n_failed`, the mean is over the
 rest, and one `RuntimeWarning` gives the count. Calls go through `ask_many` (one `llm.map` batch per sample, soft
-refusals re-asked once, an errored call is a failed sample, `usage.error_calls`).
+refusals re-asked once, an errored call is a failed sample, `usage.error_calls`). When every call of a sample
+fails with an error (bad key, backend down) the first error is raised, as in `survey`; pass `errors=[]` to keep
+the failed samples and collect the errors instead. The JSON key sets the scale: `pct` / `percent` / `percentage`
+are 0-100 and `rate` / `share` / `proportion` are 0-1 whichever form was asked (`{"rate": 0.12}` is 12 %).
 
 ```python
 segs = {"new|fast": "new visitors whose first two page views are under 60 seconds apart", ...}
