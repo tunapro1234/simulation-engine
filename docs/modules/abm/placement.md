@@ -13,8 +13,8 @@ most people under a budget. Then check the pick on days it never saw, against th
 | `holdout` | temporal holdout: place on train days, score reach on test days, paired user-bootstrap CI against the greedy |
 | `toy_trajectories` | synthetic fixture for tests and examples (not a mobility model) |
 
-The module is not registered in `simengine/abm/__init__.py` yet. Import it directly:
-`import simengine.abm.placement as pl`.
+Most names are exported from `simengine.abm`. `adoption`, `AdoptionRun` and `holdout` stay in the submodule
+(`simengine.abm.adoption` is the adoption-ABM module), so the examples use `import simengine.abm.placement as pl`.
 
 ## Trajectory protocol
 

@@ -8,7 +8,7 @@ It has three dynamics:
 - an LLM-agent variant: each decision is a prompt that describes the agent's neighbourhood, prompts are batched
   through `llm.map`, replies are parsed, and an optional persona text goes into the system prompt.
 
-Import it directly (`import simengine.abm.schelling as S`) until the integrator registers it in `simengine.abm`.
+The main names are exported from `simengine.abm`; the examples use `import simengine.abm.schelling as S`.
 
 ## API
 

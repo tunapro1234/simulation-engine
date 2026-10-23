@@ -10,7 +10,8 @@
   to stay home, given its symptoms, the town's case numbers and an optional public message. Agents who go out mix
   and can infect each other.
 
-Import it directly until the integrator registers it in `simengine.abm`: `import simengine.abm.spatial_sir as ep`.
+The main names are exported from `simengine.abm` (`rule_responder` stays in the submodule); the examples use
+`import simengine.abm.spatial_sir as ep`.
 
 ## API
 

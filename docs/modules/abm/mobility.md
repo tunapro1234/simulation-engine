@@ -5,8 +5,8 @@ Human mobility on a 200 x 200 grid (500 m cells) with 30-minute slots, as in YJM
 days. The module provides the HuMob metrics (GEO-BLEU and DTW), three baselines that need no model, and an
 exploration and preferential return (EPR) agent simulator. The bench task `yjmob` wraps the HuMob split.
 
-Import directly until the integrator registers it: `import simengine.abm.mobility as M`,
-`from simengine.bench.tasks.yjmob import YJMob`.
+The main names are exported from `simengine.abm` (`clean` and the constants stay in the submodule); the
+examples use `import simengine.abm.mobility as M` and `from simengine.bench.tasks.yjmob import YJMob`.
 
 ## API
 

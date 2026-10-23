@@ -2,8 +2,8 @@
 
 `simengine/abm/grid.py` is the base layer for grid agent-based models. It provides the environment, the agent
 arrays, the schedulers, seeded random generators and four spatial metrics. It contains no model of its own:
-Schelling, voter and resource models build on it. Import it directly (`import simengine.abm.grid as G`) until the
-integrator registers it in `simengine.abm`.
+Schelling, voter and resource models build on it. Its public names are exported from `simengine.abm` (except
+`run`, which stays `simengine.abm.grid.run`); the examples import the module as `import simengine.abm.grid as G`.
 
 ## API
 
