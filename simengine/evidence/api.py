@@ -62,6 +62,9 @@ COLUMN_TO_INTERNAL = {
     "weight": "agirlik", "fold": "kat", "arm": "kol", "options": "secenekler",
 }
 SPLIT_TO_INTERNAL = {"train": "egitim"}
+INTERNAL_TO_COLUMN = {"satir": "row"}       # bootstrap cluster names in summary() / the card
+for _en, _tr in COLUMN_TO_INTERNAL.items():
+    INTERNAL_TO_COLUMN.setdefault(_tr, _en)
 REVERSE_PREFIX = ("reverse_", "ters_")   # position-swap column for pair prompts (A/B order swapped)
 
 METRIC_TO_INTERNAL = {
@@ -373,7 +376,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              block_col: str | None = None, point_pairs: Sequence | None = None,
              prereg_doc: str | os.PathLike | Sequence | None = None, split: str | None = None,
              balance_col: str | None = None, dominance_share: float = DOMINANT_BLOCK_SHARE,
-             rate_error_by: str | Sequence[str] | None = None) -> dict:
+             rate_error_by: str | Sequence[str] | None = None, cluster: str | None = None) -> dict:
     """Long table -> evidence report (baseline ladder, paired cluster-bootstrap CIs, calibration, segments,
     audits, effective-sample multiplier, evidence card). Same numbers as kanit.degerlendir.
 
@@ -391,6 +394,12 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         resamples numerator and denominator together, ratio of sums per replicate) and "bias" (sum p / sum y - 1,
         signed diagnostic, never primary). Passing primary="wmape" adds both to any continuous evaluation.
     B / B_aggregate: bootstrap replicates for per-unit / aggregate metrics. Cluster = group > item > row.
+    cluster: bootstrap cluster column ("item", "group" or any column) overriding group > item > row; every value is one
+        cluster (G3 #13: the same item repeated in 18 countries needs cluster="item"; the unit bootstrap gave
+        [-0.117, -0.037], the item-clustered one [-0.188, +0.007]). The group column still sets the cross-fitting
+        folds. With aggregate_by= it must be constant within each group; with block_col= it is the cluster side of
+        the two-way bootstrap. NaN in the column raises ValueError. Named on the card ("clusters: N (cluster=`x`)"),
+        `summary()["cluster"]`, `summary()["n_clusters"]`.
     memorization: result dict of `memorization_audit` or a path to its JSON.
     prereg: seal records, a registry directory (its chain is attached to the report and its small text files are
         searched for the ours name), a text file (e.g. "ONKAYIT.md"), or a list/tuple mixing them
@@ -556,6 +565,13 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         blok = COLUMN_TO_INTERNAL.get(block_col, block_col)
         if blok not in d.columns:
             raise ValueError(f"block_col {block_col!r} is not a column of the frame")
+    kume = None
+    if cluster is not None:
+        kume = COLUMN_TO_INTERNAL.get(cluster, cluster) if cluster not in d.columns else cluster
+        if kume not in d.columns:
+            raise ValueError(f"cluster {cluster!r} is not a column of the frame")
+        if d[kume].isna().any():
+            raise ValueError(f"cluster column {cluster!r} has {int(d[kume].isna().sum())} missing (NaN) rows")
     denge = blok
     if balance_col is not None:
         denge = COLUMN_TO_INTERNAL.get(balance_col, balance_col)
@@ -585,7 +601,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     if aggregate_by is not None:
         d, toplama = _aggregate(d, aggregate_by, _task(task),
                                 halves=int(noise_ceiling_repeats) if noise_ceiling else None, seed=seed, how=aggregate,
-                                keep=(blok,) if blok else ())
+                                keep={**({kume: "cluster"} if kume else {}), **({blok: "block_col"} if blok else {})})
         tavan_yarim = toplama.pop("halves", None)
         task = "continuous"
         limits = list(limits or []) + [toplama["note"]]
@@ -600,6 +616,9 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
                 "subsample (noted on the card)." if tek and multiplier_max_rows else
                 "The PPI++ multiplier runs on the whole table and can take minutes.")
             + " Pass multiplier=False to skip it.", UserWarning, stacklevel=2)
+    if kume is not None:
+        d = d.copy(deep=False)
+        d.attrs = {**d.attrs, "kume_sutun": kume}     # sema.hazirla reads it: the bootstrap cluster column
     try:
         rep = degerlendir(
             d, title, dataset, gorev=_task(task), yontemler=methods_i, bizim=_method(ours),
@@ -617,6 +636,8 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             os.unlink(tmp)
     if toplama:
         rep["toplama"] = {k: v for k, v in toplama.items() if k != "note"}
+    if kume is not None:
+        rep["kume_sutunu"] = kume
     if prereg_texts:
         rep["onkayit_belgeleri"] = [{"dosya": e["dosya"], "sha256": e["sha256"], "zaman_kaynagi": e["zaman_kaynagi"],
                                      "zaman_utc": datetime.fromtimestamp(e["zaman"]).astimezone().isoformat(timespec="seconds"),
@@ -1028,7 +1049,7 @@ def _within_variance(y: np.ndarray, codes: np.ndarray, G: int):
 
 
 def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = None, seed: int = 0,
-               how: str = "mean", keep: Sequence[str] = ()):
+               how: str = "mean", keep: Sequence[str] | dict = ()):
     """Average (how="mean") or sum (how="sum") truth, predictions, retest and model ceiling per group (x item x split
     when present). halves: number of random within-group half splits for the split-half noise ceiling (None: not
     computed)."""
@@ -1079,8 +1100,10 @@ def _aggregate(d: pd.DataFrame, by: str, task: str | None, halves: int | None = 
             continue
         s = d.groupby(keys, sort=True, dropna=False)[c]
         if not (s.nunique(dropna=False) <= 1).all():
-            raise ValueError(f"block_col {c!r} varies within aggregate_by groups; aggregate by a finer key or "
-                             "use a block column that is constant within each group")
+            what = keep.get(c, "block_col") if isinstance(keep, dict) else "block_col"
+            raise ValueError(f"{what} {c!r} varies within aggregate_by groups; aggregate by a finer key or "
+                             f"use a {'block' if what == 'block_col' else what} column that is constant within "
+                             "each group")
         agg[c] = s.first().to_numpy()
     if col != "grup":
         agg["grup"] = agg[col].astype(str)
@@ -1793,6 +1816,9 @@ def summary(report: dict) -> dict:
         "awaiting_truth": bool(report.get("gercek_bekleniyor")),
         "predictions": report.get("tahmin_ozeti"),
         "aggregate": report.get("toplama"),
+        "cluster": INTERNAL_TO_COLUMN.get(report.get("tutma_birimi"), report.get("tutma_birimi")),
+        "n_clusters": (report.get("kart") or {}).get("n_kume"),
+        "cluster_override": report.get("kume_sutunu") is not None,
         "offset": report.get("ofset"),
         "noise_ceiling": report.get("gurultu_tavani"),
         "se_ceiling": _se_ceiling_en(report.get("se_tavani")),
@@ -2087,7 +2113,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         out.append("")
         out.append("Flags: " + ", ".join(_md(_en_text(e)) if en else _dot(e, lang) for e in k["etiketler"]))
     meta = (f"Task: {s['task'] or '—'} · primary metric: {s['primary_metric'] or '—'}"
-            + (f" (`{s['primary_metric_internal']}`)" if s['primary_metric_internal'] else "") + f" · clusters: {k.get('n')}")
+            + (f" (`{s['primary_metric_internal']}`)" if s['primary_metric_internal'] else "") + f" · clusters: {k.get('n')}"
+            + (f" (cluster=`{s['cluster']}`)" if s.get("cluster_override") else ""))
     if k.get("kaynak"):
         meta += f" · source: {_md(k.get('kaynak'))}"
     if s.get("aggregate"):

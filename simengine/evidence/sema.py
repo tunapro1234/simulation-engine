@@ -14,6 +14,10 @@ Satır = bir birim (kişi, kişi×soru, segment×soru, varyant). Sütunlar:
                     eğitim satırları sızıntı kontrolüne ve baseline uydurmaya girer.
   zaman             isteğe bağlı. Zaman sızıntısı kontrolü.
   birim             isteğe bağlı. Satır kimliği (tekrar kontrolü).
+
+Bootstrap kümesi varsayılan grup > madde > satır; çerçevenin `attrs["kume_sutun"]` değeri (api.evaluate(cluster=))
+bunu ezer: o sütunun her değeri bir küme (ör. aynı madde 18 ülkede tekrarlanıyorsa cluster="item", G3 #13).
+Grup çapraz uydurma / bölme anahtarı olarak kalır; yalnız bootstrap kümesi değişir.
 """
 from __future__ import annotations
 
@@ -67,10 +71,13 @@ class Veri:
     tam: pd.DataFrame | None = None       # ham girdi (sızıntı kontrolü için)
     notlar: list[str] = field(default_factory=list)
     blok: str | None = None               # blok bootstrap sütunu (köken/hafta): verilirse bloklar × kümeler iki yönlü örneklenir
+    kume_sutun: str | None = None         # bootstrap küme sütunu (cluster=): grup > madde > satır sırasını ezer
 
     @property
     def taban_kume(self) -> np.ndarray:
-        """Blok dışı bootstrap kümesi: grup > madde > satır."""
+        """Blok dışı bootstrap kümesi: kume_sutun (cluster=) ya da grup > madde > satır."""
+        if self.kume_sutun is not None and self.kume_sutun in self.df:
+            return pd.factorize(self.df[self.kume_sutun])[0]
         for s in ("grup", "madde"):
             if s in self.df:
                 return pd.factorize(self.df[s])[0]
@@ -78,6 +85,8 @@ class Veri:
 
     @property
     def taban_kume_adi(self) -> str:
+        if self.kume_sutun is not None and self.kume_sutun in self.df:
+            return self.kume_sutun
         for s in ("grup", "madde"):
             if s in self.df:
                 return s
@@ -138,9 +147,12 @@ def gorev_bul(df: pd.DataFrame, yontem_sutunlari: list[str]) -> str:
 
 def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | None = None,
             siniflar: list | None = None) -> Veri:
-    """Girdiyi doğrula, görev tipini bul, vektör sütunlarını çöz."""
+    """Girdiyi doğrula, görev tipini bul, vektör sütunlarını çöz. df.attrs["kume_sutun"]: bootstrap küme sütunu."""
     if "gercek" not in df.columns:
         raise ValueError("'truth' column is required (alias: gercek)")
+    kume_sutun = df.attrs.get("kume_sutun")
+    if kume_sutun is not None and kume_sutun not in df.columns:
+        raise ValueError(f"cluster column {kume_sutun!r} is not a column of the frame")
     tsut = [c for c in df.columns if c.startswith(ON_EK)]
     if yontemler:
         tsut = [ON_EK + y for y in yontemler]
@@ -210,7 +222,7 @@ def hazirla(df: pd.DataFrame, gorev: str | None = None, yontemler: list[str] | N
 
     segs = [c for c in d.columns if c == "segment" or c.startswith("seg_")]
     return Veri(df=d, gorev=gorev, yontemler=[c[len(ON_EK):] for c in tsut], siniflar=siniflar,
-                segmentler=segs, egitim=egitim, tam=tam, notlar=notlar)
+                segmentler=segs, egitim=egitim, tam=tam, notlar=notlar, kume_sutun=kume_sutun)
 
 
 def _eksik(seri: pd.Series) -> np.ndarray:

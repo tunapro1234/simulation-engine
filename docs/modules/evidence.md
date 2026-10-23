@@ -1166,3 +1166,13 @@ ev.summary(rep)["rate_error"]                                          # rows, o
   registry carries no machine path. `onkayit.muhurle(..., kaynak_yolu="tam")` (alias `"full"`; CLI
   `muhurle --tam-yol`) keeps the path as given. Older records with full paths still verify (`zincir_dogrula`,
   `dogrula`) and new records append to them; readers (selection-bias text match, card) use the name only.
+
+## Cluster override, per-unit mean, dropped units, paired_diff blocks, badge threshold (G3 #13, D7 #9, D9 #3b #4d, D12 #11)
+
+```python
+rep = ev.evaluate(df, ours="m", cluster="item")                     # bootstrap clusters = items, not cells
+```
+
+| option | what it does | source rehearsal |
+|---|---|---|
+| `evaluate(cluster="item")` | bootstrap cluster column ("item", "group" or any column), overriding group > item > row; group still sets the cross-fitting folds; constant within `aggregate_by` groups; the cluster side of the `block_col` two-way bootstrap; card "clusters: N (cluster=`item`)", `summary()["cluster"]`, `["n_clusters"]` | G3 #13: the same item (question × amount) in 18 countries, unit bootstrap [-0.117, -0.037] vs item-clustered [-0.188, +0.007] |
