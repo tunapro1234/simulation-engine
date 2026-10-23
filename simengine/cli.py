@@ -230,7 +230,10 @@ def cmd_evaluate(a) -> int:
     point_pairs = _point_pairs_arg(a.point_pairs)
     df = _read_table(a.table)
     _check_methods(df, [("--ours", a.ours), ("--raw", a.raw)]
-                   + [("--methods", m) for m in _csv_list(a.methods) or []])
+                   + [("--methods", m) for m in _csv_list(a.methods) or []]
+                   # a misspelt pair column would otherwise only fail after the whole bootstrap run
+                   + [("--point-pairs", m) for pair in (point_pairs if isinstance(point_pairs, list) else [])
+                      for m in pair])
     mmr = a.multiplier_max_rows
     extra = {} if mmr is None else {"multiplier_max_rows": (mmr or None)}
     if a.noise_ceiling_repeats is not None:
@@ -269,6 +272,10 @@ def cmd_evaluate(a) -> int:
     if s.get("badge") == "awaiting truth" and not a.prereg:
         print("note: awaiting truth and no --prereg: seal the predictions first (se.seal(...)) and pass the "
               "registry directory, so the card carries the seal hashes.", file=sys.stderr)
+    if point_pairs == "auto" and not report.get("ortalama_medyan"):
+        o = (a.ours or "<ours>").removeprefix("pred_")
+        print(f"note: --point-pairs auto added no mean/median row: it needs a pred_{o}_median "
+              "column, --task forecast and an L1 primary (mae / wmape); or pass MEAN:MEDIAN pairs", file=sys.stderr)
     if not a.primary:
         print(f"warning: --primary not given; graded on the task default '{s.get('primary_metric')}'. Pass the "
               "metric you pre-registered, e.g. --primary auc.", file=sys.stderr)

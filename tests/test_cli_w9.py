@@ -114,6 +114,25 @@ class TestCliW9(unittest.TestCase):
         card = (out / "card.md").read_text(encoding="utf-8")
         self.assertIn("median", card.lower())
 
+    def test_point_pairs_unknown_column_fails_before_evaluate(self):
+        # a misspelt median column used to surface only after the whole bootstrap run
+        with mock.patch("simengine.evidence.evaluate") as ev:
+            code, _, err = run_cli("evaluate", self.csv, "--ours", "good", "--point-pairs", "good:good_medain")
+        self.assertEqual(code, 2)
+        self.assertIn("pred_good_medain", err)
+        self.assertIn("--point-pairs", err)
+        ev.assert_not_called()
+
+    def test_point_pairs_auto_without_median_column_says_so(self):
+        csv = str(self.dir / "nomed.csv")
+        frame().drop(columns="pred_good_median").to_csv(csv, index=False)
+        code, _, err = run_cli("evaluate", csv, "--ours", "good", "--task", "forecast", "--primary", "mae",
+                               "--unlabeled-baselines", "naive", "--point-pairs", "auto", "--no-multiplier",
+                               "--B", "20", "--B-aggregate", "10", "--out", str(self.dir / "nomed"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("--point-pairs auto added no mean/median row", err)
+        self.assertIn("pred_good_median", err)
+
 
 if __name__ == "__main__":
     unittest.main()
