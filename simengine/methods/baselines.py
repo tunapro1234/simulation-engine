@@ -1016,20 +1016,32 @@ class LightGBMBaseline:
     ``predict_proba(X, raw=True)`` the uncalibrated ones. Without it, calibrate held-out predictions yourself with
     ``BinaryCalibrator``.
 
+    ``refit_full=True`` (default off) is the "tree count from early stopping, then train on everything" step: after
+    early stopping on ``eval_set`` (required), the model is refit once on train + eval rows with
+    ``round(best_iteration_ * refit_scale)`` trees (``refit_scale`` 1.1 by default: ~10% more rows, a few more trees).
+    ``best_iteration_`` / ``n_estimators_`` keep both counts; categories cover the eval rows too. No held-out score is
+    left after the refit, so read the dev score from a ``refit_full=False`` fit. With ``calibrate`` it needs a
+    separate ``calibrate_set`` (the eval rows are now training rows); ``sample_weight`` is refused (eval rows have
+    none).
+
     Usage::
 
         m = LightGBMBaseline(scale_pos_weight=20, calibrate="platt", min_child_samples=300)
         m.fit(X_tr, y_tr, eval_set=(X_dev, y_dev))
         p = m.predict_proba(X_test)                 # calibrated; raw=True for the reweighted score
+        LightGBMBaseline(refit_full=True).fit(X_tr, y_tr, eval_set=(X_dev, y_dev))   # final model on train + dev
     """
 
     CALIBRATE = (None, "platt")
 
     def __init__(self, kind: str = "auto", seed: int = 0, objective: str | None = None, calibrate: str | None = None,
-                 **params):
+                 refit_full: bool = False, refit_scale: float = 1.1, **params):
         if calibrate not in self.CALIBRATE:
             raise ValueError(f"calibrate must be one of {self.CALIBRATE}, got {calibrate!r}")
+        if not refit_scale > 0:
+            raise ValueError(f"refit_scale must be > 0, got {refit_scale!r}")
         self.kind, self.seed, self.objective, self.calibrate, self.params = kind, seed, objective, calibrate, params
+        self.refit_full, self.refit_scale = refit_full, refit_scale
 
     def _frame(self, X):
         X = pd.DataFrame(X).copy()
@@ -1062,6 +1074,13 @@ class LightGBMBaseline:
             raise ValueError(f"calibrate={self.calibrate!r} is for a binary target, this one is {self.kind_}")
         if self.calibrate and cal_set is None:
             raise ValueError(f"calibrate={self.calibrate!r} needs held-out rows: pass eval_set= or calibrate_set=")
+        if self.refit_full:
+            if eval_set is None:
+                raise ValueError("refit_full=True needs eval_set= (early stopping picks the tree count)")
+            if self.calibrate and calibrate_set is None:
+                raise ValueError("refit_full=True trains on the eval rows: calibrate needs a separate calibrate_set=")
+            if w is not None:
+                raise ValueError("refit_full=True with sample_weight: the eval rows have no weights to refit with")
         self.columns_ = list(X.columns)
         self.cat_ = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
         self.categories_ = {c: sorted(X[c].astype(str).unique()) for c in self.cat_}
@@ -1088,8 +1107,21 @@ class LightGBMBaseline:
             yv = np.asarray(eval_set[1])
             yv = yv.astype(str) if self.kind_ == "multiclass" else yv
             kw.update(_eval_kw(Model, self._frame(eval_set[0]), yv))
+            if self.kind_ == "multiclass" and "eval_y" in kw:
+                # LightGBM 4.7 label-encodes eval_set labels but not eval_y: give it the class codes (sorted order)
+                cls = np.unique(y)
+                if not np.isin(yv, cls).all():
+                    raise ValueError(f"eval_set has classes the training rows lack: {sorted(set(yv) - set(cls))[:5]}")
+                kw["eval_y"] = (np.searchsorted(cls, yv),)
             kw["callbacks"] = [lgb.early_stopping(100, verbose=False)]
         self.model_ = Model(**prm).fit(self._frame(X), y, **kw)
+        if self.refit_full:
+            self.best_iteration_ = int(self.model_.best_iteration_ or prm["n_estimators"])
+            self.n_estimators_ = max(1, int(round(self.best_iteration_ * self.refit_scale)))
+            X = pd.concat([X, pd.DataFrame(eval_set[0])[self.columns_]], ignore_index=True)
+            y = np.concatenate([y, yv.astype(y.dtype)])
+            self.categories_ = {c: sorted(X[c].astype(str).unique()) for c in self.cat_}
+            self.model_ = Model(**{**prm, "n_estimators": self.n_estimators_}).fit(self._frame(X), y)
         if self.kind_ == "multiclass":
             self.classes_ = list(self.model_.classes_)
         self.calibrator_ = None
