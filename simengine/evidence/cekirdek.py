@@ -81,14 +81,19 @@ TOPLU_DUZEY = {"segment": "segment", "study": "study", "calisma": "study", "çal
 
 def _toplu_duzey(veri, duzey: str | None, madde_ici: bool) -> tuple[str, str] | None:
     """Satırlar kişi değil segment / çalışma / etki tahmini mi: level= ya da her maddede segment başına tek satır.
-    Döner (Türkçe neden, İngilizce neden) | None."""
+    Otomatik algı yalnız segment hücreleri maddeler arasında tekrar eden bir ızgara ise (farklı hücre sayısı ≤ madde
+    başına en çok satır): kişi düzeyinde ince segment (ör. tam yaş) her maddede tekil olsa da ızgara değildir.
+    level= başka bir değerle (ör. "person") verildiyse otomatik algı yapılmaz. Döner (Türkçe neden, İngilizce neden) | None."""
     ad = TOPLU_DUZEY.get(str(duzey).strip().lower()) if duzey else None
     if ad:
         return (f"level={duzey}: satırlar {ad} düzeyinde tahmin, kişi değil",
                 f"level={duzey}: rows are {ad}-level estimates, not persons")
     d = veri.df
-    if veri.segmentler and "madde" in d and madde_ici and \
-            int(d.groupby(["madde", *veri.segmentler], dropna=False).size().max()) == 1:
+    if duzey or not (veri.segmentler and "madde" in d and madde_ici):
+        return None
+    boy = d.groupby(["madde", *veri.segmentler], dropna=False).size()
+    hucre = len(d[veri.segmentler].drop_duplicates())
+    if int(boy.max()) == 1 and hucre <= int(d.groupby("madde").size().max()):
         return ("her maddede segment başına tek satır: satırlar segment tahmini, kişi değil",
                 "one row per segment in every item: rows are segment estimates, not persons")
     return None
@@ -904,12 +909,15 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         ga_var = bool(np.isfinite(a_) and np.isfinite(u_))
         kotu = ga_var and (u_ < 0 if M.yon > 0 else a_ > 0)
         iyi_ = ga_var and (a_ > 0 if M.yon > 0 else u_ < 0)
-        den.append({"kontrol": "en güçlü diğer yöntem", "durum": "uyari" if kotu else "tamam", "deger": f_,
+        # GA yoksa beraberlik de söylenemez: eski davranış (nokta işareti) korunur, "yalnız nokta tahmini" diye
+        nokta_kotu = not ga_var and bool(M.yon * f_ < 0)
+        den.append({"kontrol": "en güçlü diğer yöntem", "durum": "uyari" if kotu or nokta_kotu else "tamam", "deger": f_,
                     "ayrinti": f"{birincil}: bizim − {etiket[en_iyi_r]} = {_f(f_)} [{_f(a_)}, {_f(u_)}], p={_f(p_, 3)}"
                                + (" · başka bir yöntem bizden iyi (another method is better: paired CI excludes 0)"
                                   if kotu else "" if iyi_ else
                                   " · berabere: eşleşik GA 0'ı içeriyor (tied: paired CI includes 0)" if ga_var else
-                                  " · GA yok (no CI)")})
+                                  " · GA yok, nokta tahmininde başka yöntem önde (no CI; another method ahead on the "
+                                  "point estimate only)" if nokta_kotu else " · GA yok (no CI)")})
     takas_ipucu = ('persona takası için takas kolunu compare=(ours, swap, "persona swap") ile verin '
                    '(pass the swap arm via compare=(ours, swap, "persona swap"))')
     if bc in kontrol_sutun and veri.gorev == "cok_sinif":
@@ -1352,9 +1360,11 @@ def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yap
 
 def _bizim_muhuru(bizim: str, muhurler: list | None, cerceve: list | None = None) -> tuple[dict | None, dict | None]:
     """Zincirde 'bizim' kolun mührü (başlıktaki mühür zincirin sonu değil, bizimki olmalı). Öncelik: açıklamada açık
-    işaret (ours:/primary:/bizim:/birincil: <ad>) > açıklama ya da kaynak dosya adında ad > çerçeveyle eşleşen ve
-    bizim sütunu içeren mühür > sütunlarında bizim tahmin sütunu olan mühür; her sınıfta en son kayıt. Hiçbiri yoksa
-    son kayıt, notla. cerceve: çerçeveyle sha'sı eşleşen kayıtlar (bekleyen). Döner (kayıt, özet) | (None, None)."""
+    işaret (ours:/primary:/bizim:/birincil: <ad>) > çerçeveyle eşleşen ve bizim sütunu içeren mühür > açıklama ya da
+    kaynak dosya adında ad (mühürde yalnız başka yöntemlerin pred_ sütunları varsa sayılmaz: "lgbm, ours ile kıyas"
+    lgbm mührüdür) >
+    sütunlarında bizim tahmin sütunu olan mühür; her sınıfta en son kayıt. Hiçbiri yoksa son kayıt, notla. cerceve:
+    çerçeveyle sha'sı eşleşen kayıtlar (bekleyen). Döner (kayıt, özet) | (None, None)."""
     import re as _re
     kayitlar = [r for r in muhurler or [] if isinstance(r, dict)]
     if not kayitlar:
@@ -1370,10 +1380,14 @@ def _bizim_muhuru(bizim: str, muhurler: list | None, cerceve: list | None = None
     def sutunlu(r):
         return bool(sutun_adlari & {str(s) for s in r.get("sutunlar") or []})
 
+    def baska_tahmin(r):   # yalnız başka yöntemlerin tahmin sütunları mühürlü: addaki 'ours' içeriği tutmuyor
+        t = [str(s) for s in r.get("sutunlar") or [] if str(s).startswith(("pred_", ON_EK))]
+        return bool(t) and not sutunlu(r)
+
     cerceve_sha = {r.get("sha256") for r in cerceve or []}
     siniflar = (("aciklama_isaret", [r for r in kayitlar if isaret.search(metin(r))]),
-                ("aciklama_ad", [r for r in kayitlar if kalip.search(metin(r))]),
                 ("cerceve", [r for r in kayitlar if r.get("sha256") in cerceve_sha and sutunlu(r)]),
+                ("aciklama_ad", [r for r in kayitlar if kalip.search(metin(r)) and not baska_tahmin(r)]),
                 ("sutun", [r for r in kayitlar if sutunlu(r)]))
     eslesme, kayit = next(((ad, rs[-1]) for ad, rs in siniflar if rs), ("son", kayitlar[-1]))
     oz = {"sha256": kayit.get("sha256"), "sira": kayit.get("sira", kayitlar.index(kayit)), "eslesme": eslesme,

@@ -71,6 +71,20 @@ class LevelApplicabilityTest(unittest.TestCase):
         rep = _ev(_segment_frame(), multiplier=True)
         self._assert_not_applicable(rep, "segment")
 
+    def test_fine_segment_in_person_frame_keeps_shuffle(self):
+        # exact age as a segment is unique within each item but is no grid across items: rows are still persons
+        df = _person_frame(n_item=20, n_per=8, seed=2)
+        rng = np.random.default_rng(7)
+        df["seg_age"] = np.concatenate([rng.choice(np.arange(18, 90), 8, replace=False) for _ in range(20)])
+        rep = _ev(df, multiplier=False)
+        self.assertNotEqual(_den(rep)[PERSONA]["durum"], "atlandi")
+        self.assertNotIn("toplu_duzey", rep)
+
+    def test_explicit_person_level_disables_detection(self):
+        rep = _ev(_segment_frame(), level="person", multiplier=False)
+        self.assertNotIn("toplu_duzey", rep)
+        self.assertNotIn("uygulanamaz: her maddede", _den(rep)[PERSONA]["ayrinti"])
+
     def test_person_level_frame_keeps_shuffle(self):
         rep = _ev(_person_frame(), multiplier=False)
         self.assertIn("kontrol_karistir_ours", rep["sonuclar"])

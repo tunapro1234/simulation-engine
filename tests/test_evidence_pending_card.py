@@ -60,6 +60,18 @@ class OursSealTest(unittest.TestCase):
         self.assertIn(z[0]["sha256"][:12], r["ayrinti"])
         self.assertNotIn(z[1]["sha256"][:12], r["ayrinti"])
 
+    def test_baseline_seal_naming_ours_is_not_ours(self):
+        # a later baseline seal whose description mentions ours must not take ours' place in the header
+        df = _frame()
+        with tempfile.TemporaryDirectory() as d:
+            z0 = ev.seal(df, "final submission", registry=d, store_copy=False)
+            ev.seal(df[["item", "group", "pred_lgbm"]], "lgbm baseline to compare with ours", registry=d,
+                    store_copy=False)
+            rep = _ev(df.sample(frac=1, random_state=1), task="continuous", prereg=d)
+        self.assertEqual(rep["bizim_muhur"]["sha256"], z0["sha256"])
+        self.assertEqual(rep["bizim_muhur"]["eslesme"], "cerceve")
+        self.assertEqual(_den(rep)["çerçeve ↔ mühürlü dosya"]["durum"], "tamam")
+
     def test_fallback_to_last_with_note(self):
         df = _frame()
         with tempfile.TemporaryDirectory() as d:
