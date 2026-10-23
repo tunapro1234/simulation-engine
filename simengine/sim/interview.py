@@ -258,8 +258,11 @@ def interview_frame(result: dict, truth: dict | None = None) -> pd.DataFrame:
             rows.append(r)
     df = pd.DataFrame(rows, columns=["unit", "truth", "pred_text", "status", "chars", "arm", "segment", "item",
                                      "group"] + (["stimulus"] if stimuli is not None else []))
-    # object dtype keeps None: pandas 3's inferred str dtype would turn a missing answer into NaN
-    df["pred_text"] = pd.Series([r["pred_text"] for r in rows], index=df.index, dtype=object)
+    # object dtype keeps None: pandas 3's inferred str dtype would turn a missing answer / truth / stimulus into NaN.
+    # pred_text always; truth and stimulus only when inferred as str (numeric truth stays float with NaN, as in 2.x)
+    for c in [c for c in ("truth", "pred_text", "stimulus") if c in df.columns]:
+        if c == "pred_text" or isinstance(df[c].dtype, pd.StringDtype):
+            df[c] = pd.Series([r.get(c) for r in rows], index=df.index, dtype=object)
     return df
 
 

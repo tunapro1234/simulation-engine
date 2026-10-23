@@ -220,6 +220,20 @@ class TestInterviewFrame(unittest.TestCase):
         self.assertEqual(f.loc["p0|persona", "pred_text"], "answer of p0")
         self.assertEqual(f.loc["p0|persona_swap", "chars"], 0)
 
+    def test_missing_truth_and_stimulus_are_none_under_string_inference(self):
+        res = interview(panel(3), "Why?", llm=SlotLLM(lambda s, u: answer(u)))
+        res["stimuli"] = {"p0": "ad A", "p1": None, "p2": "ad B"}
+        with pd.option_context("future.infer_string", True):
+            f = interview_frame(res, truth={"p0": "price"}).set_index("unit")
+            g = interview_frame(res, truth={"p0": 1.0}).set_index("unit")
+        self.assertIsNone(f.loc["p1|persona", "truth"])
+        self.assertEqual(f.loc["p0|persona", "truth"], "price")
+        self.assertIsNone(f.loc["p1|persona", "stimulus"])
+        self.assertEqual(f.loc["p2|persona", "stimulus"], "ad B")
+        # numeric truth keeps the float column (NaN for missing) it has without string inference
+        self.assertEqual(g["truth"].dtype, float)
+        self.assertTrue(pd.isna(g.loc["p1|persona", "truth"]))
+
     def test_not_asked_in_subsampled_swap(self):
         res = interview(panel(1), "Why?", llm=SlotLLM(lambda s, u: answer(u)))
         f = interview_frame(res).set_index("unit")
