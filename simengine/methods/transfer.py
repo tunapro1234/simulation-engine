@@ -156,8 +156,40 @@ def _seeded_group_splits(g: np.ndarray, n_splits: int, seed: int):
     return [(np.flatnonzero(f != k), np.flatnonzero(f == k)) for k in range(n_splits)]
 
 
+def _is_sk_classifier(m) -> bool:
+    try:
+        from sklearn.base import is_classifier
+        return bool(is_classifier(m))
+    except Exception:
+        return False
+
+
+def _repeat_seed(seed, r: int):
+    """Seed of repeat ``r``: ``seed + r`` for an int; ``None`` / a ``RandomState`` pass through unchanged (as
+    before n_repeats existed; a shared RandomState still draws a different split per repeat)."""
+    if isinstance(seed, (int, np.integer)) and not isinstance(seed, (bool, np.bool_)):
+        return int(seed) + r
+    return seed
+
+
+def _group_rng_seed(seed, r: int):
+    s = _repeat_seed(seed, r)
+    return s.randint(0, 2**31 - 1) if isinstance(s, np.random.RandomState) else s
+
+
+def _vote(preds: np.ndarray) -> np.ndarray:
+    """Per-row majority label over the repeat columns (ties -> the smallest label); all-NaN rows stay NaN."""
+    done = ~np.isnan(preds).any(axis=1)
+    out = np.full(len(preds), np.nan)
+    if done.any():
+        vals = np.unique(preds[done])
+        counts = (preds[done][:, :, None] == vals).sum(axis=1)
+        out[done] = vals[counts.argmax(axis=1)]
+    return out
+
+
 def _is_target_list(df: pd.DataFrame, target) -> bool:
-    if isinstance(target, list):
+    if isinstance(target, (list, pd.Index)) or (isinstance(target, np.ndarray) and target.ndim == 1):
         return True
     return isinstance(target, tuple) and not (isinstance(df.columns, pd.MultiIndex) and target in df.columns)
 
@@ -177,8 +209,10 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
     holds each row's fold number (-1 = not predicted) and ``.attrs["fold_ids"]`` the fold labels in that order.
 
     ``n_repeats``: one split of a few hundred people is noisy, so the split is redrawn ``n_repeats`` times and the
-    predictions averaged. Repeat ``r`` uses ``seed + r``: ``KFold(shuffle=True, random_state=seed + r)`` without
-    ``group`` (repeat 0 = the single run), and with ``group`` a seeded group shuffle dealt into ``n_splits`` folds
+    predictions averaged (for an sklearn classifier with ``method="predict"`` the per-row majority label instead,
+    ties -> smallest label). Repeat ``r`` uses ``seed + r`` (``seed=None`` / a ``RandomState`` pass through):
+    ``KFold(shuffle=True, random_state=seed + r)`` without ``group`` (repeat 0 = the single run), and with
+    ``group`` a seeded group shuffle dealt into ``n_splits`` folds
     of near-equal group counts (still group-disjoint; with ``n_repeats=1`` the deterministic ``GroupKFold`` is
     kept). ``.attrs``: ``"repeats"``, ``"repeat_pred"`` (rows x repeats), ``"repeat_fold"`` (rows x repeats, -1 =
     not predicted), ``"repeat_sd"`` (per-row SD over repeats, ddof=1; NaN for one repeat); ``"fold"`` /
@@ -229,6 +263,8 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
         absent = [t for t in targets if t not in df.columns]
         if absent:
             raise KeyError(f"target columns not in df: {absent}")
+        if folds is not None and not isinstance(folds, (str, pd.Series, np.ndarray, list, tuple)):
+            folds = list(folds)                      # a split generator would be used up by the first target
         cols = {t: oof_predict(model, df, features=features, target=t, group=group, n_splits=n_splits, seed=seed,
                                method=method, folds=folds, weight=weight, n_repeats=n_repeats) for t in targets}
         fr = pd.DataFrame({s.name: s.to_numpy() for s in cols.values()}, index=df.index)
@@ -291,10 +327,12 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
             if n_groups < n_splits:
                 raise ValueError(f"group-held-out CV needs at least n_splits={n_splits} groups, got {n_groups}")
             runs = ([list(GroupKFold(n_splits).split(X, y, g))] if n_repeats == 1 else
-                    [_seeded_group_splits(g, n_splits, seed + r) for r in range(n_repeats)])
+                    [_seeded_group_splits(g, n_splits, _group_rng_seed(seed, r)) for r in range(n_repeats)])
         else:
-            runs = [list(KFold(n_splits, shuffle=True, random_state=seed + r).split(X)) for r in range(n_repeats)]
+            runs = [list(KFold(n_splits, shuffle=True, random_state=_repeat_seed(seed, r)).split(X))
+                    for r in range(n_repeats)]
     preds = np.full((len(df), n_repeats), np.nan)
+    labels_out = False
     folds_r = np.full((len(df), n_repeats), -1, dtype=int)
     for r, splits in enumerate(runs):
         for k, (a, b) in enumerate(splits):
@@ -310,8 +348,11 @@ def oof_predict(model, df: pd.DataFrame, *, features: Sequence[str], target: str
             pred = getattr(m, method)
             pkw = {"groups": g[b]} if g is not None and _accepts(pred, "groups") else {}
             preds[pos[b], r] = _as_1d(pred(X.iloc[b], **pkw), method)
+            labels_out = labels_out or (method == "predict" and _is_sk_classifier(m))
             folds_r[pos[b], r] = k
-    s = pd.Series(preds.mean(axis=1) if n_repeats > 1 else preds[:, 0], index=df.index, name=f"oof_{target}")
+    # a classifier's predict gives labels: averaging them (class 0 and 2 -> 1) is no label, so vote instead
+    comb = preds[:, 0] if n_repeats == 1 else _vote(preds) if labels_out else preds.mean(axis=1)
+    s = pd.Series(comb, index=df.index, name=f"oof_{target}")
     s.attrs["fold"] = folds_r[:, 0].copy()
     s.attrs["fold_ids"] = list(labels)
     s.attrs["repeats"] = n_repeats

@@ -149,5 +149,46 @@ class TestReadOnlyInputs(unittest.TestCase):
         self.assertTrue(np.isfinite(w.to_numpy()[5:]).all())
 
 
+class TestReviewEdges(unittest.TestCase):
+    """Review of the n_repeats / target=[...] change: old seed values, label voting, split generators."""
+
+    def setUp(self):
+        self.df = synth()
+
+    def test_seed_none_and_randomstate_still_work(self):
+        # before n_repeats, seed went straight to KFold, which takes None and a RandomState
+        for seed in (None, np.random.RandomState(1)):
+            for reps, grp in ((1, None), (2, None), (2, "grp")):
+                s = oof_predict(Ridge(), self.df, features=["x1"], target="y", seed=seed, n_repeats=reps,
+                                group=grp, n_splits=4)
+                self.assertTrue(np.isfinite(s.to_numpy()).all())
+
+    def test_classifier_predict_votes_labels(self):
+        from sklearn.tree import DecisionTreeClassifier
+        df = self.df.assign(c=pd.cut(self.df.x1, 3, labels=False).astype(int))
+        s = oof_predict(DecisionTreeClassifier(max_depth=2, random_state=0), df, features=["x1", "x2"],
+                        target="c", n_repeats=5, seed=0)
+        self.assertTrue(set(np.unique(s.to_numpy())) <= {0.0, 1.0, 2.0})      # a mean of 0 and 2 would give 1.x
+        P = s.attrs["repeat_pred"]
+        for i in range(len(df)):
+            vals, cnt = np.unique(P[i], return_counts=True)
+            self.assertEqual(s.iloc[i], vals[cnt.argmax()])
+        # a regressor (and predict_proba) is still averaged
+        r = oof_predict(Ridge(), df, features=["x1"], target="c", n_repeats=3)
+        np.testing.assert_allclose(r.to_numpy(), r.attrs["repeat_pred"].mean(axis=1))
+
+    def test_multi_target_with_split_generator_and_index(self):
+        from sklearn.model_selection import KFold
+        df = self.df
+        gen = KFold(4, shuffle=True, random_state=0).split(df)
+        fr = oof_predict(Ridge(), df, features=["x1", "x2"], target=["y", "z"], folds=gen)
+        lst = list(KFold(4, shuffle=True, random_state=0).split(df))
+        for t in ("y", "z"):
+            one = oof_predict(Ridge(), df, features=["x1", "x2"], target=t, folds=lst)
+            np.testing.assert_allclose(fr[f"oof_{t}"].to_numpy(), one.to_numpy())
+        ix = oof_predict(Ridge(), df, features=["x1", "x2"], target=pd.Index(["y", "z"]), group="grp")
+        self.assertEqual(list(ix.columns), ["oof_y", "oof_z"])
+
+
 if __name__ == "__main__":
     unittest.main()
