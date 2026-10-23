@@ -68,6 +68,16 @@ class TestBassAnalogyGroup(unittest.TestCase):
             warnings.simplefilter("error")
             C.BassAnalogy().fit(hist, "g1", self.c)            # default: no group, no warning
 
+    def test_reused_instance_does_not_reuse_another_frames_prior(self):
+        """Same cutoff, same row count, other data: the cached prior of the first frame must not leak in."""
+        other = self.hist.copy()
+        for _, g in other.groupby("series"):                      # every series slow now
+            other.loc[g.index, "y"] = C.bass_curve(g["t"].to_numpy(float), 80.0, 0.005, 0.15, 1990)
+        m = C.BassAnalogy()
+        m.fit(self.hist, "g0", self.c)
+        np.testing.assert_allclose(m.fit(other, "g0", self.c)["prior"],
+                                   C.BassAnalogy().fit(other, "g0", self.c)["prior"])
+
     def test_missing_column_raises(self):
         with self.assertRaises(ValueError):
             C.BassAnalogy(group_col="nope").fit(self.hist, "g0", self.c)

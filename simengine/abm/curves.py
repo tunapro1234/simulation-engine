@@ -223,7 +223,8 @@ class BassAnalogy:
         return set() if pd.isna(g) else set(grp.index[grp == g])
 
     def _prior(self, history, cutoff, exclude):
-        key = (cutoff, len(history))
+        # content fingerprint: the same instance reused on another frame of equal length must not reuse its priors
+        key = (cutoff, len(history), int(pd.util.hash_pandas_object(history[["series", "t", "y"]], index=False).sum()))
         if key not in self._cache:
             pq = {}
             for s, g in history.groupby("series"):

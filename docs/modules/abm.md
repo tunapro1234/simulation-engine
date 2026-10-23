@@ -229,7 +229,7 @@ NLS. The S-curve fits use multi-start least squares with m bounded below by the 
 `BassAnalogy`, which uses the median (log p, log q) of the other series as a penalty term.
 - **`BassAnalogy(group_col=)`** *(this port)*. The (log p, log q) prior is the median over series with the
   target's value in that column only (same semantics as `AdoptionABCAnalogy(group_col=)`); fewer than 3 donors
-  gives no prior (plain Bass NLS) with a warning. `None` (default) pools every series as before (not measured).
+  gives no prior (plain Bass NLS) with a warning. `None` (default) pools every series as before. Not measured.
 
 - **`upper=`** *(this port)*. Every curve clips to [0, upper] and bounds m above by it; the default 100 keeps the
   research behaviour. Raise it for quantities that pass 100 (mobile subscriptions per 100 people), or pass `None`
