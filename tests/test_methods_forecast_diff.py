@@ -138,6 +138,29 @@ class TestPerSeriesUpper(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "constant"):
             F.DirectForecaster("hgb", horizons=[1], target="logit", upper="cap", **KW).fit(q, 20)
 
+    def test_series_upper_equals_dict(self):
+        # review: a Series of ceilings (groupby().first(), prior["ceiling"]) raised TypeError from float(Series);
+        # a one-element Series on a one-series panel was silently coerced to a scalar
+        p = ceiling_panel(n=12)
+        caps = p.groupby("id")["cap"].first()
+        fd = F.DirectForecaster("hgb", horizons=[2], target="logit", upper=caps.to_dict(), **KW).fit(p, 20)
+        fs = F.DirectForecaster("hgb", horizons=[2], target="logit", upper=caps, **KW).fit(p, 20)
+        self.assertIsInstance(fs.upper, dict)
+        np.testing.assert_array_equal(fs.predict(p, 20)["pred"].to_numpy(), fd.predict(p, 20)["pred"].to_numpy())
+        with self.assertRaisesRegex(ValueError, "s04"):
+            F.DirectForecaster(target="logit", upper=caps.where(caps.index != "s04"))
+
+    def test_scalar_upper_must_be_finite_and_ignored_for_other_targets(self):
+        # review: upper=inf mapped every logit prediction to inf; the dict / column paths already rejected it
+        with self.assertRaises(ValueError):
+            F.DirectForecaster(target="logit", upper=np.inf)
+        with self.assertRaises(ValueError):
+            F.DirectForecaster(target="logit", upper=np.nan)
+        # upper is ignored outside target="logit" (docstring): no new error for old callers
+        for t in ("level", "log_ratio", "diff"):
+            F.DirectForecaster(target=t, upper=0)
+            F.DirectForecaster(target=t, upper={"a": -1.0})
+
     def test_warns_per_series(self):
         p = ceiling_panel(n=12)
         caps = p.groupby("id")["cap"].first().to_dict()

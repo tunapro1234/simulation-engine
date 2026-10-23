@@ -42,7 +42,7 @@ from __future__ import annotations
 import inspect
 import re
 import warnings
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -411,8 +411,9 @@ class DirectForecaster:
     log-growth pool model was best on dev but took high-level countries to 150 per 100 at the test origin; the
     logit target fixed it (test MAE 3.73 -> 3.11); "diff" = y[T+h] - y[T], mapped back as y[T] + z (same y[T] as
     above): a pooled change target that carries a trend past the training levels (objective "regression").
-    ``upper`` (target="logit" only, ignored otherwise): a scalar ceiling for every series, a dict
-    ``{series_id: ceiling}``, or the name of a panel column holding each series' ceiling (constant per series).
+    ``upper`` (target="logit" only, ignored otherwise): a finite scalar ceiling for every series, a dict
+    ``{series_id: ceiling}`` (or a Series indexed by series id), or the name of a panel column holding each
+    series' ceiling (constant per series).
     There is no fallback: a series missing from the dict, or with no / NaN / non-constant column value, raises
     (KeyError / ValueError naming the series), since a silently wrong ceiling caps or inflates its forecast.
     Ceilings are resolved for the series of each panel passed to ``fit`` and ``predict``.
@@ -426,22 +427,24 @@ class DirectForecaster:
                  objective: str | None = None, n_train_origins: int = 52, origin_step: int = 1,
                  min_history: int | None = None, clip_min: float | None = None, id_col: str = "id",
                  time_col: str = "time", y_col: str = "y", fill_value: float = 0.0, seed: int = 0,
-                 target: str = "level", upper: float | dict | str | None = None, log_offset: float = 0.0,
-                 logit_eps: float = 1e-3, origin_features: Sequence[str] | None = None,
+                 target: str = "level", upper: float | Mapping | pd.Series | str | None = None,
+                 log_offset: float = 0.0, logit_eps: float = 1e-3, origin_features: Sequence[str] | None = None,
                  check_range: float | None = None):
         if target not in TARGETS:
             raise ValueError(f"unknown target {target!r}: one of {TARGETS}")
         if target == "logit" and upper is None:
             raise ValueError("target='logit' needs upper > 0 (the saturation level, e.g. 100 per 100 people)")
-        if isinstance(upper, dict):
-            bad = [k for k, v in upper.items() if not (np.isfinite(float(v)) and float(v) > 0)]
+        if target != "logit":
+            pass                                        # upper is ignored: stored as given, not validated
+        elif isinstance(upper, (Mapping, pd.Series)):   # a Series indexed by series id is a dict
+            upper = {k: float(v) for k, v in dict(upper).items()}
+            bad = [k for k, v in upper.items() if not (np.isfinite(v) and v > 0)]
             if bad:
-                raise ValueError(f"upper must be > 0 for every series; not for {bad[:5]}")
-            upper = {k: float(v) for k, v in upper.items()}
-        elif upper is not None and not isinstance(upper, str):
-            if not float(upper) > 0:
-                raise ValueError("target='logit' needs upper > 0 (the saturation level, e.g. 100 per 100 people)")
+                raise ValueError(f"upper must be finite and > 0 for every series; not for {bad[:5]}")
+        elif not isinstance(upper, str):
             upper = float(upper)
+            if not (np.isfinite(upper) and upper > 0):
+                raise ValueError("target='logit' needs a finite upper > 0 (the saturation level, e.g. 100 per 100)")
         if not 0 < logit_eps < 0.5:
             raise ValueError("logit_eps must be in (0, 0.5)")
         self.model, self.horizons = model, _horizons(horizons)
@@ -540,8 +543,9 @@ class DirectForecaster:
             over = hist > (U if np.isscalar(U) else U[:, None])
             n_over = int(np.sum(over))
             if n_over:
+                hit = over.any(1)
                 where = (f"upper={U:g}" if np.isscalar(U) else
-                         f"their series' upper ({int(over.any(1).sum())} series, e.g. {w.ids[over.any(1)][:3].tolist()})")
+                         f"their series' upper ({int(hit.sum())} series, e.g. {w.ids[hit][:3].tolist()})")
                 warnings.warn(f"DirectForecaster: {n_over} observed y > {where} (clipped to "
                               f"1 - logit_eps on the share scale); raise upper if the level can pass it",
                               UserWarning, stacklevel=2)
