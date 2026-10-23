@@ -613,6 +613,25 @@ ev.summary(rep)["ceiling"], ev.summary(rep)["gap_closed"], rep["gurultu_tavani"]
 - *One rehearsal run (D3 dev, 300 films, no CI):* half Spearman 0.950 → Spearman-Brown 0.975 → ceiling ≈ 0.987.
   These numbers come from the rehearsal's own split-half script, not from this function.
 
+**Sampling-noise ceiling of an error metric (`se_col=`, D5 #8d / D11 #5c / D3 #7).** `noise_ceiling=` covers
+correlation metrics only. When the truth is an estimate with a per-row standard error (a survey share, a model
+estimate), `evaluate(df, primary="mae", se_col="se")` (also `"rmse"`, `"wmape"`; `task="forecast"` defaults to
+wmape) builds the oracle that knows the latent value: its error against the observed truth is N(0, se), so the column
+truth + sign·se·a (a = |z| averaged over 400 seeded draws, sqrt(mean z²) for rmse: the draw-averaged metric) is
+routed through the `ceiling_col` machinery as "Model/oracle ceiling (sampling noise (SE column))" with a bootstrap CI
+and the gap closed. The analytic floor on the scored rows (test rows, `weight` honoured) sits next to it: mae
+sum(w·sqrt(2/π)·se)/sum(w), rmse sqrt(sum(w·se²)/sum(w)), wmape sum(w·sqrt(2/π)·se)/sum(w·|y|).
+`report["se_tavani"]` / `summary()["se_ceiling"]` (`analytic`, `value`, `lo`, `hi`, `draws`, `seed`, `n`),
+`summary()["ceiling_kind"] == "sampling noise (SE column)"`, a card line. No `aggregate_by` needed (with it the
+oracle column is averaged per group and `analytic` is None). NaN or negative SEs on rows with truth, a correlation
+primary, or combining it with `ceiling_col` / `noise_ceiling` raise `ValueError`. Clearly beating this floor points
+to leakage or an SE column that overstates the noise. Measured on a synthetic 800-row frame (se uniform 0.2-1.0):
+rmse ceiling 0.643 [0.627, 0.662] against the analytic 0.644.
+```python
+rep = ev.evaluate(df, ours="model", primary="mae", se_col="se", split="test")
+ev.summary(rep)["se_ceiling"]["analytic"], ev.summary(rep)["ceiling"]
+```
+
 **Call budget first (`correlation_audit`).** `max_calls` is compared with the planned total (prompt arms × keys ×
 samples) before any call. The error names the number needed (`pass max_calls=600`). Cached replies are counted,
 because the LLM backend has no public cache probe; a re-run from the cache costs nothing. An answer-dict arm needs no
@@ -693,11 +712,26 @@ ev.paired_diff(rep, "L1", "P1")          # read back from the report, sign flipp
   `seal(..., prereg_doc=)` (CLI `muhurle --belge`) writes `"onkayit_belgesi": {"dosya", "sha256"}` (file name only)
   into the chain record and appends `[ön kayıt belgesi <name> sha256:<hash>]` to the description. `evaluate(prereg=
   <registry>)` then picks the document up from the registry's parent directory on its own.
+- **Declared vs scored primary metric (D10 metric trap).** The primary metric declared in the documents is read by
+  `api.declared_primary(text)`: the `research.Prereg` JSON block (`metrics` as `{"primary": ...}`, a list whose
+  first entry is the primary, or text), a `Primary metric: ...` / `Birincil metrik: ...` line, or the first line of
+  a `## Metrics` section; the first known metric name wins, and the latest declaring document (an addendum) counts.
+  When it differs from the scored primary (`mae` and `1-mae` count as the same), `evaluate` raises a `UserWarning`,
+  adds an audit warning row "birincil metrik beyanı (ön kayıt)" (English: "declared primary metric
+  (pre-registration)") and puts the card limit "primary metric differs from the declared one: ..." first; a match
+  writes an "ok" row. No document, no row.
 - **Declared split.** `split="test"` (or `"holdout"`, `"deger"`, `"degerlendirme"`) writes a constant split column
   when the frame has none: TEST-only frames and `sim.distribution_frame` cells (all held out) then run the split
   audit instead of skipping it ("bölme bilgisi" no longer flags leakage as unproven), and an audit row "bölme beyanı
-  (split=)" says the split was declared by the caller, not derived. A frame that already has a split column keeps it
+  (split=)" says the split was declared by the caller, not derived. `split="oof"` / `"cv"` / `"time"` declare
+  out-of-fold, cross-validated or time-split predictions (D12 #22, D9 #6, D6 #3b, D7 #12): every row is scored as an
+  evaluation row and the audit row reads "cross-fitted (declared)". A frame that already has a split column keeps it
   (warning). Other labels raise `ValueError`.
+- **One sign rule on the card (D5 #8c).** The "Ours − strongest baseline" line is in the metric direction (positive
+  = better) and now also prints the raw difference: for lower-is-better metrics `raw ours − baseline = -0.010
+  [...] (mae, lower is better: negative favours ours, ...)`, the convention of the registered-comparison rows (raw
+  A − B). The English card gives a significant-but-small difference its reason and the threshold
+  (`kart.ANLAMLI_FARK` = 0.02) instead of an empty line (D12 #10).
 - **Dominant block.** `balance_col="country"` (default: `block_col` when given) checks the shares of the scored
   rows. When one block holds more than max(`dominance_share`=0.20, 1.5 / n_blocks), an audit warning row, a card
   note and `report["baskin_blok"]` / `summary(rep)["dominant_block"]` give the primary metric of every method both

@@ -88,6 +88,22 @@ STATUS_TO_ENGLISH = {"tamam": "ok", "uyari": "warning", "hata": "error", "atland
 CEILING_KIND = {"insan_tekrar": "human retest", "model": "oracle/model", "orneklem_gurultusu": "sampling noise (variance components)"}
 NOISE_CEILINGS = ("variance_components", "split_half")   # same estimator; split_half = older name
 NOISE_CEILING_REPEATS = 200     # random half splits (the D3 rehearsal tavan.py used 200)
+# se_col=: sampling-noise ceiling of an error metric from a per-row standard-error column. The oracle knows the latent
+# value, so its error against the observed truth is N(0, se): pred = truth + sign * se * a, a = |z| averaged over R
+# draws (mae, wmape: mean of R per-draw values) or sqrt(mean z^2) (rmse: R-averaged MSE).
+SE_CEILING_METRICS = ("mae", "rmse", "wmape")
+SE_CEILING_DRAWS = 400
+SE_CEILING_LABEL = "sampling noise (SE column)"
+DECLARED_PRIMARY_CHECK = "birincil metrik beyanı (ön kayıt)"
+DECLARED_PRIMARY_LIMIT = "primary metric differs from the declared one"
+METRIC_EQUIVALENT = {"bir_eksi_mae": "mae"}     # same ranking, different scale: not a different metric
+# split= labels: constant test labels, or declarations that every row is an evaluation row of a cross-fitted /
+# time-split protocol (out-of-fold predictions, CV folds, a rolling time split) -> audit text
+SPLIT_DECLARED = {"oof": "çapraz uydurmalı, kat dışı tahmin (cross-fitted (declared): every prediction is out-of-fold)",
+                  "cv": "çapraz doğrulama katları (cross-fitted (declared): every prediction comes from a CV fold "
+                        "that did not train on it)",
+                  "time": "zaman bölmeli (cross-fitted (declared): time split, every prediction made before its "
+                          "truth window)"}
 MEMORIZATION_CAVEAT_EN = "gain may come from recognition/memorization"
 CAVEAT_REASON_EN = {"ezber_denetimi": "memorization audit warning", "kor_kol": "the blind arm loses most of the gain"}
 ROW_TO_ENGLISH = {"taban": "Strongest simple baseline", "ham": "Raw method", "kalibre": "Ours",
@@ -249,6 +265,68 @@ def _metric(name: str | None) -> str | None:
     return None if name is None else METRIC_TO_INTERNAL.get(name, name)
 
 
+_JSON_BLOCK = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
+_PRIMARY_LINE = re.compile(r"^\W*(?:primary(?:\s+metric)?|birincil(?:\s+metrik)?)\W*?\s*[:=]\s*(.+)$", re.I | re.M)
+_METRICS_SECTION = re.compile(r"^#+\s*(?:metrics?|metrikler?)\s*$\n+(.+?)(?:\n\s*\n|\n#|\Z)", re.I | re.M | re.S)
+_METRIC_NAMES = sorted(set(METRIC_TO_INTERNAL) | set(METRIC_TO_INTERNAL.values()) | {"wape"}, key=len, reverse=True)
+_METRIC_TOKEN = re.compile(r"(?<![\w-])(" + "|".join(re.escape(m) for m in _METRIC_NAMES) + r")(?![\w-])", re.I)
+
+
+def _first_metric(text) -> str | None:
+    m = _METRIC_TOKEN.search(str(text))
+    return None if m is None else _metric(m.group(1).lower())
+
+
+def declared_primary(text: str) -> str | None:
+    """Primary metric declared in a pre-registration text -> internal metric name, or None.
+
+    Order: the machine-readable JSON block of research.Prereg ("metrics": {"primary": ..} / first list entry /
+    text), a "Primary metric: ..." / "Birincil metrik: ..." line, then the first line of a "## Metrics" section
+    (Prereg writes the primary first). The first known metric name in that text wins."""
+    for m in _JSON_BLOCK.finditer(text):
+        try:
+            mt = json.loads(m.group(1)).get("metrics")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(mt, dict):
+            mt = next((v for k, v in mt.items() if str(k).lower() in ("primary", "birincil")), None) or \
+                next(iter(mt), None)
+        elif isinstance(mt, (list, tuple)):
+            mt = mt[0] if mt else None
+        if mt and (x := _first_metric(mt)):
+            return x
+    for rx in (_PRIMARY_LINE, _METRICS_SECTION):
+        m = rx.search(text)
+        if m and (x := _first_metric(m.group(1).strip().splitlines()[0])):
+            return x
+    return None
+
+
+def _declared_primary_check(rep: dict, texts: list[dict]) -> None:
+    """Scored primary vs the primary declared in the pre-registration documents (the latest declaring document,
+    e.g. an addendum, wins): warning + audit row + card limit when they differ, an "ok" row when they match."""
+    dec = [(e["zaman"], e["dosya"], x) for e in texts if (x := declared_primary(e.get("metin") or ""))]
+    scored = rep.get("birincil")
+    if not dec or not scored or not isinstance(rep.get("denetim"), list):
+        return
+    _, doc, want = max(dec, key=lambda t: t[0])
+    same = METRIC_EQUIVALENT.get(want, want) == METRIC_EQUIVALENT.get(scored, scored)
+    en = lambda x: METRIC_TO_ENGLISH.get(x, x)
+    row = {"kontrol": DECLARED_PRIMARY_CHECK, "durum": "tamam" if same else "uyari", "deger": want,
+           "ayrinti": (f"ön kayıtta beyan edilen birincil metrik {want} ({doc}); puanlanan {scored} "
+                       f"(declared primary {en(want)} in {doc}, scored {en(scored)})")}
+    rep["denetim"].append(row)
+    if same:
+        return
+    msg = (f"{DECLARED_PRIMARY_LIMIT}: the card scores {en(scored)}, {doc} declares {en(want)}; "
+           "pass primary= the declared metric or register the change in a dated addendum")
+    warnings.warn(f"evaluate: {msg}", UserWarning, stacklevel=3)
+    rep.setdefault("sinirlar", []).insert(0, msg)
+    k = rep.get("kanit_kart")
+    if isinstance(k, dict):
+        k["yanilgi"] = [msg] + list(k.get("yanilgi") or [])
+
+
 def prepare(df: pd.DataFrame, task: str | None = None, methods: Sequence[str] | None = None,
             classes: list | None = None):
     """Validate the table, detect the task, decode vector columns -> `sema.Veri` (internal names)."""
@@ -268,7 +346,7 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
              ceiling_col: str | None = None, ceiling_label: str | None = None, aggregate_by: str | None = None,
              multiplier_max_rows: int | None = MULTIPLIER_MAX_ROWS, offset_col: str | None = None,
              noise_ceiling: str | None = None, noise_ceiling_repeats: int = NOISE_CEILING_REPEATS,
-             blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None,
+             se_col: str | None = None, blind_col: str | None = None, compare: Sequence | None = None, ours_uses_llm: bool | None = None,
              aggregate: str = "mean", ci: str = "percentile", n_configs: int | None = None,
              block_col: str | None = None, point_pairs: Sequence | None = None,
              prereg_doc: str | os.PathLike | Sequence | None = None, split: str | None = None,
@@ -299,10 +377,16 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         checkout resets it, so an unlocked, unsealed doc can look "newer than the seal"). A lock whose sha256 does
         not match warns and adds a card limit. Documents named by a seal are picked up next to the registry
         directory automatically. The card lists the documents with their sha256 and time source.
+        The primary metric declared in the documents (`declared_primary`: research.Prereg "metrics", primary first,
+        or a "Primary metric: ..." line; the latest declaring document wins) is checked against the scored one: when
+        they differ, a UserWarning, an audit warning row and the card limit "primary metric differs from the
+        declared one".
     split: a constant split label ("test" / "holdout" / "deger" / "degerlendirme") written into a split column
         when the frame has none (TEST-only frames, distribution frames whose cells are all held out), so the split
-        audit runs; an audit row records that the split was declared, not derived. Ignored with a warning when the
-        frame already has a split column; other labels raise ValueError.
+        audit runs; an audit row records that the split was declared, not derived. "oof" / "cv" / "time" declare
+        out-of-fold, cross-validated or time-split predictions: every row is an evaluation row and the audit row
+        reads "cross-fitted (declared)". Ignored with a warning when the frame already has a split column; other
+        labels raise ValueError.
     balance_col: block column whose shares are checked (e.g. "country"; default: block_col when given). When one
         block holds more than max(dominance_share, 1.5 / n_blocks) of the scored rows (default share 0.20), an
         audit warning row and a card note give the primary metric of every method person-weighted (as reported)
@@ -340,6 +424,13 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
         primaries raise NotImplementedError. A split-half cross-check (`noise_ceiling_repeats` random within-group
         half splits, Spearman-Brown) is reported but not used: it is biased low for small or odd-sized groups. The
         card labels the ceiling type and the gap closed uses it.
+    se_col: per-row standard error of the truth (e.g. a survey estimate's SE) for an error-metric primary (mae, rmse,
+        wmape; primary= required, or task="forecast" for its default wmape): a seeded oracle column truth + N(0, se)
+        (SE_CEILING_DRAWS draws averaged in the metric) becomes the model ceiling labelled "sampling noise (SE
+        column)"; the analytic value (mae: sum(w sqrt(2/pi) se) / sum(w)) is in `report["se_tavani"]`,
+        `summary()["se_ceiling"]` and on the card. No aggregate_by needed (with it the oracle column is averaged per
+        group and the analytic value is not given). NaN or negative SEs raise ValueError; not with ceiling_col /
+        noise_ceiling.
     blind_col: the blind (no names / titles) twin of ours, e.g. "pred_ours_blind": adds a paired row ours − blind
         and flags when the blind arm keeps less than half of ours' gain over the strongest baseline.
     compare: registered comparisons / drop conditions, [("P1", "L1"), ("P2", None, "P2 ≈ 0"), ...]: each (a, b)
@@ -405,16 +496,26 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
             raise ValueError("pass noise_ceiling or ceiling_col, not both")
         if int(noise_ceiling_repeats) < 1:
             raise ValueError("noise_ceiling_repeats must be >= 1")
+    se_metric = None
+    if se_col is not None:
+        if ceiling_col is not None or noise_ceiling is not None:
+            raise ValueError("pass se_col, ceiling_col or noise_ceiling, not several")
+        se_metric = _metric(primary) or ("wmape" if forecast else None)
+        if se_metric not in SE_CEILING_METRICS:
+            raise ValueError(f"se_col gives a sampling-noise ceiling for error metrics {SE_CEILING_METRICS}; pass "
+                             f"primary= one of them (primary is {primary!r}). Correlation metrics: "
+                             "noise_ceiling='variance_components' with aggregate_by=")
     d = to_internal(df)
     split_declared = None
     if split is not None:
         sp = str(SPLIT_TO_INTERNAL.get(split, split))
-        if sp.lower() not in TEST_ADLARI:
-            raise ValueError(f"split= fills a constant test split; use one of {TEST_ADLARI}, not {split!r}")
+        if sp.lower() not in TEST_ADLARI and sp.lower() not in SPLIT_DECLARED:
+            raise ValueError(f"split= fills a constant test split or declares a cross-fitted one; use one of "
+                             f"{TEST_ADLARI + list(SPLIT_DECLARED)}, not {split!r}")
         if "bolum" in d.columns:
             warnings.warn("evaluate: the frame already has a split column; split= is ignored", UserWarning, stacklevel=2)
         else:
-            d = d.assign(bolum=sp)
+            d = d.assign(bolum=sp if sp.lower() in TEST_ADLARI else "test")   # oof / cv / time: every row is scored
             split_declared = sp
     if doc_limits:
         limits = list(limits or []) + doc_limits
@@ -431,7 +532,13 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
     methods_i = _methods(methods)
     labels_i = {_method(k): v for k, v in (labels or {}).items()}
     tavan_sutun = tavan_etiket = None
-    if ceiling_col is not None:
+    se_info = None
+    if se_metric is not None:
+        d, se_info = _se_ceiling(d, se_col, se_metric, seed, grouped=aggregate_by is not None)
+        tavan_sutun, tavan_etiket = "tavan_model", SE_CEILING_LABEL
+        if methods_i:
+            methods_i = [m for m in methods_i if m != _method(se_col)]
+    elif ceiling_col is not None:
         d, tavan_sutun, tavan_etiket = _ceiling_column(d, ceiling_col, ceiling_label, labels_i, ours, raw)
         if methods_i:
             methods_i = [m for m in methods_i if ON_EK + m != ceiling_col and m != _method(ceiling_col)]
@@ -483,10 +590,18 @@ def evaluate(df: pd.DataFrame, title: str = "", ours: str | None = None, raw: st
                                      **({"kilit_uyusmuyor": True} if e.get("kilit_uyusmuyor") else {})}
                                     for e in prereg_texts]
     if split_declared and isinstance(rep.get("denetim"), list):
+        cross = SPLIT_DECLARED.get(split_declared.lower())
         rep["denetim"].append({"kontrol": "bölme beyanı (split=)", "durum": "tamam", "deger": split_declared,
-                               "ayrinti": f"split={split!r} verildi: bütün satırlar '{split_declared}' (değerlendirme) "
-                                          "sayıldı; eğitim satırı yok, bölme beyanı kullanıcınındır "
-                                          "(declared split: every row is held out)"})
+                               "ayrinti": f"split={split!r} verildi: " + (
+                                   f"bütün satırlar değerlendirme satırı, {cross}" if cross else
+                                   f"bütün satırlar '{split_declared}' (değerlendirme) sayıldı; eğitim satırı yok, "
+                                   "bölme beyanı kullanıcınındır (declared split: every row is held out)")})
+    if se_info is not None:
+        c = (rep.get("manset") or {}).get("tavan") or {}
+        se_info.update(deger=c.get("deger"), alt=c.get("alt"), ust=c.get("ust"))
+        rep["se_tavani"] = se_info
+    if prereg_texts:
+        _declared_primary_check(rep, prereg_texts)
     if denge is not None and rep.get("sonuclar"):
         _dominant_block(rep, d_rows, denge, explicit=balance_col is not None, by=aggregate_by, how=aggregate,
                         share=dominance_share)
@@ -630,6 +745,49 @@ def _ceiling_column(d: pd.DataFrame, col: str, label, labels: dict, ours, raw):
         raise ValueError(f"ceiling_col {col!r} is also ours/raw")
     d = d.rename(columns={src: "tavan_model"})
     return d, "tavan_model", label or labels.get(name, name)
+
+
+def _se_ceiling(d: pd.DataFrame, se_col: str, metric: str, seed: int, grouped: bool,
+                draws: int = SE_CEILING_DRAWS) -> tuple[pd.DataFrame, dict]:
+    """se_col -> (frame with the oracle column "tavan_model", info). The oracle's error against the observed truth is
+    N(0, se_i); its column is truth + sign * se * a with a = |z| averaged over `draws` seeded draws (mae / wmape) or
+    sqrt(mean z^2) (rmse), so the metric of the column is the draw-averaged metric. Analytic value on the scored
+    rows (test rows when a split column exists, weight column honoured): mae sum(w sqrt(2/pi) se) / sum(w), rmse
+    sqrt(sum(w se^2) / sum(w)), wmape sum(w sqrt(2/pi) se) / sum(w |y|); None with aggregate_by (group means)."""
+    col = COLUMN_TO_INTERNAL.get(se_col, se_col)
+    if col not in d.columns:
+        raise ValueError(f"se_col {se_col!r} is not a column of the frame")
+    if "gercek" not in d.columns:
+        raise ValueError("se_col needs a truth column")
+    y = pd.to_numeric(d["gercek"], errors="coerce").to_numpy(float)
+    se = pd.to_numeric(d[col], errors="coerce").to_numpy(float)
+    has_y = np.isfinite(y)
+    if not np.isfinite(se[has_y]).all():
+        raise ValueError(f"se_col {se_col!r} has missing or non-numeric values on rows with a truth")
+    if (se[has_y] < 0).any():
+        raise ValueError(f"se_col {se_col!r} has negative standard errors")
+    rng = np.random.default_rng([abs(int(seed or 0)), 5113])
+    acc = np.zeros(len(d))
+    for _ in range(int(draws)):          # one row vector per draw: memory stays O(rows)
+        z = rng.standard_normal(len(d))
+        acc += z * z if metric == "rmse" else np.abs(z)
+    a = np.sqrt(acc / draws) if metric == "rmse" else acc / draws
+    sign = np.where(rng.random(len(d)) < 0.5, -1.0, 1.0)
+    out = d.drop(columns=[col]).assign(tavan_model=y + sign * np.nan_to_num(se) * a)
+    scored = has_y.copy()
+    if "bolum" in d.columns:
+        scored &= d["bolum"].astype(str).str.lower().isin(TEST_ADLARI).to_numpy()
+    w = (pd.to_numeric(d["agirlik"], errors="coerce").to_numpy(float) if "agirlik" in d.columns
+         else np.ones(len(d)))[scored]
+    s, k = se[scored], math.sqrt(2 / math.pi)
+    analytic = None
+    if not grouped and len(s) and w.sum() > 0:
+        analytic = (float(np.sqrt((w * s * s).sum() / w.sum())) if metric == "rmse"
+                    else float((w * k * s).sum() / (w * np.abs(y[scored])).sum()) if metric == "wmape"
+                    else float((w * k * s).sum() / w.sum()))
+    info = {"sutun": se_col, "metrik": metric, "R": int(draws), "tohum": seed, "analitik": analytic,
+            "n": int(scored.sum()), "etiket": SE_CEILING_LABEL}
+    return out, info
 
 
 def _split_halves(y: np.ndarray, codes: np.ndarray, G: int, R: int, seed: int):
@@ -940,6 +1098,7 @@ CHECK_TO_ENGLISH = {
     "etkin örneklem çarpanı": "effective sample multiplier",
     "döngüsel önsel (çarpan dışı)": "circular prior (excluded from the multiplier)",
     "bölme beyanı (split=)": "declared split (split=)",
+    "birincil metrik beyanı (ön kayıt)": "declared primary metric (pre-registration)",
     "bootstrap GA (nokta tahmini yüzdelik GA dışında)": "bootstrap CI (point estimate outside the percentile CI)",
     "blok bootstrap": "block bootstrap",
     "blok bootstrap blok sayısı": "block bootstrap: number of blocks",
@@ -1197,6 +1356,8 @@ _PHRASES_EN = [
      "mean of within-block values; between-block differences left out, not a reweighting"),
     (r"; aggregate='sum' ile blok eşit ağırlıklı değer hesaplanmaz \(dominant block\)",
      "; no block-equal-weighted value with aggregate='sum'"),
+    (r"^split=('\w+') verildi: bütün satırlar değerlendirme satırı, .*?\((cross-fitted \(declared\): [^()]*)\)$",
+     r"split=\1 given: every row is an evaluation row, \2"),
     # generic fragments (last)
     (r"bizim − taban\b", "ours − baseline"), (r"\bkarıştırılmış tahmin\b", "shuffled prediction"),
     (r"\bkarıştırılmış\b", "shuffled"), (r"− marjinal\b", "− marginal"), (r"'bizim'", "'ours'"), (r"\bbizim\b", "ours"),
@@ -1393,7 +1554,8 @@ def summary(report: dict) -> dict:
                    for r in report.get("merdiven") or []],
         "headline": m.get("cumle"),
         "seals": _seals(report),
-        "ceiling_kind": CEILING_KIND.get(report.get("tavan_turu") or ("insan_tekrar" if m.get("tavan") else None)),
+        "ceiling_kind": SE_CEILING_LABEL if report.get("se_tavani") and m.get("tavan") else
+        CEILING_KIND.get(report.get("tavan_turu") or ("insan_tekrar" if m.get("tavan") else None)),
         "declared_baselines": list((report.get("tabanlar") or {}).get("bildirilen") or []),
         "only_trivial_baselines": bool((report.get("tabanlar") or {}).get("yalniz_basit")),
         "awaiting_truth": bool(report.get("gercek_bekleniyor")),
@@ -1401,6 +1563,7 @@ def summary(report: dict) -> dict:
         "aggregate": report.get("toplama"),
         "offset": report.get("ofset"),
         "noise_ceiling": report.get("gurultu_tavani"),
+        "se_ceiling": _se_ceiling_en(report.get("se_tavani")),
         "comparisons": [_comparison_en(c) for c in report.get("kayitli_karsilastirmalar") or []],
         "blind_arm": report.get("kor_kol"),
         "badge_caveat": _caveat_en(report),
@@ -1508,6 +1671,49 @@ def _rank_note(report: dict, lang: str = "mixed") -> str | None:
             "with the informative rungs (persistence, learners) rather than with these.")
 
 
+def _direction(metric: str | None) -> int | None:
+    """+1 higher is better, -1 lower is better, None unknown (internal metric name)."""
+    for g in TASK_TO_ENGLISH:
+        m = next((x for x in _metrik.aile(g, True, True, True, oran=True) if x.ad == metric), None)
+        if m is not None:
+            return m.yon
+    return None
+
+
+def _raw_diff_note(f: dict, metric: str | None) -> str:
+    """Raw ours − baseline next to the metric-direction difference, so the headline uses the same sign rule as the
+    registered comparisons (raw A − B)."""
+    yon = _direction(metric)
+    if yon is None:
+        return ""
+    name = METRIC_TO_ENGLISH.get(metric, metric)
+    if yon > 0:
+        return f"; raw ours − baseline = {f['fark']:+.3f} (same sign: {name}, higher is better)"
+    ci = (f" [{-f['ust']:+.3f}, {-f['alt']:+.3f}]" if f.get("alt") is not None and f.get("ust") is not None else "")
+    return (f"; raw ours − baseline = {-f['fark']:+.3f}{ci} ({name}, lower is better: negative favours ours, the "
+            "sign rule of the registered comparisons)")
+
+
+def _small_gain_reason(f: dict | None, reason: str) -> str:
+    """English badge reason when the paired difference is significant but below ANLAMLI_FARK (was empty in D12)."""
+    if not f or any(f.get(x) is None for x in ("fark", "alt", "ust")) or not (f["alt"] > 0 and f["fark"] < _kart.ANLAMLI_FARK):
+        return reason
+    if reason.strip() and not reason.startswith("Significant but small"):
+        return reason
+    base = reason.strip() or (f"Significant but small difference ({f['fark']:+.3f}, CI [{f['alt']:+.3f}, "
+                              f"{f['ust']:+.3f}]); the strongest simple baseline is almost level.")
+    return (f"{base} 'High' needs a difference of at least {_kart.ANLAMLI_FARK:g} (ANLAMLI_FARK, metric direction) "
+            "with the CI above 0.")
+
+
+def _se_ceiling_en(x: dict | None) -> dict | None:
+    if not x:
+        return None
+    return {"column": x.get("sutun"), "metric": METRIC_TO_ENGLISH.get(x.get("metrik"), x.get("metrik")),
+            "label": x.get("etiket"), "draws": x.get("R"), "seed": x.get("tohum"), "n": x.get("n"),
+            "analytic": x.get("analitik"), "value": x.get("deger"), "lo": x.get("alt"), "hi": x.get("ust")}
+
+
 def card_markdown(report: dict, lang: str = "mixed") -> str:
     """Evidence card as Markdown: badge, the six card rows, the ladder, the audits and the seals.
 
@@ -1531,6 +1737,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
         badge += (" (only trivial baselines: random/marginal; declare real ones with unlabeled_baselines= or "
                   "baselines_oof=)")
     cav = s.get("badge_caveat")
+    if en and k.get("rozet") == "kararsiz":
+        reason = _small_gain_reason(k.get("fark"), reason)
     out.append(f"**Badge: {badge}.** " + reason + (f" Caveat: {cav}." if cav else ""))
     if k.get("etiketler"):
         out.append("")
@@ -1572,6 +1780,8 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
             row = "Oracle/model ceiling"
         elif r["tur"] == "tavan" and s.get("ceiling_kind") == CEILING_KIND["orneklem_gurultusu"]:
             row = "Sampling-noise ceiling (variance components)"
+        elif r["tur"] == "tavan" and s.get("ceiling_kind") == SE_CEILING_LABEL:
+            row = "Sampling-noise ceiling (SE column)"
         val = f"{_num(r.get('deger'), u)}{_ci(r.get('alt'), r.get('ust'), u)}"
         if r["tur"] == "bosluk" and (s.get("gap_closed") or {}).get("note") == GAP_NA_NOTE:
             val = GAP_NA_NOTE
@@ -1582,7 +1792,18 @@ def card_markdown(report: dict, lang: str = "mixed") -> str:
     f = k.get("fark")
     if f and f.get("fark") is not None:
         out += ["", f"Ours − strongest baseline (paired, metric direction, positive = better): {f['fark']:+.3f}"
-                    + (f" [{f['alt']:+.3f}, {f['ust']:+.3f}]" if f.get("alt") is not None and f.get("ust") is not None else "")]
+                    + (f" [{f['alt']:+.3f}, {f['ust']:+.3f}]" if f.get("alt") is not None and f.get("ust") is not None else "")
+                    + _raw_diff_note(f, report.get("birincil"))]
+    se_c = s.get("se_ceiling")
+    if se_c:
+        out += ["", f"Ceiling type: {SE_CEILING_LABEL}: oracle column truth + N(0, `{_md(se_c['column'])}`) over "
+                    f"{se_c['n']} scored rows, {se_c['draws']} seeded draws averaged in {se_c['metric']} -> "
+                    f"{_num(se_c.get('value'))}{_ci(se_c.get('lo'), se_c.get('hi'))}; analytic "
+                    + (f"{_num(se_c['analytic'])}" if se_c.get("analytic") is not None else
+                       "not given (aggregate_by: group means)")
+                    + (" (sum(w·sqrt(2/pi)·se)/sum(w))" if se_c["metric"] == "mae" else "")
+                    + ". Unlike a model/oracle reference, clearly beating this floor points to leakage or an SE column "
+                      "that overstates the noise."]
     if s.get("noise_ceiling") and s["noise_ceiling"].get("tavan") is not None:
         nc = s["noise_ceiling"]
         conv = {"guvenilirlik": "reliability", "karekok_guvenilirlik": "sqrt(reliability)"}.get(
