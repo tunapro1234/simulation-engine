@@ -39,7 +39,7 @@ Leakage: a fit only sees `history` (all series, t <= cutoff). m is never fixed; 
 Options (defaults leave the output unchanged):
 
     AdoptionABC(scale=2.0)                    # y per 100 people up to 200: the bank's m <= 1 means 2 x 100
-    AdoptionABCAnalogy(scale={s: c / 100 for s, c in ceiling_upper(prior, col="ceiling_blind").items()})   # blind LLM ceiling
+    AdoptionABCAnalogy(scale={s: c / 100 for s, c in ceiling_upper(prior, col="ceiling_blind").items()})  # blind
     AdoptionABCAnalogy(group_col="kind")      # analogy donors only from the target's own kind
     sc = model.scenario(fit, {"imitation": 1.2}, anchor=best_forecast)   # y_anchor = best forecast + ABM delta
     sc.attrs["origin_fit_error"]              # the ABM baseline's miss at the last observed year (data units)
