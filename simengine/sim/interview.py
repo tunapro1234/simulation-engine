@@ -256,8 +256,11 @@ def interview_frame(result: dict, truth: dict | None = None) -> pd.DataFrame:
             if stimuli is not None:
                 r["stimulus"] = stimuli.get(pid)
             rows.append(r)
-    return pd.DataFrame(rows, columns=["unit", "truth", "pred_text", "status", "chars", "arm", "segment", "item",
-                                       "group"] + (["stimulus"] if stimuli is not None else []))
+    df = pd.DataFrame(rows, columns=["unit", "truth", "pred_text", "status", "chars", "arm", "segment", "item",
+                                     "group"] + (["stimulus"] if stimuli is not None else []))
+    # object dtype keeps None: pandas 3's inferred str dtype would turn a missing answer into NaN
+    df["pred_text"] = pd.Series([r["pred_text"] for r in rows], index=df.index, dtype=object)
+    return df
 
 
 __all__ = ["interview", "interview_frame", "ARMS_DEFAULT", "STATUSES"]

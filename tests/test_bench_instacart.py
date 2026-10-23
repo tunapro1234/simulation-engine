@@ -1,4 +1,5 @@
 """instacart bench task: synthetic Kaggle-layout files in a temp dir; real data only when $SIMENGINE_DATA is set."""
+import importlib.util
 import os
 import tempfile
 import unittest
@@ -9,6 +10,10 @@ import pandas as pd
 from simengine.bench.base import ENV_DATA, DataNotFound
 from simengine.bench.tasks import instacart as ic
 from simengine.bench.tasks.instacart import Instacart
+
+# the loader reads parquet through pyarrow; without it these classes skip (nothing gets installed)
+PARQUET = importlib.util.find_spec("pyarrow") is not None
+NO_PARQUET = "pyarrow not installed"
 
 
 def _write(root, csv=False, n_users=60, seed=0):
@@ -75,6 +80,7 @@ class TestMetrics(unittest.TestCase):
         self.assertAlmostEqual(ic.weighted_auc(w[o], gid, ys), auc(y[rep], s[rep]), places=12)
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestInstacart(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -200,6 +206,7 @@ class TestInstacart(unittest.TestCase):
         empty.cleanup()
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 @unittest.skipUnless(os.environ.get(ENV_DATA), f"${ENV_DATA} not set")
 class TestInstacartReal(unittest.TestCase):
     def test_small_sample(self):

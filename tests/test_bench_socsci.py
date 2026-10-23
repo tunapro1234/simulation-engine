@@ -1,5 +1,6 @@
 """socsci210 bench task: synthetic HF-style shards and mapping files (no real rows); the real-data check runs only
 when $SIMENGINE_DATA holds socsci210."""
+import importlib.util
 import json
 import os
 import re
@@ -13,6 +14,10 @@ from simengine.bench.base import DataNotFound
 from simengine.bench.tasks import socsci210 as ss
 from simengine.llm.fake import FakeLLM
 from simengine.types import Task
+
+# parquet needs pyarrow or fastparquet; without one the classes that use it skip (nothing gets installed)
+PARQUET = any(importlib.util.find_spec(m) for m in ("pyarrow", "fastparquet"))
+NO_PARQUET = "no parquet engine (pyarrow / fastparquet)"
 
 SEEN, UNSEEN = ["s1", "s2", "s3", "s4"], ["s5", "s6"]
 LIKERT = "Only return an integer from 1 to 5, where 1 means 'not at all' and 5 means 'very much', nothing else."
@@ -141,6 +146,7 @@ class TestScaleAndDistances(unittest.TestCase):
         np.testing.assert_allclose(ss.dist_from_responses([], 0, 3), [.25] * 4)
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestHist(_Fixture):
     def test_build_merges_shards(self):
         h, src = ss.load_hist(os.path.join(self.root, "socsci210"))
@@ -191,6 +197,7 @@ class TestHist(_Fixture):
                 ss.build_hist([])
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestTask(_Fixture):
     def test_protocol_and_options(self):
         self.assertIsInstance(self.task, Task)
@@ -327,6 +334,7 @@ class TestTask(_Fixture):
         self.assertTrue(np.isfinite(self.task.score(fr, "panel")["value"]))
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 @unittest.skipUnless(os.environ.get("SIMENGINE_DATA"), "$SIMENGINE_DATA not set")
 class TestRealData(unittest.TestCase):
     def test_study_split_shape(self):

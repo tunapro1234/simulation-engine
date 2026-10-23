@@ -4,11 +4,16 @@ Skipped when the catalogue is absent. Root: $SIMENGINE_TEST_DATA, else $SIMENGIN
 else the research machine's catalogue (the ROOT default below).
 Each expected number comes from the research branch file named in the assertion message. Budget < 30 s.
 """
+import importlib.util
 import os
 import unittest
 import warnings
 
 from simengine import bench
+
+# parquet needs pyarrow or fastparquet; without one the classes that use it skip (nothing gets installed)
+PARQUET = any(importlib.util.find_spec(m) for m in ("pyarrow", "fastparquet"))
+NO_PARQUET = "no parquet engine (pyarrow / fastparquet)"
 
 ROOT = os.environ.get("SIMENGINE_TEST_DATA") or os.environ.get("SIMENGINE_DATA") or "/data/talp/veri"
 
@@ -17,6 +22,7 @@ def _has(*parts):
     return os.path.exists(os.path.join(ROOT, *parts))
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 @unittest.skipUnless(_has("gss", "panel2016_2020.parquet"), "GSS panels not present")
 class TestGSSReal(unittest.TestCase):
     def test_persistence_dev_matches_dongu(self):
@@ -28,6 +34,7 @@ class TestGSSReal(unittest.TestCase):
         self.assertAlmostEqual(r["corr"]["value"], 0.4425, places=4)
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 @unittest.skipUnless(_has("opinionqa", "islenmis", "dagilim.parquet")
                      and _has("subpop-opinionqa", "data", "opinionqa", "processed", "opinionqa.csv"),
                      "OpinionQA / SubPOP files not present")

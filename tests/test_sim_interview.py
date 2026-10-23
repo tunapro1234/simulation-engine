@@ -3,6 +3,8 @@ import json
 import re
 import unittest
 
+import pandas as pd
+
 from simengine.llm import EmptyResponseError, FakeLLM, LLMError
 from simengine.sim import REFRAME_NOTE, schema_responder
 from simengine.sim.interview import interview, interview_frame
@@ -208,6 +210,15 @@ class TestInterviewFrame(unittest.TestCase):
         self.assertEqual(r.loc["p1|persona", "chars"], len("answer of p1"))
         self.assertEqual(set(f["item"]), {"persona", "no_persona", "persona_swap"})
         self.assertNotIn("stimulus", f.columns)
+
+    def test_missing_answer_is_none_under_string_inference(self):
+        # pandas 3 (and 2.x with future.infer_string) gives text columns a str dtype that turns None into NaN
+        res = interview(panel(1), "Why?", llm=SlotLLM(lambda s, u: answer(u)))
+        with pd.option_context("future.infer_string", True):
+            f = interview_frame(res).set_index("unit")
+        self.assertIsNone(f.loc["p0|persona_swap", "pred_text"])
+        self.assertEqual(f.loc["p0|persona", "pred_text"], "answer of p0")
+        self.assertEqual(f.loc["p0|persona_swap", "chars"], 0)
 
     def test_not_asked_in_subsampled_swap(self):
         res = interview(panel(1), "Why?", llm=SlotLLM(lambda s, u: answer(u)))

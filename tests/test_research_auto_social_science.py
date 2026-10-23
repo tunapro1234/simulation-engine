@@ -1,6 +1,7 @@
 """research.hypotheses: automated social science loop (Manning, Zhu & Horton 2024) and the experiment outcome
 predictor (Hewitt et al. 2024). Offline: FakeLLM responders only, synthetic fixtures; the one real-data check is
 skipped unless $SIMENGINE_DATA is set."""
+import importlib.util
 import json
 import os
 import re
@@ -13,6 +14,10 @@ import pandas as pd
 
 from simengine.llm.fake import FakeLLM
 from simengine.research import hypotheses as H
+
+# parquet needs pyarrow or fastparquet; without one the classes that use it skip (nothing gets installed)
+PARQUET = any(importlib.util.find_spec(m) for m in ("pyarrow", "fastparquet"))
+NO_PARQUET = "no parquet engine (pyarrow / fastparquet)"
 
 SCENARIO = "A buyer and a seller bargain over a used mug."
 
@@ -397,6 +402,7 @@ class TestReviewRegressions(unittest.TestCase):
             self.assertEqual(json.loads((Path(tmp) / "d.jsonl").read_text())["arr"], [1.0, None])
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 @unittest.skipUnless(os.environ.get("SIMENGINE_DATA"), "set $SIMENGINE_DATA for real-data checks")
 class TestRealData(unittest.TestCase):
     def test_socsci210_condition_protocol(self):

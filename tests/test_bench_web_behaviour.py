@@ -1,5 +1,6 @@
 """web_behaviour bench tasks on synthetic WebShop-style trajectories and UXAgent-style traces; the real-data check is
 skipped unless $SIMENGINE_DATA is set."""
+import importlib.util
 import json
 import os
 import tempfile
@@ -14,6 +15,10 @@ from simengine.bench.tasks import web_behaviour as wb
 from simengine.bench.tasks.web_behaviour import A, ACTIONS, K, WebShopBuy, WebShopNextAction
 from simengine.llm.fake import FakeLLM
 from simengine.types import TaskData
+
+# parquet needs pyarrow or fastparquet; without one the classes that use it skip (nothing gets installed)
+PARQUET = any(importlib.util.find_spec(m) for m in ("pyarrow", "fastparquet"))
+NO_PARQUET = "no parquet engine (pyarrow / fastparquet)"
 
 GOAL = {"asin": "X0", "instruction_text": "i want a blue mug under 20 dollars", "goal_options": ["blue"],
         "price_upper": 20.0}
@@ -169,6 +174,7 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(c.sum(), 2)
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestTasks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -297,6 +303,7 @@ class TestTasks(unittest.TestCase):
                 os.environ[base.ENV_DATA] = old
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestLLM(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -350,6 +357,7 @@ class TestLLM(unittest.TestCase):
         self.assertTrue((fb["pred_llm"] > 0.9).all())
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 @unittest.skipUnless(os.environ.get(base.ENV_DATA), "$SIMENGINE_DATA not set")
 class TestRealData(unittest.TestCase):
     def test_load_and_baselines(self):

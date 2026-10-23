@@ -1,4 +1,5 @@
 """Synthetic fixtures for every bench adapter: tiny files in the documented layout, written to a temp dir."""
+import importlib.util
 import json
 import os
 import tempfile
@@ -10,6 +11,10 @@ import pandas as pd
 
 from simengine import bench
 from simengine.types import Task
+
+# parquet needs pyarrow or fastparquet; without one the classes that use it skip (nothing gets installed)
+PARQUET = any(importlib.util.find_spec(m) for m in ("pyarrow", "fastparquet"))
+NO_PARQUET = "no parquet engine (pyarrow / fastparquet)"
 
 
 def _gss(root):
@@ -238,6 +243,7 @@ class _Base(unittest.TestCase):
         self.assertIn("split", data.meta)
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestGSS(_Base):
     builder = staticmethod(_gss)
 
@@ -273,6 +279,7 @@ class TestGSS(_Base):
                 os.environ["SIMENGINE_DATA"] = old
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestOpinionQA(_Base):
     builder = staticmethod(_oqa)
 
@@ -350,6 +357,7 @@ class TestOpenEcommerce(_Base):
             bench.get("open_ecommerce", n_persons=400).load(self.root)
 
 
+@unittest.skipUnless(PARQUET, NO_PARQUET)
 class TestUpworthy(_Base):
     builder = staticmethod(_upworthy)
 
