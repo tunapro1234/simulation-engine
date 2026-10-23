@@ -405,15 +405,29 @@ def _top1(y, p, madde):
 
 
 def _cift_isaret(y, p, madde):
-    dogru, n = 0.0, 0
-    for g in _gruplar(madde):
-        i, j = np.triu_indices(len(g), 1)
-        dy = np.sign(y[g][i] - y[g][j])
-        dp = np.sign(p[g][i] - p[g][j])
-        m = dy != 0
-        dogru += np.where(dp[m] == 0, 0.5, (dp[m] == dy[m]).astype(float)).sum()
-        n += m.sum()
-    return dogru / n if n else np.nan
+    """Madde içi çiftlerde fark yönü doğruluğu: gerçekte eşit çift sayılmaz, tahminde eşit çift yarım puan.
+    Bütün maddelerin çiftleri tek seferde kurulur (aynı boydaki maddeler aynı üst üçgen kalıbını paylaşır)."""
+    if madde is None:
+        return np.nan
+    kod = pd.factorize(madde)[0]
+    sira = np.argsort(kod, kind="stable")
+    ks = kod[sira]
+    bas = np.flatnonzero(np.r_[True, ks[1:] != ks[:-1]]) if len(ks) else np.zeros(0, int)
+    boy = np.diff(np.r_[bas, len(ks)])
+    I, J = [], []
+    for s in np.unique(boy[boy >= 2]):
+        i, j = np.triu_indices(int(s), 1)
+        b = bas[boy == s][:, None]
+        I.append((b + i).ravel())
+        J.append((b + j).ravel())
+    if not I:
+        return np.nan
+    I, J = sira[np.concatenate(I)], sira[np.concatenate(J)]
+    y, p = np.asarray(y, float), np.asarray(p, float)
+    dy, dp = np.sign(y[I] - y[J]), np.sign(p[I] - p[J])
+    m = dy != 0
+    n = int(m.sum())
+    return float(np.where(dp[m] == 0, 0.5, (dp[m] == dy[m]).astype(float)).sum()) / n if n else np.nan
 
 
 def _spearman_ici(y, p, madde):
@@ -456,12 +470,19 @@ MADDE_ICI = Metrik("madde_ici_kor", "toplu", _madde_ici_kor, +1, tavan=True,
                    aciklama="madde içinde kişiler arası korelasyon (Fisher-z ort.): kişiyi ayırt ediyor mu")
 DEMEANED = Metrik("demeaned_r2", "toplu", _demeaned_r2, +1, tavan=True,
                   aciklama="madde ortalaması çıkarılınca R²: kişiye özgü sinyal (madde ortalaması = 0)")
+# sürekli görevde madde (ör. deney) içinde çift sıralama doğruluğu = ab'deki cift_isaret (pair_sign); ikincil metrik
+CIFT_SUREKLI = Metrik("cift_isaret", "toplu", _cift_isaret, +1, tavan=True,
+                      aciklama="madde içi çift sıralama doğruluğu (pair accuracy): gerçekte eşit çift sayılmaz, "
+                               "tahminde eşit çift yarım puan; GA maddeye kümeli")
 
 
 def aile(gorev: str, olasilik: bool = True, madde: bool = False, birim_aralik: bool = False,
-         oran: bool = False) -> list[Metrik]:
-    """oran=True: sürekli görevde WMAPE ve yanlılık da eklenir (talep tahmini)."""
+         oran: bool = False, cift: bool = False) -> list[Metrik]:
+    """oran=True: sürekli görevde WMAPE ve yanlılık da eklenir (talep tahmini). cift=True: sürekli görevde madde içi
+    çift sıralama doğruluğu (cift_isaret = pair_sign) ikincil metrik olarak eklenir (madde başına birden çok satır)."""
     ek = [MADDE_ICI, DEMEANED] if madde else []
+    if cift and gorev == "surekli":
+        ek = ek + [CIFT_SUREKLI]
     if oran and gorev == "surekli":
         ek = ek + [WMAPE, YANLILIK]
     if gorev == "ikili":

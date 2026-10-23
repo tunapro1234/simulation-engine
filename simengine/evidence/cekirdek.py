@@ -19,6 +19,7 @@ from .sema import ON_EK, _normalle, _sinif_vektoru, _vektor, _vektor_mu, gercek_
 SURUM = "0.1"
 BILGI_B_ETIKET = "ayar B: hedef sorunun öbür hücrelerinin cevabı (setting B)"
 DOLGU_ESIK = 0.05   # kol başına dolgu (geçersiz → tekdüze) payı bunu aşarsa denetim uyarısı
+CIFT_EN_FAZLA = 200  # sürekli görevde pair_sign yalnız madde başına en çok bu kadar satırda (çift sayısı ~n²/2)
 AZ_KUME = 10        # bootstrap birimi (küme; ab'de test) bundan azsa GA anlamsız: denetim uyarısı, rozet "yüksek" olmaz
 # api.METRIC_TO_INTERNAL'a ek İngilizce yazımlar (sklearn / yaygın adlar) → metrik.aile iç adı
 BIRINCIL_EK_ADLAR = {"log_loss": "logloss", "cross_entropy": "logloss", "roc_auc": "auc", "f1": "macro_f1",
@@ -97,6 +98,28 @@ def _toplu_duzey(veri, duzey: str | None, madde_ici: bool) -> tuple[str, str] | 
         return ("her maddede segment başına tek satır: satırlar segment tahmini, kişi değil",
                 "one row per segment in every item: rows are segment estimates, not persons")
     return None
+
+
+# satırı seçim görevi olan düzeyler (conjoint / seçim deneyi): her satır kendi seçenek kümesi
+SECIM_DUZEY = ("task", "choice", "choice_task", "gorev", "görev", "secim", "seçim")
+
+
+def _secim_gorevi(veri, duzey: str | None, olasilik: bool) -> tuple[str, str] | None:
+    """Satırlar seçim görevi mi (her görevin kendi seçenekleri): level="task"/"choice" ya da çok sınıfta seçenekler
+    üzerinde olasılık vektörü + madde sütunu yok. Karıştırma bir görevin vektörünü başka seçenek kümesine taşır; PPI++
+    tek bir soruya insan yanıtı ister. Aynı soruyu yanıtlayan kişilerde item= verin (karıştırma madde içinde döner).
+    level= başka bir değerle verildiyse otomatik algı yapılmaz. Döner (Türkçe neden, İngilizce neden) | None."""
+    ad = str(duzey).strip().lower() if duzey else None
+    if ad in SECIM_DUZEY:
+        return (f"level={duzey}: satırlar seçim görevi (her görevin kendi seçenekleri), kişi değil",
+                f"level={duzey}: rows are choice tasks with their own choice sets, not persons")
+    if ad or veri.gorev != "cok_sinif" or not olasilik or "madde" in veri.df:
+        return None
+    return ("satırlar seçim görevi: seçenekler üzerinde olasılık vektörü, madde sütunu yok; vektör başka görevin "
+            "seçenek kümesine taşınırdı (aynı soruyu yanıtlayan kişilerse item= verin)",
+            "rows are choice tasks: probability vectors over alternatives without an item column, a shuffle would move "
+            "a vector onto another task's choice set and PPI++ needs human answers to one question (if the rows are "
+            "persons answering the same question, pass item=)")
 
 
 def _diz(veri, sutun, kaynak: str | None = None):
@@ -617,7 +640,11 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     GA'ları. Tek değerliyse uygulanmaz (varsayılan kümeye dönülür, denetimde not).
     duzey: "segment" / "study" / "effect" (ya da her maddede segment başına tek satır) iken satır kişi değildir:
     persona karıştırma ve PPI++ 'kaç insana bedel' gerekçesiyle uygulanamaz (ozet["carpan_uygulanamaz"]). Madde
-    başına sabit tahmin denetimde uyarılır (ozet["sira_tanimsiz"]); ezber_llm=False iken ham kol LLM kolu sayılır."""
+    başına sabit tahmin denetimde uyarılır (ozet["sira_tanimsiz"]); ezber_llm=False iken ham kol LLM kolu sayılır.
+    duzey="task" / "choice" (ya da çok sınıfta olasılık vektörü + madde sütunu yok) iken satırlar seçim görevidir: aynı
+    iki satır gerekçesiyle uygulanamaz. Sürekli görevde madde başına 2..CIFT_EN_FAZLA satır varsa madde içi çift
+    sıralama doğruluğu (cift_isaret = pair_sign) ikincil metrik olur. bizim/ham oof_tabanlar içindeyse PPI++ çarpanında
+    dongusel gibi sayılır (aynı etiketlerle eğitilmiş)."""
     birincil = birincil_ic(birincil)
     if gercek_yok(df):
         return bekleyen(df, baslik, veri_adi, gorev=gorev, yontemler=yontemler, bizim=bizim, ham=ham,
@@ -639,11 +666,16 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
     madde_var = "madde" in d
     # her madde tek satırsa madde içi ölçüt (madde_ici_kor, demeaned_r2) ve karıştırma kontrolü tanımsız
     madde_ici = madde_var and bool((d.groupby("madde").size() > 1).any())
-    toplu = None if tahmin_gorevi else _toplu_duzey(veri, duzey, madde_ici)
     olasilik = veri.gorev != "cok_sinif" or isinstance(d[ON_EK + veri.yontemler[0]].iloc[0], np.ndarray)
+    toplu = None if tahmin_gorevi else (_toplu_duzey(veri, duzey, madde_ici) or _secim_gorevi(veri, duzey, olasilik))
     birim_aralik = veri.gorev == "surekli" and d["gercek"].between(0, 1).all()
     oranli = tahmin_gorevi or birincil in ORAN_METRIKLERI
-    metrikler = aile(veri.gorev, olasilik, madde_ici and veri.gorev in ("ikili", "surekli"), birim_aralik, oran=oranli)
+    # sürekli görev + madde başına birden çok satır: madde içi çift sıralama doğruluğu (pair_sign) ikincil metrik;
+    # çok büyük maddede (kişi × soru) çift sayısı patlar, eklenmez
+    cift = (veri.gorev == "surekli" and madde_ici and not tahmin_gorevi
+            and int(d.groupby("madde").size().max()) <= CIFT_EN_FAZLA)
+    metrikler = aile(veri.gorev, olasilik, madde_ici and veri.gorev in ("ikili", "surekli"), birim_aralik, oran=oranli,
+                     cift=cift)
     adlar = [m.ad for m in metrikler]
     dengesiz_not = None
     if not birincil and veri.gorev in ("ikili", "cok_sinif"):
@@ -793,7 +825,8 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
                 if m.ad == birincil:
                     pa, pu = ga(tekrar[c][m.ad])
                     th = nokta[c][m.ad]
-                    if np.isfinite(pa) and np.isfinite(pu) and np.isfinite(th) and not (pa <= th <= pu):
+                    tol = 1e-9 * max(1.0, abs(th)) if np.isfinite(th) else 0.0   # sıfır varyanslı kol: kayan nokta
+                    if np.isfinite(pa) and np.isfinite(pu) and np.isfinite(th) and not (pa - tol <= th <= pu + tol):
                         ga_disi.append((c, th, pa, pu))
                 a, u = gaa(tekrar[c][m.ad], nokta[c][m.ad])
                 n = int(len(d) if girdiler[c][2] is None else girdiler[c][2].sum())
@@ -1263,6 +1296,9 @@ def degerlendir(df: pd.DataFrame, baslik: str, veri_adi: str = "", gorev: str | 
         try:
             from . import orneklem as _orn
             sec = carpan_yontemler or [bizim] + ([ham] if ham else [])
+            # bizim/ham kat dışı (OOF) taban diye bildirildiyse aynı etiketlerle eğitilmiş: circular= gibi çarpan dışı
+            oof_ad = set(oof_tabanlar or []) - set(dongusel or [])
+            dongusel = list(dongusel or []) + [y for y in dict.fromkeys(sec) if y and y.removeprefix(ON_EK) in oof_ad]
             sec = [y for y in sec if y and y.removeprefix(ON_EK) not in (dongusel or [])]
             if dongusel:
                 den.append({"kontrol": "döngüsel önsel (çarpan dışı)", "durum": "uyari", "deger": len(dongusel),
@@ -1412,9 +1448,12 @@ def _onkayit_kaniti(bizim: str, onkayit: list | None, metinler: list | None, adl
     yazıldıysa sayılmaz. Eşleşen metinde başka yöntem adları da geçiyor ve 'bizim' açıkça işaretlenmemişse
     (ours:/primary:/bizim:/birincil: <ad>) belirsizdir. Açık işaret 1-2 harfli adı da ön eksiz bulur ("ours: H"):
     düz metinde tek harf sözcükle karışır, işaretin ardında karışmaz (ad büyük/küçük harf duyarlı).
-    Dönüş: (kod, açıklama), kod ∈ {"adlandirildi", "bulunamadi", "sonra", "belirsiz"}."""
+    Ad yalnız mühür açıklamasında geçiyorsa (ön kayıt metni / belgesi yok ya da adı geçirmiyor) kod "aciklama": mühür
+    sonuç görüldükten sonra yazılabilir, ön kayıt sayılmaz (D7: ad dev koşusundan sonra yazılan açıklamadaydı).
+    Dönüş: (kod, açıklama), kod ∈ {"adlandirildi", "aciklama", "bulunamadi", "sonra", "belirsiz"}."""
     import re as _re
     gecerli, gec = _onkayit_metinleri(onkayit, metinler)
+    belge = gecerli[len(_onkayit_metinleri(onkayit, None)[0]):]   # açıklamalar başta, ardından zamanı uygun metinler
     kalip = _ad_kalibi(bizim)
     isaret_k = _re.compile(r"(?i:ours|primary|bizim|birincil)\W{0,3}[:=]\s*[`'\"]?(?:pred_|tahmin_)?"
                            + _re.escape(bizim) + r"(?![A-Za-z0-9_])")
@@ -1425,18 +1464,21 @@ def _onkayit_kaniti(bizim: str, onkayit: list | None, metinler: list | None, adl
         return "bulunamadi", ""
     isaret = _re.compile(r"(?i)(?:ours|primary|bizim|birincil)\W{0,3}[:=]\s*[`'\"]?(?:pred_|tahmin_)?"
                          + _re.escape(bizim) + r"(?![A-Za-z0-9_])")
-    if any(isaret.search(g) for g in eslesen):
-        return "adlandirildi", ""
+    kod, neden = "adlandirildi", ""
     digerleri = sorted({a for a in adlar if a != bizim and any(_ad_kalibi(a).search(g) for g in eslesen)})
-    if digerleri:
-        return "belirsiz", ("ön kayıtta başka yöntem adları da geçiyor (" + ", ".join(digerleri) + "); 'bizim' açıkça "
-                            "işaretlenmemiş (ours: <ad>) (several method names in the pre-registration)")
-    return "adlandirildi", ""
+    if digerleri and not any(isaret.search(g) for g in eslesen):
+        kod, neden = "belirsiz", ("ön kayıtta başka yöntem adları da geçiyor (" + ", ".join(digerleri) + "); 'bizim' "
+                                  "açıkça işaretlenmemiş (ours: <ad>) (several method names in the pre-registration)")
+    if not any(kalip.search(g) or isaret.search(g) for g in belge):
+        return "aciklama", (neden + "; " if neden else "") + (
+            "yalnız mühür açıklamasında geçiyor, ön kayıt belgesinde değil: önceden adlandırıldı sayılmaz "
+            "(named only in a seal description, not in a pre-registration document (seal ≠ pre-registration))")
+    return kod, neden
 
 
 def _onkayitta_geciyor(bizim: str, onkayit: list | None, metinler: list | None) -> bool:
     """Geri uyum: 'bizim' adı ön kayıt kanıtında (açıklama / zamanı uygun metin) geçiyor mu."""
-    return _onkayit_kaniti(bizim, onkayit, metinler)[0] in ("adlandirildi", "belirsiz")
+    return _onkayit_kaniti(bizim, onkayit, metinler)[0] in ("adlandirildi", "belirsiz", "aciklama")
 
 
 def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yapilandirma) -> dict:
@@ -1445,14 +1487,16 @@ def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yap
     sira = sorted(yontem_c, key=lambda c: -M.yon * deg(c))
     n_den = max(len(sira), int(n_yapilandirma or 0))
     en_iyi = bool(sira) and sira[0] == bc and n_den >= 4
-    yap = f"; {int(n_yapilandirma)} yapılandırma denendi (n_configs)" if n_yapilandirma else ""
+    n_sutun = len(veri.yontemler)
+    yap = (f"; {int(n_yapilandirma)} yapılandırma denendi (frame has {n_sutun} prediction columns; "
+           f"n_configs={int(n_yapilandirma)} given)" if n_yapilandirma else "")
     iyimser = "; bizim en iyisi: çok yapılandırma arasından seçildiyse iyimser, bağımsız veride doğrulayın" if en_iyi else ""
     kayit_var = bool(onkayit) or bool(metinler)
     adlar = [str(a)[len(ON_EK):] if str(a).startswith(ON_EK) else str(a) for a in veri.yontemler]
     kod, neden = _onkayit_kaniti(bizim, onkayit, metinler, adlar) if kayit_var else ("yok", "")
     if kod == "adlandirildi":
         durum, ad = ("uyari" if en_iyi else "tamam"), f"'bizim' ({bizim}) ön kayıtta geçiyor: önceden adlandırıldı"
-    elif kod in ("sonra", "belirsiz"):
+    elif kod in ("sonra", "belirsiz", "aciklama"):
         durum, ad = "uyari", f"doğrulanmadı: {neden} (not verified)"
     elif kayit_var:
         durum, ad = "uyari", (f"doğrulanmadı: 'bizim' ({bizim}) ön kayıtta bulunamadı "
@@ -1465,7 +1509,7 @@ def _secim_yanliligi(veri, yontem_c, bc, bizim, deg, M, onkayit, metinler, n_yap
         ad = (f"doğrulanmadı: ön kayıt verilmedi (prereg=); 'bizim' ({bizim}) adının önceden seçildiği kanıtlanamaz "
               "(not verified: no pre-registration)")
     return {"kontrol": "seçim yanlılığı", "durum": durum, "ayrinti": f"{len(veri.yontemler)} yöntem; {ad}{yap}{iyimser}",
-            "deger": len(veri.yontemler), "n_configs": int(n_yapilandirma) if n_yapilandirma else None}
+            "deger": n_sutun, "n_configs": int(n_yapilandirma) if n_yapilandirma else None, "n_pred_columns": n_sutun}
 
 
 def _bizim_muhuru(bizim: str, muhurler: list | None, cerceve: list | None = None) -> tuple[dict | None, dict | None]:
