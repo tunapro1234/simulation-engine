@@ -21,6 +21,7 @@ that combine an LLM prediction with a model learned from data.
 | `GroupTransfer`, `oof_predict` | group transfer (predict people in groups never seen in training): ridge group level on group composition (+ optional LLM group prior) + person deviation model; out-of-fold predictions with group-held-out CV | D2 rehearsal, country-held-out CV person Spearman: person-only GBDT 0.197, two-stage 0.257, two-stage + LLM prior **0.295** (oracle level 0.344) |
 | `TfidfBinary`, `target_encode` | one text per row -> P(y=1): word 1-2 + char_wb 3-5 TF-IDF (+ extra / target-encoded columns) logistic with in-train C choice; smoothed OOF mean encoding | G4 rehearsal (first search query -> purchase, 30,365 training sessions) test AUC **0.666** [0.617, 0.714]; 500 sessions 0.579 |
 | `rct_effects`, `rct_transfer` | RCT condition (x segment) effects vs control within blocks, averaged over blocks, with SE; "same test in another market" transfer baseline | G1 rehearsal (11 messages, 32 -> 31 countries) transfer Spearman **0.845** [0.43, 1.00], noise ceiling 0.908; one country alone median 0.28 |
+| `heterogeneity_test`, `segment_uplift`, `shrink_effects`, `split_half_effects`, `TLearner`, `SLearner`, `qini`, `auuc`, `uplift_at_k` (`uplift.py`) | uplift / CATE for randomised experiments: is the effect heterogeneous at all (treatment x feature test + Cochran Q), segment effects with Neyman SE shrunk by Fay-Herriot (REML tau^2), a split-half dev rig that splits units before bootstrapping, T-/S-learners and the Qini / AUUC / uplift@k metrics the bench uplift tasks use | D11 rehearsal (SMS pilot -> rollout, 26 segments): pilot ATE to every segment tied the strongest baseline (MAE 1.538 vs 1.526); the hand T-learner did not finish in 14 min and the test said it was not needed |
 | `item_holdout_features`, `MFBaseline`, `procrustes_align` | item cold start (new items with no rating): member statistics + SVD taste vectors rebuilt with each fold's items removed, fold bases aligned by orthogonal Procrustes (rotation + one scale factor); biased MF (ALS) ladder baseline | D3 rehearsal recipe (port of `kod/ozellik.py`); no measured gain reported for the MF rung, and it reduces to member level + constant in pure item cold start |
 | `persistence_forecast`, `seasonal_naive`, `moving_mean`, `seasonal_ratio`, `ses`, `make_features`, `DirectForecaster`, `backtest`, `summarize_backtest`, `point_for_metric`, `llm_prior_feature`; `forecast.panel_from_long`, `forecast.extrapolation_check` | multi-series forecasting (`forecast.py`): rule ladder, leak-free lag/rolling features, one GBDT per horizon (level, log-ratio or logit-with-ceiling target; origin-time features), rolling-origin backtest, Poisson median for L1 metrics, LLM prior feature with blind + shuffled controls, long `id, time, variable, value` table -> panel, extrapolation warning | D4 rehearsal (M5 weekly, 4 weeks ahead, one run) test WMAPE: persistence 0.418, last-4 mean 0.379, SES 0.371, GBDT + price + calendar **0.348**; LLM event prior added nothing (named = blind) |
 | `wave_persistence`, `pooled_shrunk`, `same_regime`, `subgroup_mixture`, `mixture_reweight`, `role_swap`, `transition_backtest`, `merge_frames` (`waves.py`) | repeated surveys: past waves -> next wave's segment x question distributions; last-wave copy, k-wave pool shrunk to the population, same-regime pool, party-ID mixture with role swap across a regime switch, per-year backtest over past switch years | D6 rehearsal (yearly opinion survey, D -> R president, one run): copying last year 0.1315 test TVD (approval 0.295), role-mirror baseline 0.0839, team 0.0788; on dev the same-regime 4-wave pool beat the preregistered method, 0.0990 vs 0.1007 |
@@ -38,6 +39,7 @@ that combine an LLM prediction with a model learned from data.
 - **[prova-d4]** = `uretim/prova/d4/NOTLAR.md`, `SONUC-MAIN.md`, `SIMENGINE-EKSIK.md` (blind rehearsal: M5 weekly demand, 30,490 series, 4 weeks ahead, WMAPE; code `kod/ozellik.py`, `ses.py`, `kos.py`, `pm.py`, `ek.py`, `llm_olay.py`)
 - **[prova-d3]** = `uretim/prova/d3/SIMENGINE-EKSIK.md` (blind rehearsal: new-film ratings, item cold start; code `kod/ozellik.py`, `kod/model.py`)
 - **[prova-d6]** = `uretim/prova/d6/SIMENGINE-EKSIK.md`, `SONUC-MAIN.md` (blind rehearsal: yearly opinion survey 2006-2024 -> 2025 segment x question distributions across a president switch, cell TVD)
+- **[prova-d11]** = `uretim/prova/d11/SIMENGINE-EKSIK.md`, `SONUC-MAIN.md` (blind rehearsal: SMS pilot RCT -> rollout segment uplift, 26 segments)
 - **[G1]** = `uretim/recete/G1/RECETE.md`, `kart.md` (open recipe rehearsal: climate many-labs, 11 messages vs control, 32 training / 31 test countries); **[G4]** = `uretim/recete/G4/RECETE.md`, `kart.md`, `CAPRAZ-G1.md` (open recipe rehearsal: ShopCART first query -> purchase, 1,000 test sessions)
 
 Every number below comes from those files. This port re-measured nothing. The tests
@@ -935,6 +937,63 @@ countries: transfer Spearman over the conditions 0.845 [0.43, 1.00] against a sa
 equal country weights 0.88-0.92. One training country alone: median 0.28, quartiles 0.06-0.48, so a single-market
 history is a weak baseline. Haiku's direct forecast scored 0.073, persona panels -0.127 / 0.227, and adding the LLM
 to the transfer baseline made it worse (-0.300 [-0.85, +0.05]).
+
+## Uplift / CATE for randomised experiments (`uplift.py`) [prova-d11]
+
+One row per customer: a 0/1 treatment, an outcome (0/1 or numeric), features, optionally a segment. Test for
+heterogeneity before building any per-customer model.
+
+```python
+het = M.heterogeneity_test(df, "sms", "buy", ["age", "gender", "points"], seg="segment")
+het.p, het.advice, het.q                       # p > 0.2: do not spend time on per-customer uplift
+eff = M.segment_uplift(df, "sms", "buy", "segment")
+eb = M.shrink_effects(eff.uplift, eff.se)      # .shrunk, .B, .attrs["tau2"]
+dev = M.split_half_effects(df, "sms", "buy", "segment", R=50, seed=0)
+M.summarize_split_half(dev)                    # mae, mse_d (noise-corrected), spearman per method
+score = M.TLearner(model="logistic").fit(train, "sms", "buy", feats).predict(test)
+M.uplift_at_k(test.buy, test.sms, score, 0.3), M.qini(test.buy, test.sms, score)
+```
+
+- **`heterogeneity_test(df, treat, y, features, *, seg=None, scale="logit", bins=5)`**: joint test of every
+  treatment x feature interaction (numerics standardised, median-imputed with a missing flag; categories one-hot).
+  `scale="logit"`: likelihood-ratio test, logistic, 0/1 outcome only. `scale="additive"`: linear model, HC1 Wald
+  test, i.e. the risk-difference scale uplift@k acts on. A constant risk difference over a varying base rate is an
+  interaction on the logit scale in large samples, and vice versa, so pick the scale of the decision. `q`: Cochran Q
+  of the raw group effects over `seg` and over each feature (numerics in `bins` quantile bins), with `I2`. The
+  rule in the docstring and `advice`: **p > 0.2: do not spend time on per-customer uplift**; report the constant
+  effect with random targeting as the baseline. p < 0.05: a model may pay; check uplift@k against random on held-out rows.
+- **`segment_uplift(df, treat, y, seg=None)`**: raw treated - control difference per segment, Neyman SE
+  sqrt(s1^2/n1 + s0^2/n0), normal 95% CI, indexed by segment. A 0/1 outcome uses (k + 1) / (n + 2) proportions in
+  the variance, so a 6/6 cell does not get SE 0. `.attrs["ate"]`, `["ate_se"]`.
+- **`shrink_effects(est, se, X=None, *, tau2=None)`**: Fay-Herriot: est ~ N(X beta, se^2 + tau^2), tau^2 by REML
+  (the moment estimator inflated with many small segments in D11), beta by GLS; `X=None` shrinks to the
+  precision-weighted mean. Columns `est`, `se`, `prior`, `B` (weight on the prior), `shrunk`, `post_se` (ignores
+  the uncertainty in beta and tau^2); a row without an estimate gets the prior.
+- **`split_half_effects(df, treat, y, seg, R=100, seed=0, *, methods=None, unit=None, boot=True)`**: per rep the
+  units are split in two, stratified by treatment first, and only then bootstrapped inside each half. The D11 hand
+  version bootstrapped before splitting, so one customer sat in both halves. `methods`: name ->
+  callable(half A) -> effects by segment; default `raw`, `pooled` (A's ATE everywhere), `shrunk`. Truth = half B's
+  `segment_uplift`, `truth_var` = its SE^2, so `summarize_split_half` reports `mse_d` = mean((pred - truth)^2 -
+  truth_var), the MSE against the true effect. `unit=` keeps a customer's rows together.
+- **`TLearner(model="logistic" | "gbdt" | estimator | factory, categorical=None, n_jobs=None)`** and
+  **`SLearner`** (default `"gbdt"`): `.fit(df, treat, y, features=None)`, `.predict(df)` = f1(x) - f0(x),
+  `.predict_arms(df)`. GBDT = LightGBM with the bench parameters, one thread below 200k rows; without LightGBM it
+  falls back to sklearn HistGradientBoosting with a warning. A regressor (no `predict_proba`) gives E[y | x, t].
+- **Metrics** `qini` (= `qini_coefficient`), `auuc`, `uplift_at_k(y, t, score, k=0.3)`, `qini_curve`,
+  `uplift_curve`: moved here from `bench/tasks/uplift.py`, which imports them, so its numbers are unchanged (pinned
+  in `tests/test_bench_uplift.py`). Definitions in `docs/modules/bench/uplift.md`.
+
+Simulated check (`tests/test_methods_uplift.py` setting, 100 datasets of 8,000 customers, half for fitting the test
+and learner, half for scoring): with an effect of 0.15 tanh(2 x1), the test rejected at 0.05 in 100/100 on both
+scales, and the logistic T-learner's uplift@30 was 0.139 against 0.004 for a random score. With a constant +0.06
+risk difference it rejected in 4/100 on both scales, p > 0.2 in 84-87/100, and the T-learner's uplift@30 (0.059)
+was no better than random (0.062). One logit + additive test pair on 4,000 rows took 0.02 s.
+
+**Measured [prova-d11].** SMS pilot -> rollout, 180,075 rollout customers, 26 segments, segment uplift MAE in
+percentage points. Pilot ATE to every segment 1.538 tied the strongest baseline, empirical-Bayes shrinkage to the
+mean (1.526). The preregistered Fay-Herriot with covariates scored 1.924 and the raw pilot segment difference 2.451.
+Pilot segment order did not hold in the rollout (Spearman <= 0 for every arm). The hand T-learner run (100 reps x 2
+LightGBM) did not finish in 14 minutes, and the LR test said the effect was not heterogeneous.
 
 ## Not ported / gaps
 

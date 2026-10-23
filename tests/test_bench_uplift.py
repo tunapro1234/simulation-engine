@@ -10,7 +10,21 @@ import pandas as pd
 
 from simengine import bench
 from simengine.bench.tasks import uplift as U
+from simengine.methods import uplift as MU
 from simengine.types import Task
+
+
+def _parquet_engine() -> bool:
+    for m in ("pyarrow", "fastparquet"):
+        try:
+            __import__(m)
+            return True
+        except ImportError:
+            pass
+    return False
+
+
+PARQUET = _parquet_engine()
 
 
 def _naive_curve(kind, y, t, s):
@@ -84,6 +98,17 @@ class TestMetrics(unittest.TestCase):
         o = np.argsort(s, kind="mergesort")[::-1][: int(self.n * 0.333)]
         yo, to = self.y[o], self.t[o]
         self.assertAlmostEqual(U.uplift_at_k(self.y, self.t, s, 0.333), yo[to == 1].mean() - yo[to == 0].mean())
+
+    def test_metrics_moved_to_methods_numbers_unchanged(self):
+        """The curves, metrics and learners now live in simengine.methods.uplift; the bench imports the same objects,
+        and the values pinned before the move (same inputs) still come out."""
+        for name in ("qini_coefficient", "auuc", "uplift_at_k", "qini_curve", "uplift_curve", "two_model",
+                     "s_learner", "class_transformation", "_norm_area", "_uak", "_thresholds"):
+            self.assertIs(getattr(U, name), getattr(MU, name), name)
+        y, t, s = self.y, self.t, self.s
+        self.assertAlmostEqual(U.qini_coefficient(y, t, s), -0.006825000267624077, places=12)
+        self.assertAlmostEqual(U.auuc(y, t, s), -0.0031079388160304214, places=12)
+        self.assertAlmostEqual(U.uplift_at_k(y, t, s, 0.3), -0.003396109910466183, places=12)
 
     def test_task_score_has_ci(self):
         fr = pd.DataFrame({"truth": self.y.astype(int), "treatment": self.t.astype(int), "pred_m": self.s})
@@ -159,7 +184,11 @@ def _criteo(root, n=4000):
     df["treatment"], df["visit"] = t, v
     df["conversion"] = (v * (rng.random(n) < 0.3)).astype("int8")
     df["exposure"] = (t * (rng.random(n) < 0.5)).astype("int8")
-    df.to_parquet(os.path.join(d, "criteo.parquet"))
+    if PARQUET:
+        df.to_parquet(os.path.join(d, "criteo.parquet"))
+    else:  # no parquet engine: the loader's csv.gz path
+        os.makedirs(os.path.join(root, "criteo-uplift", "ham"))
+        df.to_csv(os.path.join(root, "criteo-uplift", "ham", "criteo-research-uplift-v2.1.csv.gz"), index=False)
 
 
 def _x5(root, n=3000):

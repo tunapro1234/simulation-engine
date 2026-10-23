@@ -38,121 +38,20 @@ feature). GBDT = LightGBM with fixed parameters (sklearn HistGradientBoosting if
 from __future__ import annotations
 
 import os
-import warnings
 
 import numpy as np
 import pandas as pd
 
+from ...methods.uplift import (GBDT_PARAMS, TOP_K, _auuc_w, _norm_area, _perfect_qini_score,  # noqa: F401
+                               _perfect_uplift_scores, _thresholds, _uak, auuc, class_transformation,
+                               qini_coefficient, qini_curve, s_learner, two_model, uplift_at_k, uplift_curve)
 from ...types import TaskData
 from ..base import BenchTask, DataNotFound, Metric, need, register
 from ..stats import ci
 
-TOP_K = 0.3
-GBDT_PARAMS = dict(n_estimators=300, learning_rate=0.05, num_leaves=31, min_child_samples=200, subsample=0.8,
-                   subsample_freq=1, colsample_bytree=0.9, random_state=0, verbose=-1, n_jobs=4)
 
-
-# ---------------------------------------------------------------------- curves and metrics
-def _thresholds(score: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Descending order and the last index of every distinct-score block (ties move together)."""
-    order = np.argsort(score, kind="mergesort")[::-1]
-    s = score[order]
-    return order, np.r_[np.flatnonzero(np.diff(s)), len(s) - 1]
-
-
-def _cum(y, t, w, order, thr):
-    """Weighted cumulative counts at the thresholds: (n_all, n_treated, y_treated, n_control, y_control)."""
-    y, t, w = y[order], t[order], w[order]
-    na, nt = np.cumsum(w)[thr], np.cumsum(w * t)[thr]
-    yt, yc = np.cumsum(w * y * t)[thr], np.cumsum(w * y * (1 - t))[thr]
-    return na, nt, yt, na - nt, yc
-
-
-def _div(a, b):
-    return np.divide(a, b, out=np.zeros_like(a, dtype=float), where=b != 0)
-
-
-def _curve(kind, y, t, w, order, thr):
-    na, nt, yt, nc, yc = _cum(y, t, w, order, thr)
-    v = yt - yc * _div(nt, nc) if kind == "qini" else (_div(yt, nt) - _div(yc, nc)) * na
-    return np.r_[0.0, na], np.r_[0.0, v]
-
-
-def _area(x, v):
-    return float(np.sum(np.diff(x) * (v[1:] + v[:-1]) / 2))
-
-
-def _norm_area(kind, y, t, w, model, perfect):
-    """(area(model) - area(random)) / (area(perfect) - area(random)); random = straight line to the end point."""
-    x, v = _curve(kind, y, t, w, *model)
-    xp, vp = _curve(kind, y, t, w, *perfect)
-    base = 0.5 * xp[-1] * vp[-1]
-    den = _area(xp, vp) - base
-    return (_area(x, v) - base) / den if den != 0 else float("nan")
-
-
-def _perfect_qini_score(y, t):
-    return y * t - y * (1 - t)  # treated responders first, control responders last
-
-
-def _perfect_uplift_scores(y, t):
-    """The two candidate perfect orderings of scikit-uplift `perfect_uplift_curve` (chosen per sample)."""
-    eq = 2.0 * (y == t)
-    return eq + y, eq + t  # summand y if control responders > treated non-responders, else t
-
-
-def qini_curve(y, treatment, score, weights=None) -> tuple[np.ndarray, np.ndarray]:
-    """Qini curve: x = number targeted, value = Y_t(x) - Y_c(x) * N_t(x) / N_c(x) (Radcliffe 2007), at every
-    distinct score, starting at (0, 0)."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
-    return _curve("qini", y, t, w, *_thresholds(s))
-
-
-def uplift_curve(y, treatment, score, weights=None) -> tuple[np.ndarray, np.ndarray]:
-    """Uplift curve: x = number targeted, value = (Y_t / N_t - Y_c / N_c)(x) * x, starting at (0, 0)."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
-    return _curve("uplift", y, t, w, *_thresholds(s))
-
-
-def qini_coefficient(y, treatment, score, weights=None) -> float:
-    """Normalised Qini coefficient: 1 = perfect ranking (negative effects allowed), 0 = random."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
-    return _norm_area("qini", y, t, w, _thresholds(s), _thresholds(_perfect_qini_score(y, t)))
-
-
-def auuc(y, treatment, score, weights=None) -> float:
-    """Normalised area under the uplift curve: 1 = perfect ranking, 0 = random."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
-    py, pt = _perfect_uplift_scores(y, t)
-    return _auuc_w(y, t, w, _thresholds(s), _thresholds(py), _thresholds(pt))
-
-
-def _auuc_w(y, t, w, model, perf_y, perf_t):
-    cr = float(np.sum(w * y * (1 - t)))          # control responders
-    tn = float(np.sum(w * (1 - y) * t))          # treated non-responders
-    return _norm_area("uplift", y, t, w, model, perf_y if cr > tn else perf_t)
-
-
-def uplift_at_k(y, treatment, score, k: float = TOP_K, weights=None) -> float:
-    """Treated minus control response rate among the first int(k n) rows by score (ties broken by sort order)."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
-    return _uak(y, t, w, np.argsort(s, kind="mergesort")[::-1], k)
-
-
-def _uak(y, t, w, order, k):
-    y, t, w = y[order], t[order], w[order]
-    top = np.cumsum(w) <= k * w.sum()  # unit weights: the first int(k n) rows, as scikit-uplift
-    wt, wc = w * top * t, w * top * (1 - t)
-    if wt.sum() == 0 or wc.sum() == 0:
-        return float("nan")
-    return float((wt * y).sum() / wt.sum() - (wc * y).sum() / wc.sum())
-
-
+# ---------------------------------------------------------------------- bench metrics (curves, metrics and
+# learners live in simengine.methods.uplift; these wrap them in the row bootstrap)
 def _boot(stat, n, B, seed):
     """Point (unit weights) and B multinomial-weight replicates = a row bootstrap without re-sorting."""
     point = stat(np.ones(n))
@@ -183,95 +82,6 @@ def _m_uak(task, frame, col, B, seed):
     y, t, s = _arrays(frame, col)
     order = np.argsort(s, kind="mergesort")[::-1]
     return _boot(lambda w: _uak(y, t, w, order, TOP_K), len(y), B, seed)
-
-
-# ---------------------------------------------------------------------- learners
-def _gbdt():
-    try:
-        import lightgbm as lgb
-        return lgb.LGBMClassifier(**GBDT_PARAMS)
-    except ImportError:
-        from sklearn.ensemble import HistGradientBoostingClassifier
-        warnings.warn("lightgbm not installed; using sklearn HistGradientBoostingClassifier", RuntimeWarning,
-                      stacklevel=3)
-        return HistGradientBoostingClassifier(max_iter=300, learning_rate=0.05, min_samples_leaf=200, random_state=0)
-
-
-def _logistic(categorical, numeric):
-    from sklearn.compose import ColumnTransformer
-    from sklearn.impute import SimpleImputer
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.pipeline import make_pipeline
-    from sklearn.preprocessing import OneHotEncoder, StandardScaler
-    parts = [("s", make_pipeline(SimpleImputer(strategy="median", add_indicator=True), StandardScaler()), numeric)]
-    if categorical:
-        parts.append(("k", OneHotEncoder(handle_unknown="ignore"), categorical))
-    return make_pipeline(ColumnTransformer(parts), LogisticRegression(C=1.0, max_iter=2000))
-
-
-def _make(model, categorical, numeric):
-    if callable(model):
-        return model()
-    if model == "logistic":
-        return _logistic(categorical, numeric)
-    if model == "gbdt":
-        return _gbdt()
-    raise ValueError(f"model must be 'logistic', 'gbdt' or a factory; got {model!r}")
-
-
-def _X(df, categorical, numeric, model, vocab):
-    x = df[numeric + categorical].copy()
-    if model != "logistic":  # tree models: categories as integer codes on the training vocabulary
-        for c in categorical:
-            x[c] = pd.Categorical(x[c].astype(str), categories=vocab[c]).codes
-    return x
-
-
-def _vocab(train, categorical):
-    return {c: sorted(train[c].astype(str).unique()) for c in categorical}
-
-
-def _p1(m, X):
-    return m.predict_proba(X)[:, 1]
-
-
-def two_model(train, test, *, treatment: str, outcome: str, categorical: list[str], numeric: list[str],
-              model="logistic") -> np.ndarray:
-    """T-learner: separate outcome models on treated and control rows; uplift = P(y | x, t=1) - P(y | x, t=0)."""
-    tr = train[treatment].to_numpy() == 1
-    v = _vocab(train, categorical)
-    Xa, Xt = _X(train, categorical, numeric, model, v), _X(test, categorical, numeric, model, v)
-    m1 = _make(model, categorical, numeric).fit(Xa[tr], train[outcome].to_numpy()[tr])
-    m0 = _make(model, categorical, numeric).fit(Xa[~tr], train[outcome].to_numpy()[~tr])
-    return _p1(m1, Xt) - _p1(m0, Xt)
-
-
-def s_learner(train, test, *, treatment: str, outcome: str, categorical: list[str], numeric: list[str],
-              model="gbdt") -> np.ndarray:
-    """S-learner: one outcome model with the treatment flag as a feature; uplift = f(x, 1) - f(x, 0)."""
-    num, v = numeric + ["_t"], _vocab(train, categorical)
-    Xa = _X(train.assign(_t=train[treatment].astype(float)), categorical, num, model, v)
-    m = _make(model, categorical, num).fit(Xa, train[outcome].to_numpy())
-    Xt = _X(test.assign(_t=1.0), categorical, num, model, v)
-    return _p1(m, Xt) - _p1(m, Xt.assign(_t=0.0))
-
-
-def class_transformation(train, test, *, treatment: str, outcome: str, categorical: list[str], numeric: list[str],
-                         model="logistic") -> np.ndarray:
-    """Class variable transformation (Jaskowski & Jaroszewicz 2012): z = y t + (1 - y)(1 - t), uplift = 2 P(z=1|x) - 1.
-    The identity needs P(t=1) = 1/2; with any other share the rows are weighted so treated and control each carry
-    half of the total weight (then 2 P_w(z=1|x) - 1 equals the uplift again)."""
-    t, y = train[treatment].to_numpy(float), train[outcome].to_numpy(float)
-    z = (y * t + (1 - y) * (1 - t)).astype(int)
-    e = t.mean()
-    w = np.where(t == 1, 0.5 / e, 0.5 / (1 - e))
-    m, v = _make(model, categorical, numeric), _vocab(train, categorical)
-    Xa = _X(train, categorical, numeric, model, v)
-    if hasattr(m, "steps"):
-        m.fit(Xa, z, **{f"{m.steps[-1][0]}__sample_weight": w})
-    else:
-        m.fit(Xa, z, sample_weight=w)
-    return 2 * _p1(m, _X(test, categorical, numeric, model, v)) - 1
 
 
 def stratified_split(df: pd.DataFrame, by: list[str], test_frac: float, seed: int) -> np.ndarray:

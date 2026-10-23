@@ -6,8 +6,9 @@ lazily; LLM calls go through the ``simengine.llm`` protocol (use ``FakeLLM`` off
 """
 from .ab import ABStack, LengthAB, LLMDirectAB, LogitAverageAB, TfidfAB, TfidfWordAB
 from .binary import TfidfBinary, target_encode
-from .baselines import (ConstantBaseline, ItemMarginal, KNNBaseline, LightGBMBaseline, LogisticBaseline,
-                        MajorityBaseline, PersistenceBaseline, SegmentRate, TextKNNRegressor, basket_tensor,
+from .baselines import (CellMedian, ConditionalMode, ConstantBaseline, ItemMarginal, KNNBaseline, LightGBMBaseline,
+                        LogisticBaseline, MajorityBaseline, MedianConstant, PersistenceBaseline, SegmentRate,
+                        TextKNNRegressor, basket_tensor, stat_for_metric,
                         decayed_frequency, infer_kind, overall_copy, persistence, personal_frequency, popularity,
                         segment_distributions, tifu_knn, uniform_distribution, weighted_distribution)
 from .coldstart import ItemHoldout, MFBaseline, item_holdout_features, procrustes_align
@@ -25,6 +26,9 @@ from .twin import (TwinStack, base_predict, binned_median, column_correlation, d
                    pooled_logistic_oof)
 from .transfer import GroupTransfer, oof_predict
 from .rct import rct_effects, rct_transfer
+from .uplift import (HeterogeneityResult, SLearner, TLearner, auuc, heterogeneity_test, qini, qini_coefficient,
+                     qini_curve, segment_uplift, shrink_effects, split_half_effects, summarize_split_half,
+                     uplift_at_k, uplift_curve)
 from .forecast import (DirectForecaster, backtest, llm_prior_feature, make_features, mask_future, moving_mean,
                        persistence_forecast, point_for_metric, seasonal_naive, seasonal_ratio, ses, ses_level, summarize_backtest)
 from ._util import lightgbm_available
@@ -32,6 +36,7 @@ from ._util import lightgbm_available
 __all__ = [
     # baselines
     "ConstantBaseline", "MajorityBaseline", "ItemMarginal", "SegmentRate", "PersistenceBaseline", "persistence",
+    "ConditionalMode", "MedianConstant", "CellMedian", "stat_for_metric",
     "LogisticBaseline", "LightGBMBaseline", "KNNBaseline", "TextKNNRegressor", "infer_kind",
     "uniform_distribution", "weighted_distribution", "overall_copy", "segment_distributions",
     "basket_tensor", "popularity", "personal_frequency", "decayed_frequency", "tifu_knn",
@@ -60,6 +65,10 @@ __all__ = [
     "GroupTransfer", "oof_predict",
     # RCT condition effects + transfer baseline
     "rct_effects", "rct_transfer",
+    # uplift / CATE: metrics, learners, segment effects + shrinkage, split-half dev rig, heterogeneity test
+    "qini", "qini_coefficient", "qini_curve", "uplift_curve", "auuc", "uplift_at_k", "TLearner", "SLearner",
+    "segment_uplift", "shrink_effects", "split_half_effects", "summarize_split_half", "heterogeneity_test",
+    "HeterogeneityResult",
     # item cold start
     "item_holdout_features", "ItemHoldout", "MFBaseline", "procrustes_align",
     # multi-series demand forecasting (D4)
