@@ -170,6 +170,39 @@ class TestNumericFields(unittest.TestCase):
         with self.assertRaises(ValueError):
             predict_people(FakeLLM(mid_responder), PEOPLE, ["x"], fields=FIELDS)       # fields need kind
 
+    def test_string_values_read_whole_or_unparsed(self):
+        # lenient number search read these as wrong in-range values and counted them ok
+        fs = [NumericField("spend", 0, 2000, unit="USD"), NumericField("log_rate", -5, 1), NumericField("score", 0, 10)]
+        cases = [({"spend": "1,250", "log_rate": "−0.5", "score": ".5"}, (1250.0, -0.5, 0.5)),
+                 ({"spend": "120 USD", "log_rate": "-1.5e0", "score": "7,5"}, (120.0, -1.5, 7.5)),
+                 ({"spend": "$120", "log_rate": "-.5", "score": " 8 "}, (120.0, -0.5, 8.0)),
+                 ({"spend": [3, 4], "log_rate": {"low": -2, "high": 0}, "score": "5-10"}, (None, None, None)),
+                 ({"spend": "45%", "log_rate": "about -2", "score": "7/10"}, (None, None, None))]
+        for d, want in cases:
+            def responder(system, user, d=d):
+                return json.dumps(d)
+
+            r = predict_people(FakeLLM(responder), {"p1": "Age 30."}, kind="numeric", fields=fs)
+            self.assertEqual(tuple(r["p"]["p1"][f.name] for f in fs), want, d)
+            if want[0] is None:
+                self.assertEqual(r["invalid"]["score"]["unparsed"], 1)
+
+    def test_l2_summary_history_lists_its_own_items(self):
+        seen = []
+
+        def responder(system, user):
+            seen.append(user)
+            return mid_responder(system, user)
+
+        hist = {p: {"BOOKS": {"count": 3, "days": 2, "last": "2024-01-01", "count_recent": 1}} for p in PEOPLE}
+        predict_people(FakeLLM(responder), PEOPLE, kind="numeric", fields=FIELDS, level="L2", histories=hist)
+        self.assertIn("BOOKS: 3 items on 2 different days", seen[0])
+        self.assertNotIn("spend: never purchased", seen[0])       # field names are not purchase items
+
+    def test_case_insensitive_duplicate_fields(self):
+        with self.assertRaises(ValueError):
+            numeric_fields([("Spend", 0, 1), ("spend", 0, 2)])     # both would read the same reply key
+
     def test_prompt_numeric_and_probability_default_unchanged(self):
         sy, us = prompt_numeric("Age 30.", numeric_fields(FIELDS))
         self.assertIn("numeric estimates", sy)

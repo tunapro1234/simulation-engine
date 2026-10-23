@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 import warnings
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
@@ -48,7 +49,7 @@ import pandas as pd
 from ..llm.jsonx import json_extract
 from ._stats import to_jsonable
 from .panel import REFRAME_NOTE_GENERIC, Usage, ask_many
-from .parse import _num, parse_item_probs, parse_text_fields, unwrap
+from .parse import parse_item_probs, parse_text_fields, unwrap
 from .personas import PersonaView, as_persona
 from .ssr import SCALES, SSR
 
@@ -266,7 +267,7 @@ def numeric_fields(fields) -> list[NumericField]:
             raise ValueError(f"not a numeric field: {f!r} (NumericField, (name, lo, hi), dict, or int/float FieldSpec)")
     if not out:
         raise ValueError("kind='numeric' needs fields=[NumericField(name, lo, hi), ...]")
-    names = [f.name for f in out]
+    names = [f.name.strip().lower() for f in out]               # replies are matched case-insensitively
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
         raise ValueError(f"duplicate field names {dup}")
@@ -306,13 +307,40 @@ def _parse_numeric(text) -> dict:
     return d
 
 
+_NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+_THOUSANDS_RE = re.compile(r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+_DECIMAL_COMMA_RE = re.compile(r"[-+]?\d+,\d+")
+
+
+def _strict_num(v: Any, unit: str = "") -> float | None:
+    """A JSON number, or a string that is one whole number ("-1.5", "1,250", "7,5", "120 USD", "$120", Unicode
+    minus); None otherwise. Stricter than parse._num: "5-10", "7/10", "1,250" (-> 1.25), ".5" (-> 5), "−0.5"
+    (-> 0.5), "45%" or a list / dict would otherwise be read as a wrong in-range number and counted ok."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return float(v)
+    if not isinstance(v, str):
+        return None
+    s = v.strip().replace("\u2212", "-")
+    if unit and s.lower().endswith(unit.strip().lower()):
+        s = s[: len(s) - len(unit.strip())].strip()
+    s = s.lstrip("$\u20ac\u00a3\u20ba").strip()
+    if _THOUSANDS_RE.fullmatch(s):
+        s = s.replace(",", "")
+    elif _DECIMAL_COMMA_RE.fullmatch(s):
+        s = s.replace(",", ".")
+    return float(s) if _NUM_RE.fullmatch(s) else None
+
+
 def _check_numeric(d: Mapping, fields: Sequence[NumericField]) -> dict[str, tuple[float | None, str]]:
-    """{field: (value or None, status)}; status ok | out_of_range | unparsed (key absent or not a number)."""
+    """{field: (value or None, status)}; status ok | out_of_range | unparsed (key absent or not one number,
+    see _strict_num)."""
     dn = {str(k).strip().lower(): v for k, v in d.items()}
     out = {}
     for f in fields:
-        v = dn.get(f.name.lower())
-        x = None if v is None else _num(v)
+        v = dn.get(f.name.strip().lower())
+        x = _strict_num(v, f.unit)
         if x is None or not math.isfinite(x):
             out[f.name] = (None, "unparsed")
         elif not f.lo <= x <= f.hi:
@@ -655,7 +683,8 @@ def _predict_numeric(llm, people, items, fields, *, level, spec, histories, ques
             h = None
             if level == "L2":
                 h = histories[pid]
-                h = h if isinstance(h, str) else history_text(h, names)
+                # a summary renders all its own items (field names are not purchase items)
+                h = h if isinstance(h, str) else history_text(h, list(h))
             jobs += [(pid, j, prompt_numeric(pf, fs, spec, h)) for j in range(max(1, samples))]
     usage = Usage()
     got, failed, retried = _call_all(llm, jobs, _parse_numeric, max_tokens=max_tokens, retries=retries,
