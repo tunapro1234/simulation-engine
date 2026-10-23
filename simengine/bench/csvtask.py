@@ -7,8 +7,8 @@
     task.score(frame, "mine")                          # evidence metric, bootstrap CI over groups
     bench.run([task], methods=...)                     # leaderboard tooling works unchanged
 
-Split: `split_col` (rows whose value is test / holdout / eval, or True, are test; every other labelled row is train)
-or a seeded random `test_frac` split, by group when `group_col` is given (no group on both sides). Rows with a
+Split: `split_col` (test / holdout / eval / true / 1 = test; train / training / dev / false / 0 = train; any other
+value raises, so a fold number or an inverted `is_train` flag cannot pass silently) or a seeded random `test_frac` split, by group when `group_col` is given (no group on both sides). Rows with a
 missing target are dropped (count in meta). Metrics are the `simengine.evidence` family for the task kind
 (`metrik.aile`, English names), primary = evidence default or `metric=` (English, sklearn-style or internal name).
 The CI is a cluster bootstrap over `group_col` (else over rows).
@@ -18,7 +18,10 @@ frequent class as a hard 0/1 or one-hot) or `median` (continuous), and `item_mar
 shares, unseen items fall back to the constant) when `item_col` is given.
 
 Predictions: binary and continuous a 1-D array; multiclass a (n, K) probability matrix / list of vectors, or labels
-(numbers = class codes, anything else = original class labels; scored as one-hot).
+scored as one-hot: class codes 0..K-1 (what `load()` puts in the target column) or the original labels. When the
+classes are themselves numbers other than 0..K-1 (ratings 1..5) and the predictions fit both readings, it raises
+instead of guessing; pass `np.eye(K)[codes]` or the labels as strings. Rows with a NaN prediction are left out of
+the score; `coverage` in the result is the scored share of test rows.
 """
 from __future__ import annotations
 
@@ -33,7 +36,8 @@ from .base import BenchTask, DataNotFound, Metric, as_pred_col
 from .stats import cluster_bootstrap
 
 KINDS = {"binary": "ikili", "multiclass": "cok_sinif", "continuous": "surekli"}
-TEST_VALUES = {"test", "holdout", "eval", "evaluation", "degerlendirme", "true", "1"}
+TEST_VALUES = {"test", "holdout", "eval", "evaluation", "degerlendirme", "true", "1", "1.0"}
+TRAIN_VALUES = {"train", "training", "fit", "dev", "egitim", "eğitim", "false", "0", "0.0"}
 
 
 def _evidence_metrics(kind: str, item: bool) -> list:
@@ -54,8 +58,9 @@ def _metric(m, kind: str) -> Metric:
         ok = np.isfinite(p).all(1) if p.ndim == 2 else np.isfinite(p)
         y, p, g = y[ok], p[ok], g[ok]
         madde = None if madde is None else madde[ok]
+        cov = float(ok.mean()) if len(ok) else float("nan")
         if not len(y):
-            return {"value": float("nan"), "lo": float("nan"), "hi": float("nan"), "n": 0, "n_rows": 0}
+            return {"value": float("nan"), "lo": float("nan"), "hi": float("nan"), "n": 0, "n_rows": 0, "coverage": cov}
 
         def stat(idx):
             try:
@@ -63,7 +68,9 @@ def _metric(m, kind: str) -> Metric:
             except (ValueError, ZeroDivisionError, IndexError):
                 return float("nan")
         r = cluster_bootstrap(stat, g, B=B, seed=seed)
-        return {**r, "n_rows": int(len(y))}
+        if r["n"] < 2:  # one cluster: every replicate is the point estimate, a zero-width CI would claim certainty
+            r["lo"] = r["hi"] = float("nan")
+        return {**r, "n_rows": int(len(y)), "coverage": cov}
     return Metric(_english(m.ad), m.yon > 0, fn, m.aciklama)
 
 
@@ -101,7 +108,10 @@ class CsvTask(BenchTask):
         primary = o.get("metric")
         if primary is not None:
             from ..evidence.cekirdek import birincil_ic
+            from ..evidence.metrik import ISARETLI_METRIKLER
             ic = birincil_ic(primary)
+            if ic in ISARETLI_METRIKLER:  # signed (0 is best): no direction to rank a leaderboard by
+                raise ValueError(f"from_csv: {_english(ic)!r} is signed (0 is best) and cannot be the primary metric")
             if ic not in [m.ad for m in ms]:
                 raise ValueError(f"from_csv: metric {primary!r} is not available for task {self.kind!r}: "
                                  f"{[_english(m.ad) for m in ms]}")
@@ -158,11 +168,17 @@ class CsvTask(BenchTask):
             return v.to_numpy(float), {}
         vals = sorted(s.unique(), key=lambda x: (str(type(x)), x))
         if self.kind == "multiclass":
+            if len(vals) < 2:
+                raise ValueError(f"{self.name}: multiclass target has a single value {vals}")
             return pd.Categorical(s, categories=vals).codes.astype(int), {"classes": [_py(v) for v in vals]}
         pos = self.options.get("positive")
-        if pos is None:
-            if len(vals) > 2:
-                raise ValueError(f"{self.name}: binary target has {len(vals)} values; use task='multiclass'")
+        if pos is not None:
+            if not (s == pos).any():  # a typo or a type mismatch ("1" vs 1) would make every row negative
+                raise ValueError(f"{self.name}: positive={pos!r} is not a target value; values {vals[:10]}")
+        else:
+            if len(vals) != 2:
+                raise ValueError(f"{self.name}: binary target has {len(vals)} value(s) {vals[:5]}; "
+                                 + ("use task='multiclass'" if len(vals) > 2 else "pass positive= if this is intended"))
             if set(vals) <= {0, 1}:
                 pos = 1
             else:
@@ -172,8 +188,16 @@ class CsvTask(BenchTask):
     def _test_mask(self, df: pd.DataFrame) -> np.ndarray:
         o = self.options
         if o.get("split_col"):
-            v = df[o["split_col"]]
-            return v.astype(str).str.strip().str.lower().isin(TEST_VALUES).to_numpy()
+            col = o["split_col"]
+            v = df[col].astype(str).str.strip().str.lower()
+            bad = sorted(set(v) - TEST_VALUES - TRAIN_VALUES)
+            if bad:
+                raise ValueError(f"{self.name}: split_col {col!r} has value(s) {bad[:10]} that are neither test "
+                                 f"({sorted(TEST_VALUES)}) nor train ({sorted(TRAIN_VALUES)}); map it first")
+            if "train" in str(col).lower() and set(v) <= {"true", "false", "0", "1", "0.0", "1.0"}:
+                raise ValueError(f"{self.name}: split_col {col!r} looks like a train flag, but true / 1 marks TEST "
+                                 f"rows; pass a test flag (e.g. df.assign(is_test=df[{col!r}] == 0))")
+            return v.isin(TEST_VALUES).to_numpy()
         rng = np.random.default_rng(o.get("seed", 0))
         frac = o.get("test_frac", 0.2)
         if o.get("group_col"):
@@ -224,17 +248,37 @@ class CsvTask(BenchTask):
 
     @staticmethod
     def _vectors(m: str, p: Any, K: int, classes: Sequence, n: int) -> np.ndarray:
+        if hasattr(p, "to_numpy"):  # Series / DataFrame: positional, whatever the index
+            p = p.to_numpy()
         if len(p) != n:
             raise ValueError(f"{m}: {len(p)} predictions for {n} test rows")
         first = np.asarray(p[0]) if n else np.zeros(0)
         if first.ndim == 1 and first.size == K and K > 1:
             v = np.vstack([np.asarray(x, float) for x in p])
             return v
+        if first.ndim >= 1 and first.size > 1:
+            raise ValueError(f"{m}: probability vectors have {first.size} entries; the task has {K} classes "
+                             f"{list(classes)} (a class missing from train still needs its column)")
         a = np.asarray(p).ravel()
-        if np.issubdtype(a.dtype, np.number):
-            codes = a.astype(int)
-            if not np.allclose(codes, a) or codes.min(initial=0) < 0 or codes.max(initial=0) >= K:
-                raise ValueError(f"{m}: numeric multiclass labels must be class codes 0..{K - 1}")
+        if np.issubdtype(a.dtype, np.number) and not np.issubdtype(a.dtype, np.bool_):
+            fin = a[np.isfinite(a)] if np.issubdtype(a.dtype, np.floating) else a
+            as_code = bool(np.allclose(fin, np.round(fin)) and (fin >= 0).all() and (fin < K).all())
+            numeric = all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in classes)
+            as_label = numeric and set(fin.tolist()) <= set(classes)
+            if len(fin) and numeric and list(classes) != list(range(K)) and as_code and as_label:
+                raise ValueError(f"{m}: numeric predictions fit both class codes 0..{K - 1} and the labels "
+                                 f"{list(classes)}; pass np.eye({K})[codes] or the labels as strings")
+            if as_code:
+                codes = np.where(np.isfinite(a), a, 0).astype(int) if a.dtype.kind == "f" else a.astype(int)
+            elif as_label:
+                idx = {c: i for i, c in enumerate(classes)}
+                codes = np.array([idx.get(x, 0) for x in a.tolist()], int)
+            else:
+                raise ValueError(f"{m}: numeric multiclass labels must be class codes 0..{K - 1}"
+                                 + (f" or the labels {list(classes)}" if numeric else ""))
+            out = np.eye(K)[codes]
+            out[~np.isfinite(a.astype(float))] = np.nan  # NaN prediction stays missing (left out of the score)
+            return out
         else:
             idx = {str(c): i for i, c in enumerate(classes)}
             bad = sorted({str(x) for x in a} - set(idx))

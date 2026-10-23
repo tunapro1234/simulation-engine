@@ -64,7 +64,8 @@ task="binary" | "multiclass" | "continuous", metric=None, features=None, positiv
 returns an unregistered `CsvTask`, so a competition's `train.csv` runs through `task.run`, `task.score` and
 `bench.run([task], ...)` like the built-in tasks.
 
-- Split: `split_col` (rows marked test / holdout / eval / true / 1 are test, the rest train), otherwise a seeded
+- Split: `split_col` (test / holdout / eval / true / 1 are test, train / training / dev / false / 0 are train, any
+  other value such as a fold number raises; a 0/1 column whose name says `train` raises too), otherwise a seeded
   `test_frac` split, by group when `group_col` is given so no group lands on both sides. Rows with no target are
   dropped and counted in `meta["n_unlabeled_dropped"]`. Binary targets are encoded 0/1 (`meta["positive"]`), and
   multiclass targets as codes (`meta["classes"]`).
@@ -74,7 +75,10 @@ returns an unregistered `CsvTask`, so a competition's `train.csv` runs through `
 - Baselines, fit on train only: `constant` (train mean or class shares); `majority` (binary/multiclass, hard) or
   `median` (continuous); and `item_marginal` (per-item train mean or shares) when `item_col` is given.
 - Multiclass predictions can be a probability matrix, class codes or the original labels. Labels are scored as
-  one-hot.
+  one-hot. Numeric classes other than 0..K-1 (ratings 1..5) with predictions that fit both readings raise instead
+  of guessing. NaN predictions are left out; `coverage` in the score is the scored share of test rows.
+- Binary: a one-valued target, or `positive=` that is not a target value, raises. Signed metrics (`mean_bias`)
+  cannot be the primary. With a single bootstrap cluster the CI is NaN.
 
 ## Datasets and licences
 

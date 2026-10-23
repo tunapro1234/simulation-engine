@@ -151,6 +151,53 @@ class FromCsv(unittest.TestCase):
         with self.assertRaises(ValueError):
             t.run({"short": lambda d: np.zeros(3)})
 
+    def test_silent_mislabel_guards(self):
+        # numeric classes 1..5: labels that never hit 5 used to be read as codes (shifted by one, accuracy 0.2)
+        rng = np.random.default_rng(5)
+        x = rng.normal(size=200)
+        df = pd.DataFrame({"x": x, "y": np.digitize(x, [-1, -0.3, 0.3, 1]) + 1})
+        t = from_csv(df, target="y", task="multiclass")
+        lab = lambda d: np.digitize(d.test["x"], [-1, -0.3, 0.3, 1]) + 1   # noqa: E731
+        with self.assertRaises(ValueError):
+            t.run({"amb": lambda d: np.clip(lab(d), 1, 4)})
+        frame = t.run({"labels": lab, "codes": lambda d: lab(d) - 1,
+                       "str_labels": lambda d: lab(d).astype(str),
+                       "series": lambda d: pd.Series(lab(d) - 1, index=np.arange(len(d.test)) + 1000)})
+        for m in ("labels", "codes", "str_labels", "series"):
+            self.assertEqual(t.score(frame, m, B=B)["value"], 1.0, m)
+        with self.assertRaises(ValueError):  # sklearn predict_proba without the class unseen in train
+            t.run({"short": lambda d: np.full((len(d.test), 4), 0.25)})
+        with self.assertRaises(ValueError):
+            from_csv(df.assign(y="a"), target="y", task="multiclass").load()
+        # binary: one value, or a positive that is not a value, would make every row one class
+        b = _binary()
+        with self.assertRaises(ValueError):
+            from_csv(b.assign(label="no"), target="label").load()
+        with self.assertRaises(ValueError):
+            from_csv(b, target="label", positive="Yes").load()
+        self.assertEqual(from_csv(b.assign(label="no"), target="label", positive="no").load().meta["positive"], "no")
+        # split_col: a fold number or an inverted train flag used to pass silently
+        with self.assertRaises(ValueError):
+            from_csv(b.assign(fold=b["person"] % 5), target="label", split_col="fold").load()
+        with self.assertRaises(ValueError):
+            from_csv(b.assign(is_train=(b["person"] < 30).astype(int)), target="label", split_col="is_train").load()
+        d = from_csv(b.assign(is_test=(b["person"] >= 30).astype(float)), target="label", split_col="is_test").load()
+        self.assertEqual(len(d.test), 50)
+        with self.assertRaises(ValueError):  # signed metric: no direction to rank by
+            from_csv(b, target="label", metric="mean_bias")
+
+    def test_nan_predictions_and_single_cluster(self):
+        t = from_csv(self.path, target="label", group_col="person")
+        frame = t.run({"few": lambda d: np.where(np.arange(len(d.test)) < 5, 1.0, np.nan)})
+        s = t.score(frame, "few", B=B)
+        self.assertEqual(s["n_rows"], 5)
+        self.assertAlmostEqual(s["coverage"], 5 / len(frame))
+        self.assertEqual(t.score(frame, "constant", B=B)["coverage"], 1.0)
+        one = from_csv(pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [0, 1, 0]}), target="y")
+        s1 = one.score(one.run(), "constant", B=B)
+        self.assertEqual(s1["n"], 1)
+        self.assertTrue(np.isnan(s1["lo"]) and np.isnan(s1["hi"]))
+
     def test_relative_path_under_data_root(self):
         t = from_csv("comp.csv", target="label")
         self.assertEqual(len(t.load(self.tmp.name).test), 40)
