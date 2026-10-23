@@ -102,6 +102,34 @@ class LabelRungsTest(unittest.TestCase):
             tr = v.df["gercek"][k != k[i]]
             self.assertEqual(deg[i], tr.value_counts().sort_index().idxmax())
 
+    def test_label_demographic_without_item_column_uses_the_segment(self):
+        # review: without an item column the label demographic rung returned the global mode (= marginal)
+        K = merdiven.ETIKET_ESIK + 60
+        rng = np.random.default_rng(0)
+        n = 3000
+        seg = rng.choice(["a", "b", "c"], n)
+        y = np.where(rng.random(n) < .3, rng.integers(0, K, n), np.searchsorted(["a", "b", "c"], seg) + 1)
+        df = pd.DataFrame({"truth": [f"c{i}" for i in y], "segment": seg, "group": [f"g{i}" for i in range(n)]})
+        df["tahmin_ours"] = df["truth"]
+        v = self._veri(df, K)
+        v.segmentler = ["segment"]
+        out = merdiven.baselineler(v)
+        acc = {a: np.mean(out[a][1] == v.df["gercek"].to_numpy()) for a in ("marjinal", "demografi")}
+        self.assertGreater(acc["demografi"], 0.6)
+        self.assertLess(acc["marjinal"], 0.4)
+
+    def test_label_mode_ties_follow_global_frequency(self):
+        # review: one row per class within the item -> tie; the probability rung's argmax prefers the globally
+        # commoner class, the label rung must agree (was: smallest class code)
+        K = merdiven.ETIKET_ESIK + 1
+        df = pd.DataFrame({"truth": ["c5", "c9", "c9", "c9", "c5", "c9"], "item": ["q0", "q0", "q1", "q1", "q2", "q2"],
+                           "group": list("abcdef")})
+        df["tahmin_ours"] = df["truth"]
+        egitim = df.rename(columns={"truth": "gercek", "group": "grup", "item": "madde"})
+        test = pd.DataFrame({"truth": ["c5", "c9"], "item": ["q0", "q0"], "group": ["y", "z"], "tahmin_ours": ["c5", "c9"]})
+        _, deg = merdiven.baselineler(self._veri(test, K, egitim=egitim))["marjinal"]
+        self.assertEqual(list(deg), ["c9", "c9"])
+
     def test_small_k_keeps_probability_vectors(self):
         df = _frame(200, 5)
         v = self._veri(df.rename(columns={"pred_ours": "tahmin_ours"}), 5)

@@ -12,9 +12,10 @@ basamakların adı bunu söyler ("cross-fitted, 5-fold by group"), örneklem iç
 Dürüstlük kuralları:
   - sabit gerçek (puanlanan satırlarda sd 0): gerçekten uydurulan otomatik basamaklar sabiti kopyalar (MAE 0, en güçlü
     taban, yanlış "tabanın altında" rozeti); düşürülür, denetimde uyarı satırı (veri.notlar) kalır. Gerçeği okumayan
-    basamaklar (ikili 0,5, çok sınıflı tekdüze) kalır.
-  - ikili, madde yok (ya da her madde tek satır): kat dışı genel oran kat başına sabittir ve dışarıda bırakılan katın
-    pozitifleriyle ters ilişkilidir (AUC ~0,38); tek sabit verilir (kat tahminlerinin ortalaması, AUC 0,5).
+    basamaklar (ikili 0,5, çok sınıflı tekdüze) kalır. Bölümde eğitim gerçeği değişiyorsa eğitimden uydurulan
+    marjinal/demografi sabiti kopyalamaz, kalır (yalnız test gerçeğini karıştıran sürekli rastgele düşer).
+  - ikili, bölüm yok, madde yok (ya da her madde tek satır): kat dışı genel oran kat başına sabittir ve dışarıda
+    bırakılan katın pozitifleriyle ters ilişkilidir (AUC ~0,38); tek sabit verilir (kat tahminlerinin ortalaması, AUC 0,5).
   - segment madde içinde satırı tanımlıyorsa (segment = birim) demografi basamağı marjinale eşittir: atlanır.
   - çok sınıflı, sert etiketli tahmin ve ETIKET_ESIK'ten çok sınıf: rastgele/marjinal/demografi n × K olasılık
     vektörü değil etikettir (tekdüze rastgele etiket; eğitim katlarının madde/hücre başına en sık sınıfı).
@@ -68,9 +69,12 @@ def _capraz_ek(veri) -> str:
     return f" (cross-fitted, {K_KAT}-fold by {'group' if 'grup' in veri.df else 'row'})"
 
 
-def _sabit_gercek(veri) -> bool:
-    """Puanlanan satırlarda gerçek sabit mi (sd 0)."""
+def _sabit_gercek(veri, egitim_dahil: bool = False) -> bool:
+    """Puanlanan satırlarda gerçek sabit mi (sd 0). egitim_dahil: bölümün eğitim satırları da (uydurulan basamak ancak
+    eğitim gerçeği de aynı sabitse onu kopyalar; eğitimde değişen gerçekten uydurulan taban dürüsttür, düşürülmez)."""
     g = veri.df["gercek"]
+    if egitim_dahil and _bolum_var(veri) and "gercek" in veri.egitim:
+        g = pd.concat([g, veri.egitim["gercek"]], ignore_index=True)
     if veri.gorev == "cok_sinif":
         return len(g) > 0 and g.astype(str).nunique() <= 1
     y = pd.to_numeric(g, errors="coerce").to_numpy(float)
@@ -180,25 +184,29 @@ def _sinif_baseline(veri, segmentli: bool):
 
 
 def _sinif_etiket_baseline(veri, segmentli: bool) -> np.ndarray:
-    """Etiket basamağı (çok sınıf): eğitim katlarında madde başına en sık sınıf (eşitlikte küçük sınıf kodu; madde
-    görülmemişse genel en sık). Segmentli: madde × segment hücresinde sayım + K_BUZ · madde payı en büyük sınıf (olasılık
-    basamağındaki büzülmenin argmax'ı). Bellek ~satır + (hücre × maddenin sınıfları), n × K değil."""
+    """Etiket basamağı (çok sınıf): eğitim katlarında madde başına en sık sınıf (eşitlikte genel olarak daha sık sınıf,
+    olasılık basamağının argmax'ı gibi; madde görülmemişse genel en sık; madde sütunu yoksa tek madde). Segmentli:
+    madde × segment hücresinde sayım + K_BUZ · madde payı en büyük sınıf (olasılık basamağındaki büzülmenin argmax'ı).
+    Bellek ~satır + (hücre × maddenin sınıfları), n × K değil."""
     sinif = np.asarray(veri.siniflar, dtype=object)
     kod = {k: i for i, k in enumerate(veri.siniflar)}
     madde = ["madde"] if "madde" in veri.df else []
     seg = veri.segmentler[:1] if segmentli else []
 
-    def en_sik(t, anahtar, puan):
-        return t.sort_values([anahtar, puan, "y"], ascending=[True, False, True]).drop_duplicates(anahtar) \
-            .set_index(anahtar)["y"]
-
     def fn(tr, te):
         y = tr["gercek"].map(lambda v: kod.get(v, kod.get(str(v), -1))).to_numpy(int)
         ok = y >= 0
-        glob = int(np.bincount(y[ok], minlength=len(sinif)).argmax()) if ok.any() else 0
-        out = np.full(len(te), glob)
-        if not madde:
-            return sinif[out]
+        sayi = np.bincount(y[ok], minlength=len(sinif))
+        sira = np.empty(len(sinif), int)
+        sira[np.lexsort((np.arange(len(sinif)), -sayi))] = np.arange(len(sinif))   # genel sıklık sırası (eşitlik bozucu)
+        glob = int(np.argmin(sira))
+
+        def en_sik(t, anahtar, puan):
+            t = t.assign(_r=sira[t["y"].to_numpy(int)])
+            return t.sort_values([anahtar, puan, "_r"], ascending=[True, False, True]).drop_duplicates(anahtar) \
+                .set_index(anahtar)["y"]
+
+        # madde sütunu yoksa _anahtar tek kod verir: tek madde (demografi yine segment hücresine bakar)
         km, _ = _anahtar(pd.concat([tr[madde], te[madde]]), madde)
         mtr, mte = km[:len(tr)][ok], km[len(tr):]
         sm = pd.DataFrame({"k": mtr, "y": y[ok]}).value_counts().rename("n").reset_index()
@@ -221,8 +229,12 @@ def baselineler(veri, ozet_surekli: str = "mean", rastgele_tohum: int = 0) -> di
     d, g = veri.df, veri.gorev
     out = {}
     tek = "madde" in d and not (d.groupby("madde").size() > 1).any()
-    sabit = g in ("ikili", "cok_sinif", "surekli") and _sabit_gercek(veri)
-    seg = bool(veri.segmentler) and not sabit
+    bireysel = g in ("ikili", "cok_sinif", "surekli")
+    # sabit_test: puanlanan gerçek sabit (gerçeği testten okuyan sürekli rastgele onu kopyalar); sabit: uydurulan
+    # satırlar da aynı sabit (marjinal/demografi kopyalar). Bölümde eğitim gerçeği değişiyorsa uydurulan tabanlar kalır.
+    sabit_test = bireysel and _sabit_gercek(veri)
+    sabit = sabit_test and _sabit_gercek(veri, egitim_dahil=True)
+    seg = bool(veri.segmentler) and bireysel and not sabit
     if seg and _segment_birim(veri):
         seg = False
         _not(veri, f"Demografi tabanı atlandı: '{veri.segmentler[0]}' madde içinde satırı tanımlıyor (segment = birim), "
@@ -232,10 +244,12 @@ def baselineler(veri, ozet_surekli: str = "mean", rastgele_tohum: int = 0) -> di
         out["rastgele"] = ("Rastgele (0,5)", np.full(len(d), 0.5))
         if not sabit:
             marj = _skaler_baseline(veri, "mean", False)
-            if "madde" not in d or tek:
-                # kat başına sabit genel oran dışarıdaki katın pozitifleriyle ters ilişkili (G4 #13, AUC 0,38): tek sabit
+            genel = "madde" not in d or (tek and not _bolum_var(veri))
+            if genel and not _bolum_var(veri):
+                # kat başına sabit genel oran dışarıdaki katın pozitifleriyle ters ilişkili (G4 #13, AUC 0,38): tek sabit.
+                # Bölümde eğitimin madde oranı dürüst bir tabandır (test maddesi başına tek satır olsa da), dokunulmaz.
                 marj = np.full(len(d), float(np.mean(marj)) if len(d) else np.nan)
-            out["marjinal"] = (("Madde ortalaması" if "madde" in d and not tek else "Genel oran") + ek, marj)
+            out["marjinal"] = (("Genel oran" if genel else "Madde ortalaması") + ek, marj)
         if seg:
             out["demografi"] = (f"Demografi ortalaması ({veri.segmentler[0]})" + ek, _skaler_baseline(veri, "mean", True))
     elif g == "cok_sinif":
@@ -258,9 +272,10 @@ def baselineler(veri, ozet_surekli: str = "mean", rastgele_tohum: int = 0) -> di
             if seg:
                 out["demografi"] = (f"Demografi sınıf payları ({veri.segmentler[0]})" + ek, _sinif_baseline(veri, True))
     elif g == "surekli":
-        if not sabit:
+        if not sabit_test:   # puanlanan satırların gerçeğini karıştırır: sabitse onu kopyalar
             out["rastgele"] = ("Rastgele (başka maddenin gerçek değeri; madde başına tek satır)" if tek
                                else "Rastgele (madde içi gerçek değer)", _rastgele_surekli(veri, rastgele_tohum))
+        if not sabit:
             ad = "Madde medyanı" if ozet_surekli == "median" else "Madde ortalaması"
             if tek and not _bolum_var(veri):
                 # tek satırlı madde dışarıda bırakılan katta görülmez: değer eğitim katlarının genel özetidir
@@ -276,8 +291,9 @@ def baselineler(veri, ozet_surekli: str = "mean", rastgele_tohum: int = 0) -> di
     elif g == "ab":
         out["rastgele"] = ("Rastgele (hep beraberlik)", np.zeros(len(d)))
         out["marjinal"] = ("Çoğunluk yönü (kol ortalaması)", _ab_kol(d))
-    if sabit:
-        dus = [a for a in ("rastgele", "marjinal", "demografi") if a not in out]
+    dus = (["rastgele"] if g == "surekli" and sabit_test else []) + \
+        (["marjinal"] + (["demografi"] if veri.segmentler else []) if sabit else [])
+    if dus:
         _not(veri, f"Sabit gerçek (sd 0, {len(d)} puanlanan satır): gerçekten uydurulan otomatik tabanlar ({', '.join(dus)}) "
                    f"düşürüldü; sabiti kopyalayıp en güçlü taban olurlardı (constant truth: automatic {'/'.join(dus)} "
                    "rungs dropped, not in the badge)")

@@ -62,6 +62,16 @@ class BinaryMarginalTest(unittest.TestCase):
         self.assertEqual(np.ptp(deg), 0.0)
         self.assertAlmostEqual(float(deg[0]), float(df["truth"].mean()), delta=0.05)
 
+    def test_split_keeps_per_item_train_rate_with_one_test_row_per_item(self):
+        # review: the constant collapse is for cross-fitting only; with a split the item's train rate is honest
+        rng = np.random.default_rng(0)
+        rate = rng.uniform(.05, .95, 40)
+        rows = [dict(item=f"q{i}", truth=int(rng.random() < rate[i]), split=s, pred_ours=rate[i])
+                for i in range(40) for s in ["train"] * 10 + ["test"]]
+        r = _evaluate(pd.DataFrame(rows), task="binary", ours="ours")["sonuclar"]["taban_marjinal"]
+        self.assertGreater(r["metrikler"]["auc"]["deger"], 0.7)
+        self.assertEqual(r["etiket"], "Madde ortalaması")
+
     def test_train_split_marginal_is_the_train_rate(self):
         df = _binary(n=90, split=True)
         rep = _evaluate(df, task="binary", ours="ours")
@@ -90,6 +100,22 @@ class ConstantTruthTest(unittest.TestCase):
         rep = _evaluate(df, task="binary", primary="brier", ours="ours")
         self.assertNotIn("taban_marjinal", rep["sonuclar"])
         self.assertIn("taban_rastgele", rep["sonuclar"])     # 0.5 never reads the truth
+
+    def test_split_with_varying_train_truth_keeps_fitted_rungs(self):
+        # review: constant test truth, varying train truth: the train-fitted median does not copy the constant
+        rng = np.random.default_rng(0)
+        n = 60
+        df = pd.DataFrame({"item": [f"q{i % 6}" for i in range(n)], "group": [f"p{i // 6}" for i in range(n)],
+                           "truth": rng.integers(1, 6, n).astype(float),
+                           "split": np.where(np.arange(n) < 48, "train", "test")})
+        df.loc[df["split"] == "test", "truth"] = 3.0
+        df["pred_ours"] = df["truth"] + rng.normal(0, .5, n)
+        rep = _evaluate(df, task="continuous", primary="mae", ours="ours")
+        self.assertIn("taban_marjinal", rep["sonuclar"])
+        self.assertNotIn("taban_rastgele", rep["sonuclar"])     # shuffles the constant test truth
+        notlar = [d["ayrinti"] for d in rep["denetim"] if d["kontrol"] == "girdi notu" and "constant truth" in d["ayrinti"]]
+        self.assertEqual(len(notlar), 1)
+        self.assertIn("(rastgele)", notlar[0])
 
     def test_varying_truth_keeps_rungs(self):
         rep = _evaluate(_continuous_items(segment=None), task="continuous", ours="ours")
@@ -142,6 +168,14 @@ class DemographicUnitTest(unittest.TestCase):
                            "truth": t, "pred_ours": t + rng.normal(0, .5, 26)})
         rep = _evaluate(df, task="continuous", primary="mae", ours="ours")
         self.assertNotIn("taban_demografi", rep["sonuclar"])
+
+    def test_distribution_segment_table_has_no_demographic_note(self):
+        # review: no demographic rung exists for distributions; the segment = unit note must not appear there
+        rng = np.random.default_rng(0)
+        rows = [dict(item=f"q{i}", segment=s, truth=list(rng.dirichlet(np.ones(4))),
+                     pred_ours=list(rng.dirichlet(np.ones(4)))) for i in range(8) for s in "ABC"]
+        rep = _evaluate(pd.DataFrame(rows), task="distribution", ours="ours")
+        self.assertFalse([d for d in rep["denetim"] if "segment = birim" in d.get("ayrinti", "")])
 
     def test_repeated_segments_keep_demographic(self):
         rep = _evaluate(_continuous_items(segment="repeat"), task="continuous", ours="ours")
