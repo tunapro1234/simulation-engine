@@ -1431,6 +1431,13 @@ CHECK_TO_ENGLISH = {
     "bilgi düzeyi (ayar A / ayar B)": "information level (setting A / setting B)",
     "baskın blok (dominant block)": "dominant block",
     "küme sayısı (bootstrap GA)": "number of clusters (bootstrap CI)",
+    # audit rows added in f948774 / 9aa3d47 and the constant-prediction rows (W8: printed in Turkish with lang="en")
+    "sabit tahmin (sd 0)": "constant prediction (sd 0)",
+    "sabit tahmin: sıra metrikleri tanımsız (constant prediction)": "constant prediction: rank metrics undefined",
+    "etkin örneklem çarpanı (PPI++ kaç insana bedel)": "effective sample multiplier (PPI++ worth N humans)",
+    "ezber uyarısı ve bizim kol (memorization warning and ours)": "memorization warning and ours",
+    "çerçeve ↔ mühürlü dosya": "frame ↔ sealed file",
+    "zaman sütunu çözümü (time column parsing)": "time column parsing",
 }
 CHECK_PATTERNS_EN = ((r"^pozisyon takası \((.+)\)$", r"position swap (\1)"),
                      (r"^dolgu payı \(geçersiz → tekdüze\): (.+)$", r"fill share (invalid → uniform): \1"))
@@ -1703,6 +1710,7 @@ _PHRASES_EN = [
 _PHRASES_EN = [(re.compile(p), r) for p, r in _PHRASES_EN]
 _TR_LETTERS = re.compile(r"[çğıöşüÇĞİÖŞÜ]")
 _TAIL_EN = re.compile(r"^(.*\S)\s+\(([^()]*)\)\.?$", re.S)
+_NUM_RE = re.compile(r"(?<![\w.])\d+(?:\.\d+)?")
 _NAME_RE = re.compile(r"(?<![A-Za-z0-9_])(?:tahmin|taban|kontrol|kalib)_[^\s,;:()\[\]`'\"|]+")
 _METRIC_RE = re.compile(r"\b(" + "|".join(sorted((re.escape(k) for k, v in METRIC_TO_ENGLISH.items() if k != v),
                                                   key=len, reverse=True)) + r")\b")
@@ -1751,6 +1759,9 @@ def _check_en(name) -> str:
     for p, r in CHECK_PATTERNS_EN:
         if re.match(p, name):
             return re.sub(p, r, name)
+    m = _TAIL_EN.match(name)    # a new "Turkish (English)" name: its English part
+    if m and _TR_LETTERS.search(m.group(1)) and not _TR_LETTERS.search(m.group(2)) and len(m.group(2).split()) >= 2:
+        return m.group(2)
     return name
 
 
@@ -1772,7 +1783,9 @@ def _en_text(s) -> str:
             t = t.replace(tr, en)
     m = _TAIL_EN.match(t)
     if m and _TR_LETTERS.search(m.group(1)) and not _TR_LETTERS.search(m.group(2)) and len(m.group(2).split()) >= 3:
-        t = m.group(2)
+        # numbers only in the Turkish part would be lost (W8): then the Turkish part follows in brackets
+        lost = set(_NUM_RE.findall(m.group(1))) - set(_NUM_RE.findall(m.group(2)))
+        t = m.group(2) + (f" [{m.group(1)}]" if lost else "")
     t = re.sub(r"(?<![\w%])%(\d+(?:\.\d+)?)", r"\1%", t)
     return _METRIC_RE.sub(lambda q: METRIC_TO_ENGLISH[q.group(1)], _names_en(t))
 
