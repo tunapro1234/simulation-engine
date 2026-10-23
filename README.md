@@ -185,6 +185,29 @@ notları: [docs/METHODS.md](docs/METHODS.md). Alan haritası ve doğrulama: [doc
 [docs/validation.md](docs/validation.md) (jürilerin tanıdığı doğrulama ölçütleri → simengine işlevi),
 [docs/failure-modes.md](docs/failure-modes.md) (bilinen hata türleri, sayıları ve onları yakalayan denetim).
 
+## Hackathon recipes
+
+Eight end-to-end scripts in `examples/recipes/`, one per common brief, each 210-230 lines with numbered steps.
+They share one contract: offline by default (FakeLLM + synthetic data; needs numpy and pandas), `--data <csv>` for
+the day's table, `--out <dir>` for the card, dashboard, seals, cache and ledger, and real Claude calls only with
+`--live --max-usd <cap>` (the cap is checked against the ledger in `<out>/.cache/` before every call; the key is
+never printed). Every recipe fits its LLM-free baselines on training data only, seals the predictions before the
+truth is joined, and ends with an evidence card. Offline, FakeLLM knows nothing, so the badges say "inconclusive";
+read the offline run as a check of the plumbing, not of the LLM. The day-of settings are in step 0; each recipe has
+a guide in [docs/recipes/](docs/recipes/), and [`hackathon_day.md`](examples/hackathon_day.md) says at which step
+to reach for which one.
+
+| script | the brief it answers | guide |
+|---|---|---|
+| [`ad_ab.py`](examples/recipes/ad_ab.py) | rank N ad creatives for an audience, lift of each over the control ad with CIs; past campaigns give the baselines and calibration | [ad_ab](docs/recipes/ad_ab.md) |
+| [`adoption.py`](examples/recipes/adoption.py) | new product adoption N periods out: curve baselines and analogy Bass / ABM backtested, LLM Bass prior from the market text, marketing what-ifs | [adoption](docs/recipes/adoption.md) |
+| [`cold_start.py`](examples/recipes/cold_start.py) | rating or early demand of a brand-new item: LLM prior from its text blended with similar past items, against the same blend without the LLM | [cold_start](docs/recipes/cold_start.md) |
+| [`pricing.py`](examples/recipes/pricing.py) | price sensitivity and WTP from a choice-based conjoint: logit part-worths, WTP with person-bootstrap CIs and a revenue curve, humans and LLM side by side | [pricing](docs/recipes/pricing.md) |
+| [`purchase_pred.py`](examples/recipes/purchase_pred.py) | will this person buy in this category next window: persona + history, L0/L1/L2 ladder, calibration, out-of-fold stack (the talp73 setup) | [purchase_pred](docs/recipes/purchase_pred.md) |
+| [`segment_survey.py`](examples/recipes/segment_survey.py) | survey answer shares per segment and for the population: verbalised distributions (3 framings), train-survey prior update, PPI++ population estimate | [segment_survey](docs/recipes/segment_survey.md) |
+| [`site_visitors.py`](examples/recipes/site_visitors.py) | landing page / checkout funnel: personas walk each variant's pages, P(continue) per step, drop-off and the variant lift against past traffic | [site_visitors](docs/recipes/site_visitors.md) |
+| [`spread.py`](examples/recipes/spread.py) | a message spreading on a network: who shares, how far, which seeding strategy reaches most; independent-cascade fit plus LLM P(share) per segment | [spread](docs/recipes/spread.md) |
+
 ## Ölçülen sonuçlar
 
 Hepsi araştırma kodunda ölçüldü; kaynak dal ve dosya sağda. Son üç satır önceki iki depodan (replicant,
