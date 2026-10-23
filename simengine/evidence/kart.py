@@ -195,6 +195,14 @@ def kazanc_var(fark: dict | None) -> bool:
     return bool(fark["fark"] > 0)
 
 
+def _onek(on: str, kutu: dict | None) -> str | None:
+    """Satır etiketi: ön ek + kol etiketi; etiket ön eki zaten taşıyorsa ikilenmez ("Bizim: Bizim: x" olmaz)."""
+    if not kutu:
+        return None
+    et = str(kutu.get("etiket"))
+    return et if et.casefold().startswith(on.casefold()) else on + et
+
+
 def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> dict:
     man = oz.get("manset") or {}
     tahmin = bool(oz.get("tahmin_gorevi"))
@@ -203,10 +211,10 @@ def kart(oz: dict, rejimler=None, yanilgi=None, etiketler=None, muhur=None) -> d
     son = oz.get("sonuclar") or {}
     tb = man.get("en_iyi_baseline")
     ham, biz, tav, bos = man.get("ham"), man.get("bizim"), man.get("tavan"), man.get("bosluk_kapanan")
-    S = [satir("taban", f"En güçlü basit taban: {tb['etiket']}" if tb else "En güçlü basit taban", *_u(tb),
+    S = [satir("taban", _onek("En güçlü basit taban: ", tb) or "En güçlü basit taban", *_u(tb),
                not_=None if tb else ((None if son else _bildirilen(oz)) or "taban yok")),
-         satir("ham", f"Ham: {ham['etiket']}" if ham else "Ham yöntem", *_u(ham), not_=None if ham else "ham kol yok"),
-         satir("kalibre", f"Bizim: {biz['etiket']}" if biz else "Bizim yöntem", *_u(biz)),
+         satir("ham", _onek("Ham: ", ham) or "Ham yöntem", *_u(ham), not_=None if ham else "ham kol yok"),
+         satir("kalibre", _onek("Bizim: ", biz) or "Bizim yöntem", *_u(biz)),
          satir("tavan", TAVAN_ETIKET.get(oz.get("tavan_turu"), "İnsan tekrar tavanı"), *_u(tav),
                not_=(TAVAN_NOT.get(oz.get("tavan_turu")) if tav else
                      (TAHMIN_NOT["tavan"] if tahmin else "tavan yok (test-tekrar ölçülmemiş)"))),

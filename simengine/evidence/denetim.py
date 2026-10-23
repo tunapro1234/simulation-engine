@@ -7,6 +7,7 @@ Her denetim: {"kontrol", "durum": tamam|uyari|hata|atlandi, "ayrinti", "deger"}.
 from __future__ import annotations
 
 import json
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,41 @@ def _k(kontrol, durum, ayrinti, deger=None):
 
 def _f(x, b=3):
     return "—" if x is None or not np.isfinite(x) else f"{x:.{b}f}".replace(".", ",")
+
+
+def zaman_coz(s: pd.Series) -> tuple[pd.Series, int]:
+    """'zaman' sütunu -> (datetime, çözülemeyen dolu satır sayısı). Biçim satır satır çözülür (format="mixed"):
+    karışık biçimli tarihler ("2024-03-05" ile "15/09/2024") ilk satırdan çıkarılan tek biçimle NaT'ye düşmez.
+    Çözülemeyen satır NaT kalır ve sayılır; hiçbir tarafa (önce/sonra, eğitim/test) yazılmaz.
+
+        z, n_bos = zaman_coz(veri.df["zaman"])"""
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)   # karışık saat dilimi: aşağıda UTC'ye çekilir
+            try:
+                z = pd.to_datetime(s, format="mixed")
+            except (ValueError, TypeError, OverflowError):
+                z = pd.to_datetime(s, format="mixed", errors="coerce")
+            if not pd.api.types.is_datetime64_any_dtype(z):   # karışık ofsetler object döner
+                z = pd.to_datetime(s, format="mixed", errors="coerce", utc=True)
+    else:
+        z = s
+    if getattr(z.dt, "tz", None) is not None:   # kesim tarihi saat dilimsiz: UTC'ye çevir, dilimi düşür
+        z = z.dt.tz_convert("UTC").dt.tz_localize(None)
+    return z, int((z.isna() & s.notna()).sum())
+
+
+def zaman_cozumu(veri):
+    """'zaman' sütununda çözülemeyen dolu satır varsa denetim satırı (yoksa None): bu satırlar zaman sızıntısı ve
+    kontaminasyon denetimlerinin dışında kalır (önceden NaT 'kesimden sonra' sayılıyordu)."""
+    if "zaman" not in veri.tam:
+        return None
+    _, n = zaman_coz(veri.tam["zaman"])
+    if not n:
+        return None
+    return _k("zaman sütunu çözümü (time column parsing)", "uyari",
+              f"{n} satırın tarihi çözülemedi; zaman sızıntısı ve kontaminasyon denetimlerinin dışında "
+              f"(unparsed time: {n} rows left out of the time leakage and contamination audits)", n)
 
 
 def bolme(veri) -> list:
@@ -44,12 +80,13 @@ def bolme(veri) -> list:
     else:
         out.append(_k("grup çakışması (eğitim ∩ test)", "atlandi", "'grup' sütunu yok: aynı kişinin satırları iki yana düşebilir"))
     if "zaman" in tam:
-        z = pd.to_datetime(tam["zaman"], errors="coerce")
+        z, _ = zaman_coz(tam["zaman"])
         e_max, t_min = z[~test].max(), z[test].min()
         if pd.notna(e_max) and pd.notna(t_min):
-            ust = (z[~test] > t_min).mean()
+            ust = (z[~test & z.notna()] > t_min).mean()
             out.append(_k("zaman sızıntısı (eğitim testten sonra mı)", "uyari" if e_max > t_min else "tamam",
-                          f"eğitim son {e_max.date()} · test ilk {t_min.date()} · testten sonraki eğitim payı %{100 * ust:.1f}", float(ust)))
+                          f"eğitim son {e_max.date()} · test ilk {t_min.date()} · testten sonraki eğitim payı "
+                          f"%{100 * ust:.1f}", float(ust)))
     if "birim" in tam:
         dup = tam.loc[test, "birim"].duplicated().sum()
         out.append(_k("birim tekrarı (testte)", "uyari" if dup else "tamam", f"{dup} tekrar eden birim", int(dup)))
@@ -212,14 +249,17 @@ def kontaminasyon(veri, sutun_dizileri, metrik, kesim: str | None):
         else:
             ayr = "'zaman' (time) sütunu yok"
         return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi", ayr)
-    z = pd.to_datetime(veri.df["zaman"], errors="coerce")
-    once = (z < pd.Timestamp(kesim)).to_numpy()
-    if once.sum() < 30 or (~once).sum() < 30:
-        return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi", f"öncesi {once.sum()}, sonrası {(~once).sum()} birim: az")
+    z, _ = zaman_coz(veri.df["zaman"])
+    var = z.notna().to_numpy()       # tarihi çözülemeyen satır ne öncesi ne sonrası
+    once = (z < pd.Timestamp(kesim)).to_numpy() & var
+    sonra = var & ~once
+    if once.sum() < 30 or sonra.sum() < 30:
+        return _k("kontaminasyon (kesim öncesi/sonrası)", "atlandi",
+                  f"öncesi {once.sum()}, sonrası {sonra.sum()} birim: az")
     # önce − sonra farkı, birim bootstrap'ı (iki yan ayrı yeniden örneklenir); alt GA > 0 → ezber şüphesi
     madde = veri.df["madde"].to_numpy() if "madde" in veri.df else None
     rng = np.random.default_rng(11)
-    io, is_ = np.flatnonzero(once), np.flatnonzero(~once)
+    io, is_ = np.flatnonzero(once), np.flatnonzero(sonra)
     parcalar, supheli = [], False
     for s, (y, p, maske) in sutun_dizileri.items():
         def m(ix):
