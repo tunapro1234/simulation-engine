@@ -179,7 +179,7 @@ class BenchTask:
         preds: dict[str, Any] = {}
         base = self.baselines(data) if baselines else {}
         if baselines is not True and baselines:
-            keep = set(baselines)
+            keep = {baselines} if isinstance(baselines, str) else set(baselines)   # one name, not its characters
             base = {k: v for k, v in base.items() if k in keep}
         preds.update(base)
         for name, meth in normalize_methods(methods).items():
