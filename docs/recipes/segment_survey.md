@@ -1,6 +1,6 @@
 # Recipe: survey answer distributions by segment
 
-Script: [`examples/recipes/segment_survey.py`](../../examples/recipes/segment_survey.py) (under 200 lines, numbered
+Script: [`examples/recipes/segment_survey.py`](../../examples/recipes/segment_survey.py) (about 215 lines, numbered
 steps 0-10). Test: `tests/test_recipe_segment_survey.py`.
 
 ```bash
@@ -40,7 +40,7 @@ Outputs go to `--out` (default `runs/segment_survey`, git-ignored): `card.md`, `
 | `question_text` | str | the question as asked; first value per question |
 | `options` | str | answer options in their natural order, `|`-separated (`Strongly disagree|...|Strongly agree`); first value per question. The order matters for W1 |
 | `answer` | str | the option chosen; must be one of `options` (the script stops and counts the bad rows otherwise) |
-| `split` | str, optional | `train` / `holdout`; without it 30 % of respondents (stable crc32 hash of the id) are train |
+| `split` | str, optional | `train` / `holdout` (anything but `train` is holdout); all rows of a respondent must carry the same value, else the script stops; without it 30 % of respondents (stable crc32 hash of the id) are train |
 
 Without `--data` the script builds a synthetic survey: 4 segments of very different sizes (300 / 220 / 120 / 60), 5
 Likert questions, segment-specific tilts. The fake LLM knows four of the tilts at 70 % strength and misses one
@@ -55,10 +55,10 @@ question entirely (the budget worry, q5), so the card shows an LLM that is usefu
 | 2 | backend | `--live --max-usd`; Haiku by default (`--model` to change) | rank list "do not spend time on": a bigger model gave ~1 point in Park et al. and +1.0 (n.s.) in our runs. On SimBench Sonnet did beat Haiku (46.3 vs 35.7, `docs/RESULTS.md` §1): try it last, with budget left |
 | 3 | `sim.segment_distribution`: one call per segment x question x framing, 3 framings averaged; the same with only the population (no segment) as control | segment descriptions; pass `source=` / `when=` in `segment_distribution` when the brief names a real survey (named framings measured 0.077 vs 0.084 hidden) | rank #4: verbalised JSON shares (Meister TV 0.226; log-probs were worse than uniform). C1: 3 framings averaged, gap closed 0.818 |
 | 4 | baselines from the train survey only: `train_overall` (segment ignored), `train_segment` (segment shares shrunk toward it with 5 pseudo-answers); uniform and the item-wide marginal come automatically | add a baseline the client already has (last year's wave per segment) as another `baselines_oof` column | rank #1: baseline ladder and gap closed (Park et al. arXiv:2411.10109 normalisation; Twin-2K-500 gap ~56 %) |
-| 5 | `llm_prior` = LLM shares as a Dirichlet prior worth `K_PRIOR` answers, updated with the segment's train answers | nothing on the day; it is the "ours" named before the truth | rank #3 (LLM as a prior of a data model; Centaur, SubPOP: learning from human data is where the gain is) and rank #6 (shrink toward data) |
-| 6 | `se.seal` of every arm, `ours = llm_prior` in the description | nothing; do it before the holdout is joined | pre-registration; the card's selection-bias audit checks that `ours` was named in the seal |
-| 7 | `se.evidence.evaluate(task="distribution")`: 1-TVD ladder, persona shuffle (`llm_prior · shuffled`), paired CIs over questions, audits | `--B 1000` for the final card; `memorization=` once you ran the audit | rank #1 again: the card is the deliverable |
-| 8 | `evaluate_distribution_persons(metric="w1")`: W1 on ordered options with a respondent bootstrap, paired differences ours − strongest baseline, LLM − no-segment control, LLM − train marginal | the pairs you will show | W1 is the CES / OpinionQA metric (`docs/RESULTS.md` §1); the respondent bootstrap answers "new people from the same segments", the card's CI answers "new questions" |
+| 5 | `llm_prior` = LLM shares as a Dirichlet prior worth `K_PRIOR` answers, updated with the segment's train answers; control `llm_prior_nosegment` = the same update with the no-segment LLM shares as prior | nothing on the day; it is the "ours" named before the truth | rank #3 (LLM as a prior of a data model; Centaur, SubPOP: learning from human data is where the gain is) and rank #6 (shrink toward data) |
+| 6 | `se.seal` of every arm, `ours = llm_prior` and the two `compare=` pairs in the description (a pair not named there is printed as post hoc) | nothing; do it before the holdout is joined | pre-registration; the card's selection-bias audit checks that `ours` was named in the seal |
+| 7 | `se.evidence.evaluate(task="distribution")`: 1-TVD ladder, persona shuffle (`shuffled llm_prior`), paired CIs over questions, registered pairs (`compare=`: ours − its no-segment control, raw LLM − no-segment LLM), audits | `--B 1000` for the final card; `memorization=` once you ran the audit | rank #1 again: the card is the deliverable |
+| 8 | `evaluate_distribution_persons(metric="w1")`: W1 on ordered options with a respondent bootstrap, paired differences ours − strongest baseline, ours − `llm_prior_nosegment`, LLM − no-segment control, LLM − train marginal | the pairs you will show | W1 is the CES / OpinionQA metric (`docs/RESULTS.md` §1); the respondent bootstrap answers "new people from the same segments", the card's CI answers "new questions" |
 | 9 | PPI++ population share per option (`persona.inject.population.ppi_distribution`): train answers + raw LLM shares for every holdout respondent's segment; coverage and CI width ratio vs train only | the unlabelled side: census / panel counts per segment instead of the holdout | Angelopoulos et al. 2023 (PPI, arXiv:2301.09633), PPI++ power tuning (arXiv:2311.01453); our "worth N humans" measurements: a persona answering a survey was worth 1.02x, so expect a small gain unless the LLM tracks individuals |
 | 10 | `card.md`, `dashboard.html`, spend line | nothing | |
 
@@ -69,12 +69,18 @@ Funhouse Mirrors r = 0.20), per-person panels for a distribution target (0.55 vs
 ## What the jury should see
 
 1. **The ladder, one line per arm with a 95 % CI**: uniform, item-wide marginal (setting B, labelled as such),
-   no-segment LLM control, train marginal, raw LLM, train segment shares, ours. In the offline run ours (`llm_prior`,
-   1-TVD 0.899 [0.874, 0.918]) ties the train segment shares (0.893): badge "inconclusive". Say that: with 19-91
-   real answers per segment the small survey is already strong, and the LLM prior only helps the smallest segments.
+   no-segment LLM control, train marginal, raw LLM, ours with the no-segment prior, train segment shares, ours. In
+   the offline run ours (`llm_prior`, 1-TVD 0.899 [0.874, 0.918]) ties the train segment shares (0.893): badge
+   "inconclusive". Say that: with 19-91 real answers per segment the small survey is already strong. Per segment
+   (1-TVD, ours vs train segment shares) the prior helps the middle ones (`mid_suburb` 0.927 vs 0.902,
+   `old_rural` 0.893 vs 0.873), ties the largest and loses on the smallest (`students` 0.846 vs 0.868): with 19
+   train answers a 20-answer prior is mostly the LLM, and the LLM misses the students' q5. A strong prior is only
+   as good as the LLM where data are thin.
 2. **The controls**: the no-segment arm (W1 0.145 vs raw LLM 0.071, difference −0.074 [−0.086, −0.070]) shows the
-   gain comes from the segment description, not from the question text alone; the shuffled `llm_prior` falls to the
-   train-marginal level.
+   raw gain comes from the segment description, not from the question text alone. For ours the matched control is
+   `llm_prior_nosegment` (same `K_PRIOR`, same train answers, prior without the segment): W1 0.047 vs 0.063,
+   −0.016 [−0.024, −0.013], so the segment text still adds something after the data update. The shuffled
+   `llm_prior` falls to the train-marginal level.
 3. **Where the LLM is wrong**: step 8 prints the cells where the raw LLM is worse than the train marginal (per-cell
    scores in `w1["cells"]`). In the synthetic data that is q5 (budget worry) for `old_rural` and `students`, plus
    `students/q4` by a hair. A
@@ -91,7 +97,10 @@ Funhouse Mirrors r = 0.20), per-person panels for a distribution target (0.55 vs
   label). Baselines and `llm_prior` use the train respondents only; the holdout is joined after the seal. The
   item-wide marginal on the card is setting B (it reads the target question's answers in other segments): the card
   labels it and compares ours with the strongest setting-A baseline. Do not tune `POPULATION`, framings or
-  `K_PRIOR` while looking at the holdout.
+  `K_PRIOR` while looking at the holdout. A row-level split leaks (one person's other answers in train); the script
+  refuses a `split` column that puts one respondent on both sides.
+- **"selection bias" warning.** It fires because ours is the best of four LLM arms (raw, two controls, ours). The
+  answer is the seal: `ours = llm_prior` was named before the holdout was joined. Do not add arms after looking.
 - **Imbalanced segments and accuracy.** Small segments have noisy truth: 1-TVD between a 20-person empirical
   distribution and *any* prediction is biased down, so the respondent-bootstrap percentile CI can sit beside the
   point. The script prints the basic CI; read cells with few holdout answers with care, merge tiny segments. Never
@@ -107,6 +116,9 @@ Funhouse Mirrors r = 0.20), per-person panels for a distribution target (0.55 vs
   Use the raw LLM shares as the predictor: `llm_prior` has already seen the train labels.
 - **Option order.** W1 uses the order in `options`. For unordered options (brands, parties) read 1-TVD only.
 - **Budget.** `--live` refuses to start without `--max-usd`; once the ledger total reaches it the backend raises
-  `BudgetExceeded` before any new call and the script exits with "stopped by the budget". Finished replies stay in
-  the cache, so the same command with a higher cap resumes. The key comes from the environment or `--key-file` and is
+  `BudgetExceeded` before any new call and the script exits with "stopped by the budget" (calls already in flight,
+  at most 4, still finish). The cap is checked against the whole ledger in `--out/.cache`, so it covers earlier
+  runs into the same folder too; the spend line prints this run and the ledger total. Finished replies stay in
+  the cache, so the same command with a higher cap resumes. A missing or rejected key exits with "stopped:
+  AuthError", not a traceback. The key comes from the environment or `--key-file` and is
   never printed. The offline synthetic run makes 75 calls (4 segments x 5 questions x 3 framings + 15 control).
