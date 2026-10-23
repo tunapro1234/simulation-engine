@@ -969,19 +969,29 @@ M.uplift_at_k(test.buy, test.sms, score, 0.3), M.qini(test.buy, test.sms, score)
   (the moment estimator inflated with many small segments in D11), beta by GLS; `X=None` shrinks to the
   precision-weighted mean. Columns `est`, `se`, `prior`, `B` (weight on the prior), `shrunk`, `post_se` (ignores
   the uncertainty in beta and tau^2); a row without an estimate gets the prior.
-- **`split_half_effects(df, treat, y, seg, R=100, seed=0, *, methods=None, unit=None, boot=True)`**: per rep the
-  units are split in two, stratified by treatment first, and only then bootstrapped inside each half. The D11 hand
-  version bootstrapped before splitting, so one customer sat in both halves. `methods`: name ->
+- **`split_half_effects(df, treat, y, seg, R=100, seed=0, *, methods=None, unit=None, boot=False)`**: per rep the
+  units are split in two, stratified by treatment; the random split alone gives the rep-to-rep variation. The D11
+  hand version bootstrapped before splitting, so one customer sat in both halves. `boot=True` bootstraps inside
+  each half after the split, but that doubles the noise of pred and truth: in a simulation (8 segments x 4,000 rows)
+  `mse_d` came out about 3x the true MSE and ranked pooled ahead of shrunk (raw / pooled / shrunk 0.0099 / 0.0063 /
+  0.0071 against true 0.0035 / 0.0026 / 0.0021; without boot 0.0034 / 0.0024 / 0.0019), so it is off by default. `methods`: name ->
   callable(half A) -> effects by segment; default `raw`, `pooled` (A's ATE everywhere), `shrunk`. Truth = half B's
   `segment_uplift`, `truth_var` = its SE^2, so `summarize_split_half` reports `mse_d` = mean((pred - truth)^2 -
-  truth_var), the MSE against the true effect. `unit=` keeps a customer's rows together.
+  truth_var), the MSE against the true effect, scoring every method on the same (rep, segment) cells (`common=True`)
+  and `n_seg` per rep. `unit=` keeps a customer's rows together. Default `shrunk` falls back to the pooled ATE when
+  half A has fewer than two segments with both arms.
 - **`TLearner(model="logistic" | "gbdt" | estimator | factory, categorical=None, n_jobs=None)`** and
   **`SLearner`** (default `"gbdt"`): `.fit(df, treat, y, features=None)`, `.predict(df)` = f1(x) - f0(x),
   `.predict_arms(df)`. GBDT = LightGBM with the bench parameters, one thread below 200k rows; without LightGBM it
-  falls back to sklearn HistGradientBoosting with a warning. A regressor (no `predict_proba`) gives E[y | x, t].
+  falls back to sklearn HistGradientBoosting with a warning. A regressor (no `predict_proba`) gives E[y | x, t]; a
+  numeric outcome (spend, counts) with `"logistic"` / `"gbdt"` switches to ridge / LightGBM regressor (a classifier
+  on counts went multiclass and returned P(y = 1) silently), and a classifier instance on it raises.
 - **Metrics** `qini` (= `qini_coefficient`), `auuc`, `uplift_at_k(y, t, score, k=0.3)`, `qini_curve`,
   `uplift_curve`: moved here from `bench/tasks/uplift.py`, which imports them, so its numbers are unchanged (pinned
-  in `tests/test_bench_uplift.py`). Definitions in `docs/modules/bench/uplift.md`.
+  in `tests/test_bench_uplift.py`). Definitions in `docs/modules/bench/uplift.md`. A higher outcome counts as better:
+  for churn or cost pass `1 - y` or `-y`. A NaN score raises (it was ranked first); one empty arm gives NaN.
+  `heterogeneity_test` counts in `df` only the interaction terms not collinear with the main effects (a category
+  seen in one arm adds none).
 
 Simulated check (`tests/test_methods_uplift.py` setting, 100 datasets of 8,000 customers, half for fitting the test
 and learner, half for scoring): with an effect of 0.15 tanh(2 x1), the test rejected at 0.05 in 100/100 on both

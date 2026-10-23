@@ -25,6 +25,8 @@ Metrics (also used by the bench uplift tasks, `simengine.bench.tasks.uplift`, wh
                              `uplift_at_k`, strategy "overall")
 
 A score only has to rank (higher = treat first). Random targeting has uplift@k = the ATE in expectation and Qini 0.
+The metrics read a higher outcome as better: for churn, complaints or cost pass ``1 - y`` (0/1) or ``-y``. A NaN
+score raises; with one arm empty the metrics are NaN.
 """
 from __future__ import annotations
 
@@ -75,6 +77,8 @@ def _area(x, v):
 
 def _norm_area(kind, y, t, w, model, perfect):
     """(area(model) - area(random)) / (area(perfect) - area(random)); random = straight line to the end point."""
+    if not (np.sum(w * t) > 0 and np.sum(w * (1 - t)) > 0):
+        return float("nan")  # one arm empty: no curve to compare
     x, v = _curve(kind, y, t, w, *model)
     xp, vp = _curve(kind, y, t, w, *perfect)
     base = 0.5 * xp[-1] * vp[-1]
@@ -92,25 +96,30 @@ def _perfect_uplift_scores(y, t):
     return eq + y, eq + t  # summand y if control responders > treated non-responders, else t
 
 
+def _inputs(y, treatment, score, weights):
+    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
+    if not np.isfinite(s).all():  # argsort puts NaN first in descending order: they would be "treated first"
+        raise ValueError(f"score has {int((~np.isfinite(s)).sum())} non-finite values; fill or drop them first")
+    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
+    return y, t, s, w
+
+
 def qini_curve(y, treatment, score, weights=None) -> tuple[np.ndarray, np.ndarray]:
     """Qini curve: x = number targeted, value = Y_t(x) - Y_c(x) * N_t(x) / N_c(x) (Radcliffe 2007), at every
     distinct score, starting at (0, 0)."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
+    y, t, s, w = _inputs(y, treatment, score, weights)
     return _curve("qini", y, t, w, *_thresholds(s))
 
 
 def uplift_curve(y, treatment, score, weights=None) -> tuple[np.ndarray, np.ndarray]:
     """Uplift curve: x = number targeted, value = (Y_t / N_t - Y_c / N_c)(x) * x, starting at (0, 0)."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
+    y, t, s, w = _inputs(y, treatment, score, weights)
     return _curve("uplift", y, t, w, *_thresholds(s))
 
 
 def qini_coefficient(y, treatment, score, weights=None) -> float:
     """Normalised Qini coefficient: 1 = perfect ranking (negative effects allowed), 0 = random."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
+    y, t, s, w = _inputs(y, treatment, score, weights)
     return _norm_area("qini", y, t, w, _thresholds(s), _thresholds(_perfect_qini_score(y, t)))
 
 
@@ -119,8 +128,7 @@ qini = qini_coefficient
 
 def auuc(y, treatment, score, weights=None) -> float:
     """Normalised area under the uplift curve: 1 = perfect ranking, 0 = random."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
+    y, t, s, w = _inputs(y, treatment, score, weights)
     py, pt = _perfect_uplift_scores(y, t)
     return _auuc_w(y, t, w, _thresholds(s), _thresholds(py), _thresholds(pt))
 
@@ -133,8 +141,7 @@ def _auuc_w(y, t, w, model, perf_y, perf_t):
 
 def uplift_at_k(y, treatment, score, k: float = TOP_K, weights=None) -> float:
     """Treated minus control response rate among the first int(k n) rows by score (ties broken by sort order)."""
-    y, t, s = (np.asarray(a, float) for a in (y, treatment, score))
-    w = np.ones(len(y)) if weights is None else np.asarray(weights, float)
+    y, t, s, w = _inputs(y, treatment, score, weights)
     return _uak(y, t, w, np.argsort(s, kind="mergesort")[::-1], k)
 
 
@@ -198,7 +205,30 @@ def _vocab(train, categorical):
 
 
 def _p1(m, X):
-    return m.predict_proba(X)[:, 1] if hasattr(m, "predict_proba") else np.asarray(m.predict(X), float)
+    if not hasattr(m, "predict_proba"):
+        return np.asarray(m.predict(X), float)
+    P = m.predict_proba(X)
+    if P.shape[1] != 2:  # a classifier on a count / multi-level outcome: column 1 would be P(y = 2nd level)
+        raise ValueError(f"classifier saw {P.shape[1]} outcome classes; for a numeric outcome pass a regressor")
+    return P[:, 1]
+
+
+def _regressor(model, categorical, numeric, n_jobs):
+    """The numeric-outcome counterpart of a named model: "logistic" -> ridge on the same features, "gbdt" -> LightGBM
+    regressor (sklearn HistGradientBoostingRegressor if LightGBM is missing)."""
+    if model == "logistic":
+        from sklearn.linear_model import Ridge
+        pipe = _logistic(categorical, numeric)
+        pipe.steps[-1] = ("ridge", Ridge(alpha=1.0))
+        return pipe
+    try:
+        import lightgbm as lgb
+        return lgb.LGBMRegressor(**{**GBDT_PARAMS, "n_jobs": n_jobs or GBDT_PARAMS["n_jobs"]})
+    except ImportError:
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        warnings.warn("lightgbm not installed; using sklearn HistGradientBoostingRegressor", RuntimeWarning,
+                      stacklevel=3)
+        return HistGradientBoostingRegressor(max_iter=300, learning_rate=0.05, min_samples_leaf=200, random_state=0)
 
 
 def two_model(train, test, *, treatment: str, outcome: str, categorical: list[str], numeric: list[str],
@@ -258,8 +288,10 @@ class TLearner:
     ``model``: ``"logistic"`` (default; median-imputed, scaled numerics + one-hot categories), ``"gbdt"`` (LightGBM
     with the bench parameters, sklearn HistGradientBoosting with a warning if LightGBM is missing; one thread below
     200k rows), an sklearn estimator instance (cloned per arm) or a zero-argument factory. Classifiers give
-    P(y=1 | x, t); an estimator without ``predict_proba`` (a regressor) gives E[y | x, t]. ``categorical``: feature
-    columns to treat as categories (``None``: the non-numeric ones).
+    P(y=1 | x, t); an estimator without ``predict_proba`` (a regressor) gives E[y | x, t]. A numeric outcome (spend,
+    counts) with ``"logistic"`` / ``"gbdt"`` switches to the regression counterpart (ridge / LightGBM regressor), so
+    the uplift is E[y | x, 1] - E[y | x, 0]; a classifier instance on it raises. ``categorical``: feature columns to
+    treat as categories (``None``: the non-numeric ones).
 
     Cost: two fits per call. Run ``heterogeneity_test`` first; with p > 0.2 the score ranks noise.
     """
@@ -276,10 +308,13 @@ class TLearner:
         t = df[treat].to_numpy()
         if not np.isin(t, (0, 1)).all():
             raise ValueError(f"{treat} must be 0/1")
+        self.binary_ = _binary(df[y].to_numpy())
         return t == 1
 
     def _make(self, n):
         jobs = self.n_jobs if self.n_jobs is not None else n_threads(n)
+        if isinstance(self.model, str) and self.model in ("logistic", "gbdt") and not self.binary_:
+            return _regressor(self.model, self.categorical_, self.numeric_, jobs)
         return _make(self.model, self.categorical_, self.numeric_, jobs)
 
     def _x(self, df):
@@ -502,6 +537,8 @@ def _default_methods(treat, y, seg):
 
     def shrunk(a):
         r = segment_uplift(a, treat, y, seg)
+        if (np.isfinite(r.uplift) & np.isfinite(r.se)).sum() < 2:  # nothing to shrink across: the pooled ATE
+            return pd.Series(r.attrs["ate"], index=r.index)
         return shrink_effects(r.uplift, r.se).shrunk
 
     return {"raw": raw, "pooled": pooled, "shrunk": shrunk}
@@ -509,15 +546,20 @@ def _default_methods(treat, y, seg):
 
 def split_half_effects(df: pd.DataFrame, treat: str, y: str, seg, R: int = 100, seed: int = 0, *,
                        methods: Mapping[str, Callable[[pd.DataFrame], pd.Series]] | None = None,
-                       unit: str | None = None, boot: bool = True) -> pd.DataFrame:
+                       unit: str | None = None, boot: bool = False) -> pd.DataFrame:
     """Dev rig for segment effects without a labelled truth: predict on half A, score against half B's raw difference.
 
-    Each of the ``R`` reps (``default_rng(seed)``) splits the units in two, stratified by treatment FIRST (each arm
-    halved), then bootstraps each half over its own units (``boot``; never before the split, or one customer lands
-    in both halves, D11 #3). ``unit``: id column when a unit has several rows (default: one row per unit).
+    Each of the ``R`` reps (``default_rng(seed)``) splits the units in two, stratified by treatment (each arm
+    halved); the random split alone gives the rep-to-rep variation. ``boot=True`` also bootstraps each half over its
+    own units after the split (never before it, or one customer lands in both halves, D11 #3); it doubles the
+    sampling noise of both pred and truth, so ``mse_d`` comes out about 3x too high and favours pooling (simulated,
+    8 segments x 4,000 rows: raw / pooled / shrunk mse_d 0.0099 / 0.0063 / 0.0071 with boot against true MSE at
+    half size 0.0035 / 0.0026 / 0.0021; without boot 0.0034 / 0.0024 / 0.0019). ``unit``: id column when a unit has
+    several rows (default: one row per unit).
 
     ``methods``: name -> callable(half_A_frame) -> Series of effects indexed by segment; default ``raw`` (segment
-    difference), ``pooled`` (A's ATE everywhere) and ``shrunk`` (``shrink_effects`` to the precision-weighted mean).
+    difference), ``pooled`` (A's ATE everywhere) and ``shrunk`` (``shrink_effects`` to the precision-weighted mean;
+    the pooled ATE when half A has fewer than two segments with both arms).
     Truth = ``segment_uplift`` on half B; ``truth_var`` = its SE^2, so mean((pred - truth)^2 - truth_var) estimates
     the MSE against the true effect (``summarize_split_half``). Returns a long frame: ``rep``, ``method``, segment
     column(s), ``pred``, ``truth``, ``truth_var``, ``n_treat``, ``n_control`` (half B); segments without both arms in
@@ -551,11 +593,22 @@ def split_half_effects(df: pd.DataFrame, treat: str, y: str, seg, R: int = 100, 
     return res
 
 
-def summarize_split_half(frame: pd.DataFrame, weight: str | None = None) -> pd.DataFrame:
+_SH_COLS = ("rep", "method", "pred", "truth", "truth_var", "n_treat", "n_control")
+
+
+def summarize_split_half(frame: pd.DataFrame, weight: str | None = None, *, common: bool = True) -> pd.DataFrame:
     """Per method over the reps: ``mae``, ``mse_d`` (noise-corrected MSE = mean((pred - truth)^2 - truth_var)) and
-    ``spearman`` with their 2.5 / 97.5% rep quantiles (``*_lo`` / ``*_hi``). ``weight``: a column of segment
-    weights (e.g. deployment sizes merged in), default equal. Paired differences: pivot ``frame`` by rep."""
-    f = frame.dropna(subset=["pred", "truth"])
+    ``spearman`` with their 2.5 / 97.5% rep quantiles (``*_lo`` / ``*_hi``), ``n_seg`` (segments scored per rep).
+    ``weight``: a column of segment weights (e.g. deployment sizes merged in), default equal. ``common``: score
+    every method on the same (rep, segment) cells, those where all methods gave a prediction; otherwise a method
+    that returns NaN for the small, noisy segments (``raw`` when half A misses an arm) is scored on easier cells
+    than the rest. Paired differences: pivot ``frame`` by rep."""
+    f = frame.dropna(subset=["truth"])
+    if common:
+        keys = ["rep"] + [c for c in f.columns if c not in _SH_COLS and c != weight]
+        ok = pd.Series(np.isfinite(f.pred.to_numpy(float)), index=f.index)
+        f = f[ok.groupby([f[k] for k in keys], dropna=False).transform("sum").to_numpy() == f.method.nunique()]
+    f = f.dropna(subset=["pred"])
     w = np.ones(len(f)) if weight is None else f[weight].to_numpy(float)
     e = (f.pred - f.truth).to_numpy()
     f = f.assign(_w=w, _ae=w * np.abs(e), _sd=w * (e ** 2 - f.truth_var.to_numpy()))
@@ -563,7 +616,7 @@ def summarize_split_half(frame: pd.DataFrame, weight: str | None = None) -> pd.D
     for (m, _), g in f.groupby(["method", "rep"], sort=True):
         sp = g.pred.rank().corr(g.truth.rank()) if len(g) > 2 else np.nan
         rows.append({"method": m, "mae": g._ae.sum() / g._w.sum(), "mse_d": g._sd.sum() / g._w.sum(),
-                     "spearman": sp})
+                     "spearman": sp, "n_seg": len(g)})
     per = pd.DataFrame(rows)
     out = {}
     for m, g in per.groupby("method", sort=True):
@@ -571,6 +624,7 @@ def summarize_split_half(frame: pd.DataFrame, weight: str | None = None) -> pd.D
         for c in ("mae", "mse_d", "spearman"):
             row[c] = g[c].mean()
             row[f"{c}_lo"], row[f"{c}_hi"] = g[c].quantile(0.025), g[c].quantile(0.975)
+        row["n_seg"] = g.n_seg.mean()
         row["reps"] = len(g)
         out[m] = row
     return pd.DataFrame.from_dict(out, orient="index").rename_axis("method")
@@ -688,7 +742,8 @@ def heterogeneity_test(df: pd.DataFrame, treat: str, y: str, features: Sequence[
     ratio test of y ~ t + F + t:F against y ~ t + F, logistic. ``scale="additive"``: linear model with HC1 robust
     covariance, Wald test of the t:F terms (the risk-difference scale uplift@k acts on; any outcome). On the logit
     scale a constant risk difference over a varying base rate shows up as interaction in large samples, and vice
-    versa: pick the scale the decision lives on. Both are chi^2 with ``df`` = number of interaction terms.
+    versa: pick the scale the decision lives on. Both are chi^2 with ``df`` = number of interaction terms that are
+    not collinear with the main effects (a category seen in one arm only adds none).
 
     Cochran Q (``q``): the per-group raw effects (``segment_uplift``) over ``seg`` (if given) and over each feature
     (categories as they are, numerics in ``bins`` quantile bins), Q = sum w (u - u_bar)^2 with w = 1 / SE^2,
@@ -710,9 +765,10 @@ def heterogeneity_test(df: pd.DataFrame, treat: str, y: str, features: Sequence[
         raise ValueError("scale='logit' needs a 0/1 outcome; use scale='additive'")
     from scipy.stats import chi2
     F, _names = _design(d, feats)
-    k = F.shape[1]
     base = np.column_stack([np.ones(len(d)), t, F])
     full = np.column_stack([base, F * t[:, None]])
+    # df = interaction terms that add a direction: a level seen in one arm only makes t:F a copy of F
+    k = int(np.linalg.matrix_rank(full) - np.linalg.matrix_rank(base)) if F.shape[1] else 0
     if k == 0:
         stat, p = 0.0, 1.0
     elif scale == "logit":

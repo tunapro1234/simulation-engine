@@ -189,6 +189,66 @@ class TestLearners(unittest.TestCase):
         self.assertEqual(tl.categorical_, ["seg"])
 
 
+class TestReviewEdgeCases(unittest.TestCase):
+    """Adversarial review of e9d02c2: each case gave a wrong number or a crash before the fix."""
+
+    def test_split_half_default_no_boot_matches_noise_level(self):
+        # raw at half size: E[(pred - truth)^2] = 2 v, so mse_d ~ v ~ mean(truth_var). A within-half bootstrap
+        # doubles both noises (mse_d ~ 3 v) and made pooling look better than it is.
+        df = _customers(n=8000, het=False, seed=5)
+        ratio = {}
+        for boot in (False, True):
+            fr = M.split_half_effects(df, "t", "y", "seg", R=30, seed=0, boot=boot)
+            ratio[boot] = M.summarize_split_half(fr).loc["raw", "mse_d"] / fr.truth_var.mean()
+        self.assertTrue(0.5 < ratio[False] < 1.6, ratio)
+        self.assertGreater(ratio[True], 2.0, ratio)
+        self.assertFalse(M.split_half_effects(df, "t", "y", "seg", R=1).attrs["boot"])
+
+    def test_tiny_half_shrunk_falls_back_to_pooled(self):
+        tiny = pd.DataFrame({"g": list("aaaabbbbcc"), "t": [1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
+                             "y": [1, 0, 0, 1, 1, 1, 0, 0, 1, 0]})
+        fr = M.split_half_effects(tiny, "t", "y", "g", R=5, seed=0)   # raised "need more than 1 usable estimates"
+        self.assertEqual(set(fr.method), {"raw", "pooled", "shrunk"})
+
+    def test_summary_scores_methods_on_common_cells(self):
+        fr = pd.DataFrame({"rep": 0, "method": ["raw", "pooled"] * 3, "seg": ["a", "a", "b", "b", "c", "c"],
+                           "pred": [0.0, 0.0, 0.0, 0.0, np.nan, 0.0], "truth": [0.0, 0.0, 0.0, 0.0, 9.0, 9.0],
+                           "truth_var": 0.0, "n_treat": 5, "n_control": 5})
+        s = M.summarize_split_half(fr)
+        self.assertEqual(s.loc["pooled", "mae"], s.loc["raw", "mae"])   # pooled was charged for "c", raw was not
+        self.assertEqual(s.loc["pooled", "n_seg"], 2)
+        self.assertEqual(M.summarize_split_half(fr, common=False).loc["pooled", "n_seg"], 3)
+
+    def test_count_outcome_uses_regressor(self):
+        warnings.simplefilter("ignore")
+        rng = np.random.default_rng(6)
+        n = 6000
+        df = pd.DataFrame({"x": rng.normal(size=n), "t": rng.integers(0, 2, n)})
+        df["y"] = rng.poisson(1.0 + 0.8 * df.t * (df.x > 0))   # counts: a classifier went multiclass silently
+        for model in ("logistic", "gbdt"):
+            s = M.TLearner(model=model).fit(df, "t", "y", ["x"]).predict(df)
+            self.assertAlmostEqual(s.mean(), 0.4, delta=0.1, msg=model)
+            self.assertGreater(s[df.x > 0.5].mean() - s[df.x < -0.5].mean(), 0.4, model)
+        from sklearn.linear_model import LogisticRegression
+        with self.assertRaises(ValueError):
+            M.TLearner(model=LogisticRegression()).fit(df, "t", "y", ["x"]).predict(df)
+
+    def test_metrics_nan_score_and_one_arm(self):
+        d = _customers(n=500)
+        with self.assertRaises(ValueError):   # NaN ranked first in the descending sort
+            M.qini(d.y, d.t, d.x1.where(d.x1 > 0))
+        with self.assertRaises(ValueError):
+            M.uplift_at_k(d.y, d.t, d.x1.where(d.x1 > 0))
+        self.assertTrue(np.isnan(M.qini(d.y, np.ones(len(d)), d.x1)))   # was a finite number
+        self.assertTrue(np.isnan(M.auuc(d.y, np.zeros(len(d)), d.x1)))
+
+    def test_het_df_counts_only_identified_interactions(self):
+        d = _customers(n=3000, het=False, seed=7)
+        d.loc[(d.t == 1) & (d.x2 > 1.5), "seg"] = "only_treated"   # t:seg=only_treated is a copy of seg=only_treated
+        for scale in ("logit", "additive"):
+            self.assertEqual(M.heterogeneity_test(d, "t", "y", ["seg"], scale=scale).df, 3, scale)
+
+
 class TestMetricsExported(unittest.TestCase):
     def test_same_objects_as_bench(self):
         from simengine.bench.tasks import uplift as B
